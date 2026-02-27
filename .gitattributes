@@ -1,0 +1,10 @@
+# Normaliza line endings automaticamente
+* text=auto eol=lf
+
+# Binários — sem conversão
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
+*.crx binary
+*.zip binary

@@ -1,0 +1,254 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ─── CSS Variables ────────────────────────────────────────────── */
+:root {
+  --bg-primary:      #000000;
+  --bg-secondary:    #0a0a0a;
+  --bg-tertiary:     #141414;
+  --border-default:  rgba(255, 255, 255, 0.12);
+  --border-light:    rgba(255, 255, 255, 0.08);
+  --border-lighter:  rgba(255, 255, 255, 0.06);
+  --text-primary:    #ffffff;
+  --text-secondary:  #a1a1aa;
+  --text-tertiary:   #71717a;
+  --action:          #facc15;
+  --action-hover:    #eab308;
+  --success:         #22c55e;
+  --error:           #ef4444;
+  --info:            #3b82f6;
+
+  /* shadcn/ui vars */
+  --background:    0 0% 0%;
+  --foreground:    0 0% 100%;
+  --card:          0 0% 4%;
+  --card-foreground: 0 0% 100%;
+  --popover:       0 0% 4%;
+  --popover-foreground: 0 0% 100%;
+  --primary:       51 100% 54%;
+  --primary-foreground: 0 0% 0%;
+  --secondary:     0 0% 8%;
+  --secondary-foreground: 0 0% 100%;
+  --muted:         0 0% 8%;
+  --muted-foreground: 0 0% 44%;
+  --accent:        0 0% 8%;
+  --accent-foreground: 0 0% 100%;
+  --destructive:   0 84% 60%;
+  --destructive-foreground: 0 0% 100%;
+  --border:        0 0% 100% / 0.08;
+  --input:         0 0% 100% / 0.08;
+  --ring:          51 100% 54%;
+  --radius:        10px;
+}
+
+/* ─── Base Reset ───────────────────────────────────────────────── */
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ─── Transições Globais ───────────────────────────────────────── */
+*,
+*::before,
+*::after {
+  transition-property: color, background-color, border-color, opacity, box-shadow, transform, filter;
+  transition-duration: 200ms;
+  transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* ─── Glass Morphism ───────────────────────────────────────────── */
+@layer components {
+  .glass {
+    background: rgba(10, 10, 10, 0.80);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+  }
+
+  .glass-light {
+    background: rgba(20, 20, 20, 0.70);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+  }
+
+  .glass-card {
+    background: var(--bg-secondary);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 14px;
+  }
+
+  /* ─── Elevation ─────────────────────────────────────────────── */
+  .elevation-1 {
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+  }
+
+  .elevation-2 {
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+  }
+
+  /* ─── Gradient Fade ─────────────────────────────────────────── */
+  .gradient-fade {
+    background: linear-gradient(180deg, rgba(0,0,0,0) 0%, rgba(0,0,0,0.8) 100%);
+  }
+
+  /* ─── Botões ────────────────────────────────────────────────── */
+  .btn-primary {
+    @apply bg-action text-black font-medium text-btn rounded-md px-4 py-2;
+    @apply hover:bg-action-hover active:scale-[0.98];
+  }
+
+  .btn-secondary {
+    @apply bg-transparent border border-white/10 text-white font-medium text-btn rounded-md px-4 py-2;
+    @apply hover:bg-white/[0.08] active:scale-[0.98];
+  }
+
+  .btn-ghost {
+    @apply bg-transparent border-none text-text-secondary font-medium text-btn rounded-md px-3 py-2;
+    @apply hover:text-white hover:bg-white/5 active:scale-[0.98];
+  }
+
+  /* ─── Inputs ────────────────────────────────────────────────── */
+  .input-base {
+    @apply bg-bg-secondary border border-white/8 text-white rounded-md px-3 py-2 text-body;
+    @apply focus:outline-none focus:border-action focus:ring-1 focus:ring-action/30;
+    @apply placeholder:text-text-tertiary;
+  }
+
+  /* ─── Cards ─────────────────────────────────────────────────── */
+  .card-base {
+    @apply bg-bg-secondary border border-white/8 rounded-lg p-4;
+    @apply hover:border-white/15 hover:bg-bg-tertiary;
+  }
+
+  /* ─── Badges / Tags ─────────────────────────────────────────── */
+  .badge {
+    @apply inline-flex items-center bg-white/8 text-white text-xs font-medium;
+    @apply rounded px-2 py-0.5 gap-1;
+  }
+
+  .badge-yellow {
+    @apply badge bg-action/15 text-action;
+  }
+
+  .badge-green {
+    @apply badge bg-success/15 text-success;
+  }
+
+  .badge-red {
+    @apply badge bg-error/15 text-error;
+  }
+
+  .badge-blue {
+    @apply badge bg-info/15 text-info;
+  }
+
+  /* ─── Scrollbar ─────────────────────────────────────────────── */
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255,255,255,0.15) transparent;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 4px;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background: rgba(255,255,255,0.15);
+    border-radius: 2px;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-thumb:hover {
+    background: rgba(255,255,255,0.25);
+  }
+
+  /* ─── Divider ───────────────────────────────────────────────── */
+  .divider {
+    @apply border-t border-white/8 my-3;
+  }
+
+  /* ─── Tooltip ───────────────────────────────────────────────── */
+  .tooltip {
+    @apply glass-light text-white text-xs rounded-md px-2.5 py-1.5;
+    @apply max-w-[200px] shadow-elevation-2 pointer-events-none;
+  }
+
+  /* ─── Stagger animation helper ──────────────────────────────── */
+  .stagger-item {
+    @apply animate-stagger-in;
+    animation-fill-mode: both;
+  }
+
+  /* ─── MindDock Popup container ──────────────────────────────── */
+  .popup-container {
+    width: 380px;
+    min-height: 520px;
+    max-height: 600px;
+    @apply bg-bg overflow-hidden flex flex-col;
+  }
+
+  /* ─── Sidebar / Sidepanel container ────────────────────────── */
+  .sidepanel-container {
+    width: 100%;
+    height: 100vh;
+    @apply bg-bg overflow-hidden flex flex-col;
+  }
+
+  /* ─── Section header ────────────────────────────────────────── */
+  .section-header {
+    @apply flex items-center justify-between px-4 py-3;
+    @apply border-b border-white/8;
+  }
+
+  /* ─── Empty state ───────────────────────────────────────────── */
+  .empty-state {
+    @apply flex flex-col items-center justify-center gap-3 py-12 px-6 text-center;
+  }
+
+  /* ─── Keyboard shortcut badge ───────────────────────────────── */
+  .kbd {
+    @apply inline-flex items-center justify-center;
+    @apply bg-white/8 border border-white/10 text-text-secondary text-xs;
+    @apply rounded px-1.5 py-0.5 font-mono;
+  }
+}
+
+/* ─── Animations ───────────────────────────────────────────────── */
+@layer utilities {
+  .animate-delay-75  { animation-delay: 75ms; }
+  .animate-delay-100 { animation-delay: 100ms; }
+  .animate-delay-150 { animation-delay: 150ms; }
+  .animate-delay-200 { animation-delay: 200ms; }
+  .animate-delay-300 { animation-delay: 300ms; }
+}
+
+/* ─── Injected UI (NotebookLM overlay) ────────────────────────── */
+#minddock-root {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  font-size: 14px;
+  color: #ffffff;
+  -webkit-font-smoothing: antialiased;
+  z-index: 999999;
+}
+
+/* Overlay de highlight no web-clipper */
+#minddock-clipper-btn {
+  position: fixed;
+  z-index: 999998;
+  animation: fade-in 0.15s cubic-bezier(0.4, 0, 0.2, 1);
+}
