@@ -6,6 +6,7 @@ import { subscriptionManager } from "./subscription"
 import { aiService } from "~/services/ai-service"
 import { exportService } from "~/services/export-service"
 import { zettelkastenService } from "~/services/zettelkasten"
+import { threadService } from "~/services/thread-service"
 import {
   FIXED_STORAGE_KEYS,
   MESSAGE_ACTIONS,
@@ -53,8 +54,17 @@ class MessageRouter {
     this.register("MINDDOCK_CHECK_SUBSCRIPTION", this.handleCheckSubscription)
     this.register("MINDDOCK_IMPROVE_PROMPT", this.handleImprovePrompt)
     this.register("MINDDOCK_ATOMIZE_NOTE", this.handleAtomizeNote)
+    this.register(MESSAGE_ACTIONS.ATOMIZE_PREVIEW, this.handleAtomizePreview)
+    this.register(MESSAGE_ACTIONS.SAVE_ATOMIC_NOTES, this.handleSaveAtomicNotes)
+    this.register(MESSAGE_ACTIONS.PROMPT_OPTIONS, this.handlePromptOptions)
     this.register("MINDDOCK_EXPORT_SOURCES", this.handleExportSources)
     this.register("MINDDOCK_HIGHLIGHT_SNIPE", this.handleHighlightSnipe)
+    this.register(MESSAGE_ACTIONS.THREAD_LIST, this.handleThreadList)
+    this.register(MESSAGE_ACTIONS.THREAD_CREATE, this.handleThreadCreate)
+    this.register(MESSAGE_ACTIONS.THREAD_DELETE, this.handleThreadDelete)
+    this.register(MESSAGE_ACTIONS.THREAD_RENAME, this.handleThreadRename)
+    this.register(MESSAGE_ACTIONS.THREAD_MESSAGES, this.handleThreadMessages)
+    this.register(MESSAGE_ACTIONS.THREAD_SAVE_MESSAGES, this.handleThreadSaveMessages)
   }
 
   private register(command: string, handler: Handler): void {
@@ -97,7 +107,10 @@ class MessageRouter {
         return
       }
 
-      const errorMsg = err instanceof Error ? err.message : "Erro desconhecido"
+      const errorMsg =
+        err instanceof Error
+          ? err.message
+          : (err as { message?: string })?.message ?? "Erro desconhecido"
       console.error(`[MindDock Router] ${action}:`, err)
       sendResponse(
         this.normalizeResponse({
@@ -546,6 +559,55 @@ class MessageRouter {
     return this.ok({ improved })
   }
 
+  private async handlePromptOptions(payload: unknown): Promise<StandardResponse> {
+    const { prompt } = payload as { prompt: string }
+    const options = await aiService.generatePromptOptions(prompt)
+    return this.ok({ options })
+  }
+
+  // ─── Focus Threads ─────────────────────────────────────────────────────────
+
+  private async handleThreadList(payload: unknown): Promise<StandardResponse> {
+    const { userId, notebookId } = payload as { userId: string; notebookId: string }
+    const threads = await threadService.getThreads(userId, notebookId)
+    return this.ok({ threads })
+  }
+
+  private async handleThreadCreate(payload: unknown): Promise<StandardResponse> {
+    const { userId, notebookId, name } = payload as {
+      userId: string; notebookId: string; name: string
+    }
+    const thread = await threadService.createThread(userId, notebookId, name)
+    return this.ok({ thread })
+  }
+
+  private async handleThreadDelete(payload: unknown): Promise<StandardResponse> {
+    const { threadId } = payload as { threadId: string }
+    await threadService.deleteThread(threadId)
+    return this.ok({})
+  }
+
+  private async handleThreadRename(payload: unknown): Promise<StandardResponse> {
+    const { threadId, name } = payload as { threadId: string; name: string }
+    const thread = await threadService.renameThread(threadId, name)
+    return this.ok({ thread })
+  }
+
+  private async handleThreadMessages(payload: unknown): Promise<StandardResponse> {
+    const { threadId } = payload as { threadId: string }
+    const messages = await threadService.getMessages(threadId)
+    return this.ok({ messages })
+  }
+
+  private async handleThreadSaveMessages(payload: unknown): Promise<StandardResponse> {
+    const { threadId, messages } = payload as {
+      threadId: string
+      messages: Array<{ role: "user" | "assistant"; content: string }>
+    }
+    await threadService.saveMessages(threadId, messages)
+    return this.ok({})
+  }
+
   private async handleAtomizeNote(payload: unknown): Promise<StandardResponse> {
     const { content } = payload as { content: string }
     const canUseZettel = await subscriptionManager.canUseFeature("zettelkasten")
@@ -615,6 +677,36 @@ class MessageRouter {
     await storageManager.incrementUsage("captures")
 
     return this.ok({ notebookId: resolvedNotebookId, sourceTitle })
+  }
+
+  private async handleAtomizePreview(payload: unknown): Promise<StandardResponse> {
+    const { content } = payload as { content: string }
+    if (!content?.trim()) {
+      return this.fail("Conteudo vazio para atomizacao.")
+    }
+    const notes = await aiService.atomizeContent(content)
+    return this.ok({ notes })
+  }
+
+  private async handleSaveAtomicNotes(payload: unknown): Promise<StandardResponse> {
+    const { notes } = payload as {
+      notes: Array<{ title: string; content: string; tags: string[]; source?: string }>
+    }
+    if (!Array.isArray(notes) || notes.length === 0) {
+      return this.fail("Nenhuma nota para salvar.")
+    }
+    const user = await authManager.getCurrentUser()
+    if (!user) {
+      return this.fail("Nao autenticado.")
+    }
+    const sanitized = notes.map((n) => ({
+      title: String(n.title ?? "").trim() || "Nota sem titulo",
+      content: String(n.content ?? "").trim(),
+      tags: Array.isArray(n.tags) ? n.tags.map((t) => String(t).trim()).filter(Boolean) : [],
+      source: "zettel_maker"
+    }))
+    const saved = await zettelkastenService.saveAtomicNotes(user.id, sanitized)
+    return this.ok({ count: saved.length, notes: saved })
   }
 
   private async appendTextSourceWithRpc(

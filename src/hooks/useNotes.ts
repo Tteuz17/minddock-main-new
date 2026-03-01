@@ -17,7 +17,21 @@ export function useNotes() {
       const data = await zettelkastenService.getNotes(user.id)
       setNotes(data)
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Erro ao carregar notas")
+      const msg = err instanceof Error ? err.message : ""
+      // Erros de auth/RLS (ex: usuário dev sem sessão Supabase real) → lista vazia silenciosa
+      const isAuthError =
+        msg.toLowerCase().includes("jwt") ||
+        msg.toLowerCase().includes("auth") ||
+        msg.toLowerCase().includes("anon") ||
+        msg.toLowerCase().includes("row-level") ||
+        msg.toLowerCase().includes("permission") ||
+        msg.toLowerCase().includes("not authenticated") ||
+        msg.toLowerCase().includes("pgrst")
+      if (isAuthError) {
+        setNotes([])
+      } else {
+        setError(msg || "Erro ao carregar notas")
+      }
     } finally {
       setIsLoading(false)
     }
@@ -51,5 +65,39 @@ export function useNotes() {
     setNotes((prev) => prev.filter((n) => n.id !== noteId))
   }, [])
 
-  return { notes, isLoading, error, refetch: fetchNotes, createNote, updateNote, deleteNote }
+  const atomizePreview = useCallback(
+    async (content: string) => {
+      const response = await chrome.runtime.sendMessage({
+        command: "MINDDOCK_ATOMIZE_PREVIEW",
+        payload: { content }
+      })
+      if (!response?.success) {
+        throw new Error(response?.error ?? "Erro ao atomizar conteudo")
+      }
+      return response.payload?.notes ?? response.data?.notes ?? []
+    },
+    []
+  )
+
+  const saveAtomicNotes = useCallback(
+    async (notesToSave: Array<{ title: string; content: string; tags: string[] }>) => {
+      const response = await chrome.runtime.sendMessage({
+        command: "MINDDOCK_SAVE_ATOMIC_NOTES",
+        payload: { notes: notesToSave }
+      })
+      if (!response?.success) {
+        throw new Error(response?.error ?? "Erro ao salvar notas")
+      }
+      const savedNotes = response.payload?.notes ?? response.data?.notes ?? []
+      setNotes((prev) => [...savedNotes, ...prev])
+      return savedNotes
+    },
+    []
+  )
+
+  return {
+    notes, isLoading, error, refetch: fetchNotes,
+    createNote, updateNote, deleteNote,
+    atomizePreview, saveAtomicNotes
+  }
 }

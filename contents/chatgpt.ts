@@ -8,6 +8,7 @@ import type { AIChatMessage } from "~/lib/types"
 import { sendChatCaptureToBackground } from "./common/chat-capture"
 import { installHighlightMessageListener } from "./common/highlight-handler"
 import { createMindDockButton, showMindDockToast } from "./common/minddock-ui"
+import { injectAtomizeButton } from "./common/atomize-button"
 
 export const config: PlasmoCSConfig = {
   matches: ["https://chat.openai.com/*", "https://chatgpt.com/*"],
@@ -101,10 +102,22 @@ function injectCaptureButton(messageElement: Element) {
   messageElement.appendChild(wrapper)
 }
 
+function injectAtomize(messageElement: Element) {
+  const actionsArea = messageElement.querySelector(SELECTORS.messageActions)
+  injectAtomizeButton(
+    messageElement,
+    () => (messageElement as HTMLElement).innerText.trim(),
+    actionsArea
+  )
+}
+
 function injectAllButtons() {
   document
     .querySelectorAll(`${SELECTORS.assistantMessage}:not([${INJECTED_ATTR}])`)
     .forEach(injectCaptureButton)
+  document
+    .querySelectorAll(`${SELECTORS.assistantMessage}:not([data-minddock-atomize])`)
+    .forEach(injectAtomize)
 }
 
 const observer = new MutationObserver(() => injectAllButtons())

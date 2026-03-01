@@ -1,9 +1,26 @@
-import { useEffect, useMemo, useState } from "react"
-import { Search } from "lucide-react"
+import { useCallback, useEffect, useMemo, useState } from "react"
+import {
+  Download,
+  FileText,
+  Files,
+  Globe,
+  LayoutGrid,
+  ListFilter,
+  type LucideIcon,
+  RefreshCw,
+  Search,
+  Trash2,
+  Type,
+  Youtube
+} from "lucide-react"
 import {
   SOURCE_PANEL_RESET_EVENT,
   SOURCE_PANEL_TOGGLE_EVENT,
   type SourceFilterType,
+  clearNativeSourceSearchInputs,
+  dispatchSourcePanelExport,
+  dispatchSourcePanelRefresh,
+  dispatchSourcePanelReset,
   dispatchSourcePanelToggle,
   ensureOriginalDisplay,
   inferSourceType,
@@ -12,21 +29,33 @@ import {
 
 const SAVED_VIEW_KEY = "minddock:source-panel-saved-view"
 
-const FILTERS: Array<{ type: SourceFilterType; label: string }> = [
-  { type: "All", label: "Todos" },
-  { type: "PDFs", label: "PDFs" },
-  { type: "GDocs", label: "GDocs" },
-  { type: "Web", label: "Web" },
-  { type: "Text", label: "Texto" },
-  { type: "YouTube", label: "YouTube" }
+const FILTERS: Array<{ type: SourceFilterType; label: string; icon: LucideIcon }> = [
+  { type: "All", label: "Todos", icon: LayoutGrid },
+  { type: "PDFs", label: "PDFs", icon: FileText },
+  { type: "GDocs", label: "GDocs", icon: Files },
+  { type: "Web", label: "Web", icon: Globe },
+  { type: "Text", label: "Texto", icon: Type },
+  { type: "YouTube", label: "YouTube", icon: Youtube }
 ]
 
 export function SourceFilterPanel() {
   const [searchText, setSearchText] = useState("")
   const [activeFilters, setActiveFilters] = useState<Set<SourceFilterType>>(new Set(["All"]))
+  const [areFiltersOpen, setAreFiltersOpen] = useState(false)
   const [isVisible, setIsVisible] = useState(true)
 
   const activeFilterList = useMemo(() => Array.from(activeFilters), [activeFilters])
+  const brandMarkSrc = new URL(
+    "../../public/images/logo/logotipo minddock.png",
+    import.meta.url
+  ).href
+  const resetPanelState = useCallback(() => {
+    setSearchText("")
+    setActiveFilters(new Set(["All"]))
+    setAreFiltersOpen(false)
+    setIsVisible(true)
+    dispatchSourcePanelToggle(true)
+  }, [])
 
   useEffect(() => {
     try {
@@ -69,10 +98,7 @@ export function SourceFilterPanel() {
     }
 
     const onReset = () => {
-      setSearchText("")
-      setActiveFilters(new Set(["All"]))
-      setIsVisible(true)
-      dispatchSourcePanelToggle(true)
+      resetPanelState()
     }
 
     window.addEventListener(SOURCE_PANEL_TOGGLE_EVENT, onToggle as EventListener)
@@ -82,7 +108,7 @@ export function SourceFilterPanel() {
       window.removeEventListener(SOURCE_PANEL_TOGGLE_EVENT, onToggle as EventListener)
       window.removeEventListener(SOURCE_PANEL_RESET_EVENT, onReset as EventListener)
     }
-  }, [])
+  }, [resetPanelState])
 
   useEffect(() => {
     applyFilters(activeFilterList, searchText)
@@ -125,51 +151,146 @@ export function SourceFilterPanel() {
     }
   }
 
+  const openExportPanel = () => {
+    dispatchSourcePanelExport()
+  }
+
+  const refreshSources = () => {
+    dispatchSourcePanelRefresh()
+  }
+
+  const toggleFilters = () => {
+    setAreFiltersOpen((current) => !current)
+  }
+
+  const resetAllSources = () => {
+    clearNativeSourceSearchInputs()
+    dispatchSourcePanelReset()
+  }
+
   if (!isVisible) {
     return null
   }
 
   return (
-    <section className="mt-2 w-full rounded-xl border border-white/15 bg-black/45 p-2.5">
-      <div className="relative mb-2.5 flex items-center gap-2 rounded-lg border border-white/15 bg-white/5 px-2.5 py-2">
-        <Search size={13} strokeWidth={1.7} className="text-text-tertiary" />
-        <input
-          type="search"
-          value={searchText}
-          onChange={(event) => setSearchText(event.target.value)}
-          placeholder="Fontes de pesquisa..."
-          className="w-full bg-transparent text-xs text-white outline-none placeholder:text-text-tertiary"
-        />
-      </div>
+    <section className="relative mt-2 w-full overflow-visible rounded-[22px] border border-white/[0.06] bg-[#08090b] p-3.5 shadow-[0_12px_28px_rgba(0,0,0,0.18)]">
+      <div
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-0 rounded-[inherit] opacity-90"
+        style={{
+          backgroundImage: "radial-gradient(circle, rgba(255, 255, 255, 0.07) 1px, transparent 1px)",
+          backgroundSize: "14px 14px",
+          backgroundPosition: "0 0"
+        }}
+      />
+      <div
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-[1px] rounded-[21px] border border-white/[0.03]"
+      />
+      <img
+        src={brandMarkSrc}
+        alt="MindDock"
+        className={[
+          "pointer-events-none absolute z-0 h-[14px] w-[14px] opacity-80 transition-all duration-300",
+          areFiltersOpen ? "bottom-3 left-[20px]" : "left-[20px] top-[58px]"
+        ].join(" ")}
+      />
 
-      <div className="flex flex-wrap items-center gap-2">
-        {FILTERS.map((filter) => {
-          const isActive = activeFilters.has(filter.type)
+      <div className="relative z-[1] flex flex-col gap-3">
+        <div className="flex items-center gap-2">
+          <div className="relative flex min-w-0 flex-1 items-center gap-2 rounded-[18px] border border-white/[0.06] bg-[#0f1114] px-3 py-2.5">
+            <Search size={14} strokeWidth={1.7} className="shrink-0 text-[#7e8590]" />
+            <input
+              type="search"
+              value={searchText}
+              onChange={(event) => setSearchText(event.target.value)}
+              placeholder="Fontes de pesquisa..."
+              className="w-full bg-transparent text-[12px] text-white outline-none placeholder:text-[#6f7580]"
+            />
+          </div>
 
-          return (
-            <button
-              key={filter.type}
-              type="button"
-              onClick={() => toggleFilter(filter.type)}
-              className={[
-                "rounded-full border px-3 py-1 text-[11px] font-medium transition-colors",
-                isActive
-                  ? "border-blue-400/70 bg-blue-600/25 text-blue-100"
-                  : "border-white/20 bg-white/5 text-text-secondary hover:text-white"
-              ].join(" ")}>
-              {filter.label}
-            </button>
-          )
-        })}
+          <div className="inline-flex shrink-0 items-center gap-1 rounded-[16px] border border-white/[0.06] bg-[#0d0f12] p-1">
+            <PanelActionButton title="Exportar fontes visiveis" onClick={openExportPanel}>
+              <Download size={15} strokeWidth={1.8} />
+            </PanelActionButton>
+            <PanelActionButton title="Atualizar fontes Google Docs" onClick={refreshSources}>
+              <RefreshCw size={15} strokeWidth={1.8} />
+            </PanelActionButton>
+            <PanelActionButton
+              title={areFiltersOpen ? "Ocultar filtros" : "Mostrar filtros"}
+              onClick={toggleFilters}
+              active={areFiltersOpen}>
+              <ListFilter size={15} strokeWidth={1.8} />
+            </PanelActionButton>
+            <PanelActionButton title="Limpar filtros e restaurar painel" onClick={resetAllSources}>
+              <Trash2 size={15} strokeWidth={1.8} />
+            </PanelActionButton>
+          </div>
+        </div>
 
-        <button
-          type="button"
-          onClick={saveView}
-          className="ml-auto rounded-full border border-white/25 bg-white/8 px-3 py-1 text-[11px] font-medium text-white hover:bg-white/12">
-          Salvar visualizacao
-        </button>
+        <div
+          className={[
+            "overflow-hidden transition-all duration-200",
+            areFiltersOpen ? "max-h-28 opacity-100" : "max-h-0 opacity-0"
+          ].join(" ")}>
+          <div className="flex flex-wrap items-center gap-2 pt-1">
+          {FILTERS.map((filter) => {
+            const isActive = activeFilters.has(filter.type)
+            const Icon = filter.icon
+
+            return (
+              <button
+                key={filter.type}
+                type="button"
+                onClick={() => toggleFilter(filter.type)}
+                className={[
+                  "inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-[11px] font-medium tracking-[0.01em] transition-colors",
+                  isActive
+                    ? "border-[#facc15]/35 bg-[#2a2208] text-[#fff1a6]"
+                    : "border-white/[0.06] bg-[#101216] text-[#a4acb8] hover:text-white"
+                ].join(" ")}>
+                <Icon size={12} strokeWidth={1.9} className="text-white" />
+                {filter.label}
+              </button>
+            )
+          })}
+
+          <button
+            type="button"
+            onClick={saveView}
+            className="ml-auto rounded-full border border-white/[0.06] bg-[#101216] px-3.5 py-1.5 text-[11px] font-medium text-white transition-colors hover:bg-[#14171c]">
+            Salvar visualizacao
+          </button>
+          </div>
+        </div>
       </div>
     </section>
+  )
+}
+
+function PanelActionButton(props: {
+  title: string
+  onClick: () => void
+  children: JSX.Element
+  active?: boolean
+}) {
+  const { title, onClick, children, active = false } = props
+
+  return (
+    <button
+      type="button"
+      title={title}
+      aria-label={title}
+      aria-pressed={active}
+      onClick={onClick}
+      className={[
+        "inline-flex h-8 w-8 items-center justify-center rounded-[11px] border text-[#8e959e] transition-colors",
+        active
+          ? "border-[#facc15]/30 bg-[#221c08] text-[#facc15]"
+          : "border-white/[0.06] bg-[#131519] hover:bg-[#171a1f] hover:text-white"
+      ].join(" ")}>
+      {children}
+    </button>
   )
 }
 

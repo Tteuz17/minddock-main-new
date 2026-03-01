@@ -1,0 +1,112 @@
+:root {
+  --bg-color: #1d1d1d;
+  --light-color: #444;
+  --dark-color: #000;
+  --icon-color: #65615f;
+}
+
+*,
+*::before,
+*::after {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html {
+  font-size: 62.5%;
+}
+
+body {
+  min-height: 100vh;
+  font-size: 1.6rem;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  background: var(--bg-color);
+}
+
+.text-box {
+  position: absolute;
+  left: 0;
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 12rem;
+  padding: 3rem;
+  width: 65vw;
+  background-color: var(--dark-color);
+  border-radius: 0 50vh 50vh 0;
+  box-shadow: inset 0 0.2em 0 0 var(--light-color);
+}
+
+.text-box > svg {
+  flex-shrink: 0;
+  width: 18rem;
+  fill: var(--icon-color);
+  transform: rotate(70deg);
+}
+
+.text-box > svg:last-of-type {
+  transform: rotate(180deg);
+}
+
+#liquid-metal {
+  position: relative;
+  width: 38.5rem;
+  height: 38.5rem;
+  border-radius: 50%;
+}
+
+#liquid-metal::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 35rem;
+  height: 35rem;
+  background: linear-gradient(var(--light-color), var(--dark-color));
+  border-radius: 50%;
+  box-shadow: inset 0 0.2rem 0.2rem 0.2rem rgba(255, 255, 255, 0.3);
+}
+
+.outline {
+  position: relative;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  width: 39rem;
+  height: 39rem;
+  border-radius: 50%;
+  z-index: 1;
+}
+
+.outline::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  padding: 0.5rem;
+  border-radius: inherit;
+  background: conic-gradient(from 180deg, blue, purple, red, purple, blue);
+  filter: grayscale(1);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  mask-composite: exclude;
+  transition: all 0.3s ease;
+}
+
+.outline:hover::before {
+  padding: 0.5rem;
+  filter: grayscale(0);
+}
+
+.outline .svg-icon {
+  width: 10rem;
+  fill: var(--icon-color);
+  transform: rotate(-45deg);
+}

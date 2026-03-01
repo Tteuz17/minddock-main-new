@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react"
-import { Download, ListFilter, RefreshCw, Trash2, X } from "lucide-react"
+import { ListFilter, X } from "lucide-react"
 import {
   MESSAGE_ACTIONS,
   type StandardResponse
@@ -17,8 +17,8 @@ import {
   type SourceExportRecord
 } from "~/lib/source-download"
 import {
-  clearNativeSourceSearchInputs,
-  dispatchSourcePanelReset,
+  SOURCE_PANEL_EXPORT_EVENT,
+  SOURCE_PANEL_REFRESH_EVENT,
   dispatchSourcePanelToggle,
   extractUrlFromSnippets,
   formatTitleList,
@@ -249,13 +249,6 @@ export function SourceDownloadPanel() {
     dispatchSourcePanelToggle(nextVisible)
   }
 
-  const resetSourcePanelState = (): void => {
-    clearNativeSourceSearchInputs()
-    dispatchSourcePanelReset()
-    dispatchSourcePanelToggle(true)
-    setIsFilterPanelVisible(true)
-  }
-
   const refreshGDocSources = useCallback(async () => {
     if (isSyncingGDocs) {
       return
@@ -333,6 +326,24 @@ export function SourceDownloadPanel() {
       setIsSyncingGDocs(false)
     }
   }, [isOpen, isSyncingGDocs, loadSources])
+
+  useEffect(() => {
+    const onExport = () => {
+      void openModal()
+    }
+
+    const onRefresh = () => {
+      void refreshGDocSources()
+    }
+
+    window.addEventListener(SOURCE_PANEL_EXPORT_EVENT, onExport)
+    window.addEventListener(SOURCE_PANEL_REFRESH_EVENT, onRefresh)
+
+    return () => {
+      window.removeEventListener(SOURCE_PANEL_EXPORT_EVENT, onExport)
+      window.removeEventListener(SOURCE_PANEL_REFRESH_EVENT, onRefresh)
+    }
+  }, [openModal, refreshGDocSources])
 
   const handleDownloadSelected = useCallback(async () => {
     if (isRunningDownload) {
@@ -518,34 +529,12 @@ export function SourceDownloadPanel() {
 
   return (
     <>
-      <div className="inline-flex items-center gap-2 whitespace-nowrap">
-        <ActionIconButton
-          title="Exportar fontes visiveis"
-          onClick={openModal}
-          disabled={isRunningDownload || isLoadingSources}
-          active={isOpen}>
-          <Download size={16} strokeWidth={1.8} />
-        </ActionIconButton>
-
-        <ActionIconButton
-          title={isSyncingGDocs ? "Atualizando Google Docs..." : "Atualizar fontes Google Docs"}
-          onClick={() => {
-            void refreshGDocSources()
-          }}
-          disabled={isSyncingGDocs}
-          active={isSyncingGDocs}>
-          <RefreshCw size={16} strokeWidth={1.8} className={isSyncingGDocs ? "animate-spin" : ""} />
-        </ActionIconButton>
-
+      <div className="liquid-metal-toolbar whitespace-nowrap">
         <ActionIconButton
           title="Mostrar ou ocultar painel de filtros"
           onClick={toggleFilterPanelVisibility}
           active={!isFilterPanelVisible}>
           <ListFilter size={16} strokeWidth={1.8} />
-        </ActionIconButton>
-
-        <ActionIconButton title="Limpar filtros e restaurar painel" onClick={resetSourcePanelState}>
-          <Trash2 size={16} strokeWidth={1.8} />
         </ActionIconButton>
       </div>
 
@@ -743,12 +732,12 @@ function ActionIconButton(props: {
       type="button"
       title={title}
       aria-label={title}
+      aria-pressed={active}
       onClick={onClick}
       disabled={disabled}
+      data-active={active ? "true" : "false"}
       className={[
-        "inline-flex h-6 w-6 items-center justify-center rounded border border-transparent bg-transparent text-slate-200 transition-colors",
-        "hover:border-slate-400/45 hover:bg-slate-700/35",
-        active ? "border-blue-400/75 bg-blue-800/35" : "",
+        "liquid-metal-button",
         disabled ? "cursor-not-allowed opacity-50" : "cursor-pointer"
       ].join(" ")}>
       {children}
