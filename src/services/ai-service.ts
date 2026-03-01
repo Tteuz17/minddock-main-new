@@ -105,6 +105,58 @@ Regras das notas atômicas:
     }
   }
 
+  // ─── Gerar 3 Opções de Prompt (Prompts Ágeis) ─────────────────────────────
+
+  async generatePromptOptions(
+    userPrompt: string
+  ): Promise<Array<{ title: string; prompt: string }>> {
+    const client = this.getClient()
+
+    const systemPrompt = `Você é especialista em engenharia de prompts para o Google NotebookLM.
+O usuário quer perguntar algo ao NotebookLM. Sua tarefa é gerar EXATAMENTE 3 versões otimizadas do prompt dele, cada uma com um ângulo diferente para extrair o máximo do NotebookLM.
+
+Cada variação deve ter uma abordagem distinta:
+1. Versão analítica: pede análise profunda, comparações e evidências das fontes
+2. Versão estruturada: exige formato claro (tópicos, tabelas, passos), objetivo e critérios de qualidade
+3. Versão prática: foca em aplicações reais, exemplos concretos e síntese acionável
+
+Retorne APENAS um JSON array, sem explicações, sem markdown:
+[
+  {"title": "título curto da abordagem (max 40 chars)", "prompt": "prompt completo otimizado"},
+  {"title": "...", "prompt": "..."},
+  {"title": "...", "prompt": "..."}
+]
+
+Regras:
+- Mantenha a intenção original do usuário
+- Cada prompt deve ter entre 80-250 palavras
+- Use português brasileiro
+- O prompt deve ser autocontido (funciona sem contexto extra)`
+
+    const response = await client.messages.create({
+      model: CLAUDE_CONFIG.MODEL_DEFAULT,
+      max_tokens: 1200,
+      system: systemPrompt,
+      messages: [
+        {
+          role: "user",
+          content: `Gere 3 versões otimizadas para este prompt do usuário:\n\n"${userPrompt.slice(0, 600)}"`
+        }
+      ]
+    })
+
+    try {
+      const text = (response.content[0] as { text: string }).text
+      const jsonMatch = text.match(/\[[\s\S]*\]/)
+      if (!jsonMatch) return []
+      const parsed = JSON.parse(jsonMatch[0])
+      return parsed.slice(0, 3)
+    } catch {
+      console.error("[MindDock] Erro ao parsear opções de prompt")
+      return []
+    }
+  }
+
   // ─── Sugerir Links ────────────────────────────────────────────────────────
 
   async suggestLinks(

@@ -16,23 +16,20 @@ interface SubscriptionCache {
 
 class SubscriptionManager {
   async getTier(): Promise<SubscriptionTier> {
-    // Verifica cache
+    // Sempre lê do perfil do usuário (fonte de verdade)
+    // USER_PROFILE já é cacheado em chrome.storage.local — sem chamada de rede
+    const user = await authManager.getCurrentUser()
+    if (user?.subscriptionTier) {
+      return user.subscriptionTier
+    }
+
+    // Fallback: cache de subscription (quando não há usuário logado)
     const cached = await getFromStorage<SubscriptionCache>(STORAGE_KEYS.SUBSCRIPTION)
     if (cached && Date.now() - cached.ts < CACHE_TTL.SUBSCRIPTION) {
       return cached.tier
     }
 
-    // Busca do perfil
-    const user = await authManager.getCurrentUser()
-    const tier = user?.subscriptionTier ?? "free"
-
-    await setInStorage(STORAGE_KEYS.SUBSCRIPTION, {
-      tier,
-      status: user?.subscriptionStatus ?? "inactive",
-      ts: Date.now()
-    })
-
-    return tier
+    return "free"
   }
 
   async getLimits(): Promise<PlanLimits> {

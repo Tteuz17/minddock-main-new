@@ -34,6 +34,13 @@ class AuthManager {
       return profile
     }
 
+    // Sem sessão Supabase — mas preserva perfis dev (id começa com "dev-")
+    const existingProfile = await getFromStorage<UserProfile>(STORAGE_KEYS.USER_PROFILE)
+    if (existingProfile?.id?.startsWith("dev-")) {
+      this.notifyListeners(existingProfile)
+      return existingProfile
+    }
+
     await removeFromStorage(FIXED_STORAGE_KEYS.SUPABASE_SESSION)
     await removeFromStorage(STORAGE_KEYS.USER_PROFILE)
     this.notifyListeners(null)

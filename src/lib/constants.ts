@@ -27,10 +27,12 @@ export const STORAGE_KEYS = {
   TOKEN_EXPIRES_AT: "nexus_token_expires_at",
   USER_PROFILE: "minddock_user_profile",
   SUBSCRIPTION: "minddock_subscription",
+  SIDEPANEL_VIEW: "minddock_sidepanel_view",
   NOTEBOOKS_CACHE: "minddock_notebooks_cache",
   SOURCES_CACHE: "minddock_sources_cache",
   DAILY_USAGE: "minddock_daily_usage",
-  SETTINGS: "minddock_settings"
+  SETTINGS: "minddock_settings",
+  NOTEBOOKLM_UI_ENABLED: "minddock_ui_enabled"
 } as const
 
 // ─── Plans & Limits ─────────────────────────────────────────────────────────

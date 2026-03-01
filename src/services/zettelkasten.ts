@@ -7,6 +7,11 @@ import { getSupabaseClient } from "./supabase-client"
 import { extractWikilinks, TAG_COLORS } from "~/lib/utils"
 import type { Note, GraphData, GraphNode, GraphEdge } from "~/lib/types"
 
+function throwSupabaseError(error: { message?: string; code?: string; details?: string } | null): never {
+  const msg = error?.message || error?.details || `Supabase error ${error?.code ?? ""}`.trim()
+  throw new Error(msg)
+}
+
 class ZettelkastenService {
   private async client() {
     return getSupabaseClient()
@@ -24,7 +29,7 @@ class ZettelkastenService {
       .eq("user_id", userId)
       .order("updated_at", { ascending: false })
 
-    if (error) throw error
+    if (error) throwSupabaseError(error)
 
     return (data ?? []).map(this.mapNote)
   }
@@ -63,7 +68,7 @@ class ZettelkastenService {
       .select()
       .single()
 
-    if (error) throw error
+    if (error) throwSupabaseError(error)
 
     const wikilinks = extractWikilinks(data.content)
     if (wikilinks.length > 0) {
@@ -88,7 +93,7 @@ class ZettelkastenService {
       .select()
       .single()
 
-    if (error) throw error
+    if (error) throwSupabaseError(error)
 
     if (updates.content) {
       const { data: user } = await supabase.auth.getUser()
@@ -107,7 +112,7 @@ class ZettelkastenService {
   async deleteNote(noteId: string): Promise<void> {
     const supabase = await this.client()
     const { error } = await supabase.from("notes").delete().eq("id", noteId)
-    if (error) throw error
+    if (error) throwSupabaseError(error)
   }
 
   async saveAtomicNotes(
@@ -128,7 +133,7 @@ class ZettelkastenService {
       )
       .select()
 
-    if (error) throw error
+    if (error) throwSupabaseError(error)
     return (data ?? []).map((n) => this.mapNote({ ...n, outgoing: [], incoming: [] }))
   }
 
@@ -214,7 +219,7 @@ class ZettelkastenService {
       .order("updated_at", { ascending: false })
       .limit(20)
 
-    if (error) throw error
+    if (error) throwSupabaseError(error)
     return (data ?? []).map((n) =>
       this.mapNote({ ...n, user_id: userId, notebook_id: null, outgoing: [], incoming: [] })
     )

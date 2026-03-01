@@ -2,10 +2,11 @@ import type { PlasmoCSConfig } from "plasmo"
 import { createRoot, type Root } from "react-dom/client"
 import "~/styles/globals.css"
 import { AgilePromptsBar } from "../../contents/notebooklm/AgilePromptsBar"
+import { FocusThreadsBar } from "../../contents/notebooklm/FocusThreadsBar"
 import { SourceDownloadPanel } from "../../contents/notebooklm/SourceDownloadPanel"
 import { SourceFilterPanel } from "../../contents/notebooklm/SourceFilterPanel"
 import { ZettelButton } from "../../contents/notebooklm/ZettelButton"
-import { isVisible, resolveSourceActionsHost, resolveSourceFiltersHost } from "../../contents/notebooklm/sourceDom"
+import { getDeepRoots, isVisible, resolveSourceActionsHost, resolveSourceFiltersHost } from "../../contents/notebooklm/sourceDom"
 
 export const config: PlasmoCSConfig = {
   matches: ["https://notebooklm.google.com/*"],
@@ -50,10 +51,12 @@ const TARGETS: readonly InjectionTarget[] = [
 
 const mountedRoots = new Map<string, MountedRootRecord>()
 const AGILE_BAR_ROOT_ID = "minddock-agile-bar-root"
+const FOCUS_THREADS_ROOT_ID = "minddock-focus-threads-root"
 
 let domObserver: MutationObserver | null = null
 let refreshTimer: number | null = null
 let agilePositionTimer: number | null = null
+let focusThreadsPositionTimer: number | null = null
 let zettelObserver: MutationObserver | null = null
 
 function isNotebookWorkspaceRoute(): boolean {
@@ -144,6 +147,8 @@ function cleanupDetachedRoots(): void {
   }
 }
 
+// ─── Agile Bar ────────────────────────────────────────────────────────────────
+
 function mountAgileBar(): void {
   let rootElement = document.getElementById(AGILE_BAR_ROOT_ID) as HTMLElement | null
   if (!rootElement) {
@@ -219,6 +224,87 @@ function updateAgileBarPosition(): void {
   rootElement.style.bottom = `${offset}px`
 }
 
+// ─── Focus Threads Bar ────────────────────────────────────────────────────────
+
+/**
+ * Encontra o label "Conversa" no header do NotebookLM (atravessa Shadow DOM).
+ * Usado para posicionar o overlay das Focus Threads ao lado dele.
+ */
+function resolveConversaLabel(): HTMLElement | null {
+  // Palavras que podem aparecer no header da seção de chat dependendo do idioma
+  const CHAT_LABELS = ["Conversa", "Chat", "Conversation"]
+
+  for (const root of getDeepRoots()) {
+    if (!("querySelectorAll" in root)) continue
+    const elements = Array.from(
+      (root as Document | ShadowRoot).querySelectorAll<HTMLElement>("span, div, h2, h3, button, a, [role='tab']")
+    )
+    for (const el of elements) {
+      if (!isVisible(el)) continue
+      const text = el.textContent?.trim() ?? ""
+      if (!CHAT_LABELS.some((label) => text === label)) continue
+      const rect = el.getBoundingClientRect()
+      // Deve estar na faixa do header: top < 120px, altura compacta
+      if (rect.top > 120 || rect.height > 80) continue
+      return el
+    }
+  }
+  return null
+}
+
+function mountFocusThreadsBar(): void {
+  if (!isNotebookWorkspaceRoute()) {
+    console.debug("[MindDock] FocusThreadsBar: not a notebook route, skipping")
+    return
+  }
+
+  let rootElement = document.getElementById(FOCUS_THREADS_ROOT_ID) as HTMLElement | null
+  if (!rootElement) {
+    rootElement = document.createElement("div")
+    rootElement.id = FOCUS_THREADS_ROOT_ID
+    rootElement.style.position = "fixed"
+    rootElement.style.zIndex = "2147483644"
+    rootElement.style.pointerEvents = "auto"
+    rootElement.style.overflow = "visible"
+    document.body.appendChild(rootElement)
+    console.debug("[MindDock] FocusThreadsBar: created root element")
+  }
+
+  const mounted = mountedRoots.get("focus-threads")
+  if (mounted) {
+    mounted.root.render(<FocusThreadsBar />)
+    updateFocusThreadsBarPosition()
+    return
+  }
+
+  const root = createRoot(rootElement)
+  root.render(<FocusThreadsBar />)
+  mountedRoots.set("focus-threads", { root, host: rootElement })
+  updateFocusThreadsBarPosition()
+}
+
+function updateFocusThreadsBarPosition(): void {
+  const rootElement = document.getElementById(FOCUS_THREADS_ROOT_ID)
+  if (!(rootElement instanceof HTMLElement)) return
+
+  const label = resolveConversaLabel()
+  if (label) {
+    const rect = label.getBoundingClientRect()
+    rootElement.style.top = `${rect.top + (rect.height - 28) / 2}px`
+    rootElement.style.left = `${rect.right + 16}px`
+    rootElement.style.transform = "none"
+    console.debug("[MindDock] FocusThreadsBar: positioned after label", rect)
+  } else {
+    // Fallback bem visível: centro exato da tela, 130px do topo
+    rootElement.style.top = "130px"
+    rootElement.style.left = "50%"
+    rootElement.style.transform = "translateX(-50%)"
+    console.debug("[MindDock] FocusThreadsBar: using fallback position (label not found)")
+  }
+}
+
+// ─── Zettel Buttons ───────────────────────────────────────────────────────────
+
 function injectZettelButtons(): void {
   const responseNodes = document.querySelectorAll("[data-testid='response-text']:not([data-minddock])")
 
@@ -238,10 +324,14 @@ function injectZettelButtons(): void {
   })
 }
 
+// ─── Orchestration ────────────────────────────────────────────────────────────
+
 function refreshUi(): void {
   mountTargets()
   mountAgileBar()
+  mountFocusThreadsBar()
   updateAgileBarPosition()
+  updateFocusThreadsBarPosition()
   injectZettelButtons()
 }
 
@@ -287,8 +377,13 @@ function startObservers(): void {
     agilePositionTimer = window.setInterval(updateAgileBarPosition, 700)
   }
 
+  if (focusThreadsPositionTimer === null) {
+    focusThreadsPositionTimer = window.setInterval(updateFocusThreadsBarPosition, 700)
+  }
+
   window.addEventListener("resize", updateAgileBarPosition)
   window.addEventListener("scroll", updateAgileBarPosition, true)
+  window.addEventListener("resize", updateFocusThreadsBarPosition)
 }
 
 function cleanup(): void {
@@ -308,14 +403,20 @@ function cleanup(): void {
     agilePositionTimer = null
   }
 
+  if (focusThreadsPositionTimer !== null) {
+    window.clearInterval(focusThreadsPositionTimer)
+    focusThreadsPositionTimer = null
+  }
+
   window.removeEventListener("resize", updateAgileBarPosition)
   window.removeEventListener("scroll", updateAgileBarPosition, true)
+  window.removeEventListener("resize", updateFocusThreadsBarPosition)
 
   for (const [key, mounted] of mountedRoots.entries()) {
     mounted.root.unmount()
     mountedRoots.delete(key)
 
-    if (key === "agile-bar") {
+    if (key === "agile-bar" || key === "focus-threads") {
       mounted.host.remove()
     }
   }

@@ -7,6 +7,7 @@ import type { AIChatMessage } from "~/lib/types"
 import { sendChatCaptureToBackground } from "./common/chat-capture"
 import { installHighlightMessageListener } from "./common/highlight-handler"
 import { createMindDockButton, showMindDockToast } from "./common/minddock-ui"
+import { injectAtomizeButton } from "./common/atomize-button"
 
 export const config: PlasmoCSConfig = {
   matches: ["https://claude.ai/*"],
@@ -92,14 +93,19 @@ function injectCaptureButton(targetElement: Element) {
   targetElement.appendChild(button)
 }
 
-const observer = new MutationObserver(() => {
+function injectAll() {
   document
     .querySelectorAll(`${SELECTORS.assistantMessage}:not([${INJECTED_ATTR}])`)
     .forEach(injectCaptureButton)
-})
+  document
+    .querySelectorAll(`${SELECTORS.assistantMessage}:not([data-minddock-atomize])`)
+    .forEach((el) =>
+      injectAtomizeButton(el, () => (el as HTMLElement).innerText.trim())
+    )
+}
+
+const observer = new MutationObserver(() => injectAll())
 observer.observe(document.body, { childList: true, subtree: true })
-document
-  .querySelectorAll(`${SELECTORS.assistantMessage}:not([${INJECTED_ATTR}])`)
-  .forEach(injectCaptureButton)
+injectAll()
 
 export {}
