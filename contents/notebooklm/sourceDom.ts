@@ -1,5 +1,7 @@
 export const SOURCE_PANEL_TOGGLE_EVENT = "minddock:source-panel:toggle"
 export const SOURCE_PANEL_RESET_EVENT = "minddock:source-panel:reset"
+export const SOURCE_PANEL_EXPORT_EVENT = "minddock:source-panel:export"
+export const SOURCE_PANEL_REFRESH_EVENT = "minddock:source-panel:refresh"
 
 export type SourceFilterType = "All" | "PDFs" | "GDocs" | "Web" | "Text" | "YouTube"
 
@@ -193,10 +195,19 @@ export function dispatchSourcePanelReset(): void {
   window.dispatchEvent(new CustomEvent(SOURCE_PANEL_RESET_EVENT))
 }
 
+export function dispatchSourcePanelExport(): void {
+  window.dispatchEvent(new CustomEvent(SOURCE_PANEL_EXPORT_EVENT))
+}
+
+export function dispatchSourcePanelRefresh(): void {
+  window.dispatchEvent(new CustomEvent(SOURCE_PANEL_REFRESH_EVENT))
+}
+
 export function clearNativeSourceSearchInputs(): void {
   const searchSelectors = [
     "source-picker input[type='text']",
     "source-picker input[placeholder*='Pesquise']",
+    "source-picker input[placeholder*='Search']",
     ".source-panel input[type='text']"
   ] as const
 
@@ -245,16 +256,239 @@ export function ensureOriginalDisplay(row: HTMLElement): string {
 
 export function formatTitleList(titles: string[]): string {
   if (titles.length === 0) {
-    return "fontes desconhecidas"
+    return "unknown sources"
   }
   if (titles.length <= 3) {
     return titles.join(", ")
   }
-  return `${titles.slice(0, 3).join(", ")} e +${titles.length - 3}`
+  return `${titles.slice(0, 3).join(", ")} and +${titles.length - 3}`
 }
 
 export function extractUrlFromSnippets(snippets: string[]): string | undefined {
   const joined = snippets.join("\n")
   const match = joined.match(/https?:\/\/[^\s)\]}>"']+/i)
   return match?.[0]
+}
+
+// ─── Focus Threads Injection Point ───────────────────────────────────────────
+
+/**
+ * Encontra o container do header da seção "Conversa" no NotebookLM.
+ * Retorna o elemento que fica entre o label "Conversa" e os ícones de ação.
+ * Usa múltiplos seletores + fallback por texto para máxima robustez.
+ */
+export function resolveConversationHeaderHost(): HTMLElement | null {
+  // Tenta seletores específicos do NotebookLM (nomes de componentes Angular)
+  const bySelector = queryDeepFirstVisible<HTMLElement>([
+    "chat-panel-v2 .panel-title-row",
+    "chat-panel .panel-title-row",
+    "[data-testid='conversation-header']",
+    "chat-panel-v2 header",
+    "chat-panel header",
+    "div.conversation-header",
+    "chat-panel-v2 > div:first-child",
+    "chat-panel > div:first-child",
+  ])
+  if (bySelector) return bySelector
+
+  // Fallback: procura o elemento visível com texto "Conversa" próximo ao topo
+  for (const root of getDeepRoots()) {
+    const candidates = Array.from(
+      "querySelectorAll" in root
+        ? (root as Document | ShadowRoot).querySelectorAll<HTMLElement>("div, header, section")
+        : []
+    )
+    for (const el of candidates) {
+      if (!isVisible(el)) continue
+      const rect = el.getBoundingClientRect()
+      if (rect.top > 120) continue // deve estar na parte superior da tela
+      if (rect.height > 80) continue // header deve ser compacto
+      const text = el.textContent?.trim() ?? ""
+      if (text === "Conversa" || text.startsWith("Conversa")) {
+        return el.parentElement ?? el
+      }
+    }
+  }
+
+  return null
+}
+
+/**
+ * Captura as mensagens visíveis no chat do NotebookLM.
+ * Retorna array de {role, content} para salvar na thread ativa.
+ */
+export function captureVisibleMessages(): Array<{ role: "user" | "assistant"; content: string }> {
+  const messages: Array<{ role: "user" | "assistant"; content: string }> = []
+
+  // Mensagens do assistente
+  const assistantNodes = queryDeepAll<HTMLElement>([
+    "[data-testid='response-text']",
+    "[data-testid='chat-message-assistant']",
+    ".response-container .message-content",
+  ])
+  for (const node of assistantNodes) {
+    const content = node.textContent?.trim()
+    if (content && content.length > 0) {
+      messages.push({ role: "assistant", content })
+    }
+  }
+
+  // Mensagens do usuário
+  const userNodes = queryDeepAll<HTMLElement>([
+    "[data-testid='user-query']",
+    "[data-testid='chat-message-user']",
+    "[data-testid='query-text']",
+    ".user-query-text",
+    ".query-container .query-text",
+  ])
+  for (const node of userNodes) {
+    const content = node.textContent?.trim()
+    if (content && content.length > 0) {
+      messages.push({ role: "user", content })
+    }
+  }
+
+  return messages
+}
+
+function resolveConversationLabel(): HTMLElement | null {
+  const labels = ["Conversa", "Conversation", "Chat"]
+
+  for (const root of getDeepRoots()) {
+    const candidates = Array.from(
+      "querySelectorAll" in root
+        ? (root as Document | ShadowRoot).querySelectorAll<HTMLElement>(
+            "span, div, h2, h3, button, a, [role='tab']"
+          )
+        : []
+    )
+
+    for (const element of candidates) {
+      if (!isVisible(element)) continue
+
+      const text = String(element.textContent ?? "").trim()
+      if (!labels.some((label) => text === label)) continue
+
+      const rect = element.getBoundingClientRect()
+      if (rect.top > 140 || rect.height > 80) continue
+
+      return element
+    }
+  }
+
+  return null
+}
+
+function clickElement(element: HTMLElement): boolean {
+  element.dispatchEvent(
+    new MouseEvent("mousedown", {
+      bubbles: true,
+      cancelable: true,
+      view: window
+    })
+  )
+  element.dispatchEvent(
+    new MouseEvent("mouseup", {
+      bubbles: true,
+      cancelable: true,
+      view: window
+    })
+  )
+  element.click()
+  return true
+}
+
+function isMindDockInjectedElement(element: HTMLElement): boolean {
+  return !!element.closest(
+    "#minddock-focus-threads-root, #minddock-agile-bar-root, #minddock-source-actions-root, #minddock-source-filters-root"
+  )
+}
+
+function isLikelyNativeConversationTrigger(
+  candidate: HTMLElement,
+  labelRect?: DOMRect
+): boolean {
+  if (!isVisible(candidate) || isMindDockInjectedElement(candidate)) {
+    return false
+  }
+
+  const text = String(candidate.textContent ?? "").trim()
+  const aria = String(candidate.getAttribute("aria-label") ?? candidate.getAttribute("title") ?? "")
+    .trim()
+    .toLowerCase()
+  const rect = candidate.getBoundingClientRect()
+
+  if (
+    text === "+" ||
+    aria.includes("new conversation") ||
+    aria.includes("new chat") ||
+    aria.includes("nova conversa") ||
+    aria.includes("novo chat")
+  ) {
+    return true
+  }
+
+  if (!labelRect) {
+    return false
+  }
+
+  const isCompact = rect.width <= 32 && rect.height <= 32
+  const isRightNextToLabel =
+    rect.left >= labelRect.right - 6 &&
+    rect.left <= labelRect.right + 44 &&
+    Math.abs(rect.top - labelRect.top) <= 16
+
+  return isCompact && isRightNextToLabel
+}
+
+export function triggerNotebookNewConversation(): boolean {
+  const label = resolveConversationLabel()
+  const labelRect = label?.getBoundingClientRect()
+  const headerHost = resolveConversationHeaderHost()
+
+  if (headerHost) {
+    const directCandidates = Array.from(
+      headerHost.querySelectorAll<HTMLElement>("button, [role='button'], a, span, div")
+    )
+
+    for (const candidate of directCandidates) {
+      if (isLikelyNativeConversationTrigger(candidate, labelRect)) {
+        return clickElement(candidate)
+      }
+    }
+  }
+
+  if (!label) {
+    return false
+  }
+
+  const row = label.parentElement ?? label
+  const siblingCandidates = Array.from(
+    row.querySelectorAll<HTMLElement>("button, [role='button'], a, span")
+  )
+
+  for (const candidate of siblingCandidates) {
+    if (candidate === label) continue
+
+    if (isLikelyNativeConversationTrigger(candidate, labelRect)) {
+      return clickElement(candidate)
+    }
+  }
+
+  const rowRect = row.getBoundingClientRect()
+  const nearbyInteractive = queryDeepAll<HTMLElement>(["button", "[role='button']", "a", "span", "div"]).filter(
+    (candidate) => {
+      if (!isLikelyNativeConversationTrigger(candidate, labelRect)) return false
+      const rect = candidate.getBoundingClientRect()
+      if (Math.abs(rect.top - rowRect.top) > 28) return false
+      if (rect.left < rowRect.right - 8 || rect.left > rowRect.right + 80) return false
+      return true
+    }
+  )
+
+  if (nearbyInteractive[0]) {
+    return clickElement(nearbyInteractive[0])
+  }
+
+  return false
 }

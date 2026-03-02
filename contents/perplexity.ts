@@ -6,6 +6,7 @@ import type { PlasmoCSConfig } from "plasmo"
 import { formatChatAsMarkdown } from "~/lib/utils"
 import type { AIChatMessage } from "~/lib/types"
 import { installHighlightMessageListener } from "./common/highlight-handler"
+import { injectAtomizeButton } from "./common/atomize-button"
 
 export const config: PlasmoCSConfig = {
   matches: ["https://perplexity.ai/*", "https://www.perplexity.ai/*"],
@@ -93,11 +94,19 @@ function createMindDockBtn(messageEl: Element) {
   messageEl.appendChild(btn)
 }
 
-const observer = new MutationObserver(() => {
+function injectAll() {
   document
     .querySelectorAll(`[data-testid='answer']:not([${INJECTED_ATTR}]), .prose:not([${INJECTED_ATTR}])`)
     .forEach(createMindDockBtn)
-})
+  document
+    .querySelectorAll(`[data-testid='answer']:not([data-minddock-atomize]), .prose:not([data-minddock-atomize])`)
+    .forEach((el) =>
+      injectAtomizeButton(el, () => (el as HTMLElement).innerText.trim())
+    )
+}
+
+const observer = new MutationObserver(() => injectAll())
 observer.observe(document.body, { childList: true, subtree: true })
+injectAll()
 
 export {}

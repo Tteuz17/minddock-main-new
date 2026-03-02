@@ -52,6 +52,14 @@ export interface AuthState {
   isAuthenticated: boolean
 }
 
+export type SidePanelLaunchTarget = "notes" | "graph" | "create_note" | "link_note"
+
+export interface SidePanelNoteDraft {
+  title: string
+  content: string
+  tags?: string[]
+}
+
 // ─── Zettelkasten Types ─────────────────────────────────────────────────────
 
 export interface Note {
@@ -191,6 +199,7 @@ export type MessageCommand =
   | "MINDDOCK_ATOMIZE_NOTE"
   | "MINDDOCK_EXPORT_SOURCES"
   | "MINDDOCK_HIGHLIGHT_SNIPE"
+  | "MINDDOCK_OPEN_SIDEPANEL"
 
 export interface ChromeMessage<T = unknown> {
   command: MessageCommand
@@ -278,4 +287,24 @@ export interface AIChatMessage {
   role: "user" | "assistant"
   content: string
   timestamp?: string
+}
+
+
+// ─── Focus Threads ───────────────────────────────────────────────────────────
+
+export interface Thread {
+  id: string
+  userId: string
+  notebookId: string
+  name: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface ThreadMessage {
+  id: string
+  threadId: string
+  role: "user" | "assistant"
+  content: string
+  createdAt: string
 }

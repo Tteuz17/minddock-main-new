@@ -1,8 +1,8 @@
 import "~/styles/globals.css"
 
-import { useState } from "react"
+import { useCallback, useEffect, useState } from "react"
 import { AnimatePresence, motion } from "framer-motion"
-import { Network, StickyNote, Tag, Search } from "lucide-react"
+import { Network, StickyNote, Tag } from "lucide-react"
 
 import { NoteList } from "~/sidepanel/components/NoteList"
 import { NoteEditor } from "~/sidepanel/components/NoteEditor"
@@ -13,8 +13,11 @@ import { AuthScreen } from "~/popup/components/AuthScreen"
 import { LoadingSpinner } from "~/components/LoadingSpinner"
 import { useSubscription } from "~/hooks/useSubscription"
 import { UpgradePrompt } from "~/components/UpgradePrompt"
+import { STORAGE_KEYS } from "~/lib/constants"
+import type { SidePanelLaunchTarget, SidePanelNoteDraft } from "~/lib/types"
 
 export type SidePanelTab = "notes" | "graph" | "tags"
+type NoteDraftMode = "blank" | "link"
 
 export default function SidePanel() {
   const { isAuthenticated, isLoading } = useAuth()
@@ -22,10 +25,88 @@ export default function SidePanel() {
   const [activeTab, setActiveTab] = useState<SidePanelTab>("notes")
   const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null)
   const [isEditing, setIsEditing] = useState(false)
+  const [draftMode, setDraftMode] = useState<NoteDraftMode>("blank")
+  const [draftSeed, setDraftSeed] = useState<SidePanelNoteDraft | null>(null)
+
+  const applyLaunchTarget = useCallback(
+    (target: SidePanelLaunchTarget, nextDraft: SidePanelNoteDraft | null = null) => {
+      switch (target) {
+        case "graph":
+          setActiveTab("graph")
+          setIsEditing(false)
+          setSelectedNoteId(null)
+          setDraftMode("blank")
+          setDraftSeed(null)
+          break
+        case "create_note":
+          setActiveTab("notes")
+          setIsEditing(true)
+          setSelectedNoteId(null)
+          setDraftMode("blank")
+          setDraftSeed(nextDraft)
+          break
+        case "link_note":
+          setActiveTab("notes")
+          setIsEditing(true)
+          setSelectedNoteId(null)
+          setDraftMode("link")
+          setDraftSeed(null)
+          break
+        case "notes":
+        default:
+          setActiveTab("notes")
+          setIsEditing(false)
+          setSelectedNoteId(null)
+          setDraftMode("blank")
+          setDraftSeed(null)
+          break
+      }
+    },
+    []
+  )
+
+  useEffect(() => {
+    const consumeLaunchState = () => {
+      chrome.storage.local.get(
+        [STORAGE_KEYS.SIDEPANEL_VIEW, STORAGE_KEYS.SIDEPANEL_NOTE_DRAFT],
+        (snapshot) => {
+          const target = snapshot[STORAGE_KEYS.SIDEPANEL_VIEW] as SidePanelLaunchTarget | undefined
+          if (!target) {
+            return
+          }
+
+          const nextDraft =
+            (snapshot[STORAGE_KEYS.SIDEPANEL_NOTE_DRAFT] as SidePanelNoteDraft | null | undefined) ??
+            null
+
+          applyLaunchTarget(target, nextDraft)
+          chrome.storage.local.remove([
+            STORAGE_KEYS.SIDEPANEL_VIEW,
+            STORAGE_KEYS.SIDEPANEL_NOTE_DRAFT
+          ])
+        }
+      )
+    }
+
+    consumeLaunchState()
+
+    const handleStorageChange = (
+      changes: Record<string, chrome.storage.StorageChange>,
+      areaName: string
+    ) => {
+      if (areaName !== "local" || !changes[STORAGE_KEYS.SIDEPANEL_VIEW]) {
+        return
+      }
+      consumeLaunchState()
+    }
+
+    chrome.storage.onChanged.addListener(handleStorageChange)
+    return () => chrome.storage.onChanged.removeListener(handleStorageChange)
+  }, [applyLaunchTarget])
 
   if (isLoading) {
     return (
-      <div className="sidepanel-container items-center justify-center flex">
+      <div className="sidepanel-container flex items-center justify-center">
         <LoadingSpinner size={24} />
       </div>
     )
@@ -47,17 +128,15 @@ export default function SidePanel() {
 
   return (
     <div className="sidepanel-container">
-      {/* Header */}
-      <div className="flex items-center gap-2 px-4 py-3 border-b border-white/8">
+      <div className="flex items-center gap-2 border-b border-white/8 px-4 py-3">
         <div className="flex items-center gap-1.5">
-          <div className="w-5 h-5 rounded bg-action flex items-center justify-center">
-            <span className="text-black text-xs font-bold">M</span>
+          <div className="flex h-5 w-5 items-center justify-center rounded bg-action">
+            <span className="text-xs font-bold text-black">M</span>
           </div>
           <span className="text-sm font-semibold">Zettelkasten</span>
         </div>
       </div>
 
-      {/* Tabs */}
       <div className="flex border-b border-white/8">
         {tabs.map(({ id, icon: Icon, label }) => (
           <button
@@ -65,6 +144,9 @@ export default function SidePanel() {
             onClick={() => {
               setActiveTab(id)
               setIsEditing(false)
+              setSelectedNoteId(null)
+              setDraftMode("blank")
+              setDraftSeed(null)
             }}
             className={[
               "flex-1 flex items-center justify-center gap-1.5 py-2.5 text-xs font-medium transition-all",
@@ -78,7 +160,6 @@ export default function SidePanel() {
         ))}
       </div>
 
-      {/* Content */}
       <div className="flex-1 overflow-hidden">
         <AnimatePresence mode="wait">
           {activeTab === "notes" && !isEditing && (
@@ -93,10 +174,14 @@ export default function SidePanel() {
                 onSelectNote={(id) => {
                   setSelectedNoteId(id)
                   setIsEditing(true)
+                  setDraftMode("blank")
+                  setDraftSeed(null)
                 }}
                 onCreateNote={() => {
                   setSelectedNoteId(null)
                   setIsEditing(true)
+                  setDraftMode("blank")
+                  setDraftSeed(null)
                 }}
               />
             </motion.div>
@@ -112,9 +197,13 @@ export default function SidePanel() {
               transition={{ duration: 0.2 }}>
               <NoteEditor
                 noteId={selectedNoteId}
+                draftMode={draftMode}
+                draftSeed={draftSeed}
                 onBack={() => {
                   setIsEditing(false)
                   setSelectedNoteId(null)
+                  setDraftMode("blank")
+                  setDraftSeed(null)
                 }}
               />
             </motion.div>
@@ -128,11 +217,15 @@ export default function SidePanel() {
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
               transition={{ duration: 0.15 }}>
-              <GraphView onSelectNote={(id) => {
-                setSelectedNoteId(id)
-                setActiveTab("notes")
-                setIsEditing(true)
-              }} />
+              <GraphView
+                onSelectNote={(id) => {
+                  setSelectedNoteId(id)
+                  setActiveTab("notes")
+                  setIsEditing(true)
+                  setDraftMode("blank")
+                  setDraftSeed(null)
+                }}
+              />
             </motion.div>
           )}
 

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react"
-import { Download, ListFilter, RefreshCw, Trash2, X } from "lucide-react"
+import { ListFilter, X } from "lucide-react"
 import {
   MESSAGE_ACTIONS,
   type StandardResponse
@@ -17,8 +17,8 @@ import {
   type SourceExportRecord
 } from "~/lib/source-download"
 import {
-  clearNativeSourceSearchInputs,
-  dispatchSourcePanelReset,
+  SOURCE_PANEL_EXPORT_EVENT,
+  SOURCE_PANEL_REFRESH_EVENT,
   dispatchSourcePanelToggle,
   extractUrlFromSnippets,
   formatTitleList,
@@ -142,7 +142,7 @@ export function SourceDownloadPanel() {
   const loadSources = useCallback(async (): Promise<string> => {
     const notebookId = resolveNotebookIdFromRoute()
     if (!notebookId) {
-      throw new Error("Notebook ID nao encontrado na rota atual do NotebookLM.")
+      throw new Error("Notebook ID was not found in the current NotebookLM route.")
     }
 
     setIsLoadingSources(true)
@@ -152,7 +152,7 @@ export function SourceDownloadPanel() {
         notebookId
       })
       if (!response.success) {
-        throw new Error(response.error ?? "Falha ao listar fontes do notebook.")
+        throw new Error(response.error ?? "Failed to list notebook sources.")
       }
 
       const responsePayload = response.payload ?? response.data
@@ -163,7 +163,7 @@ export function SourceDownloadPanel() {
 
       if (validSources.length === 0) {
         const message =
-          "Nenhuma fonte foi retornada pelo backend. Verifique a sessao da conta correta no NotebookLM."
+          "No sources were returned by the backend. Check that the correct NotebookLM account session is active."
         setSources([])
         setSelectedSourceIds(new Set())
         setSourceLoadError(message)
@@ -181,7 +181,7 @@ export function SourceDownloadPanel() {
       return notebookId
     } catch (error) {
       const message =
-        error instanceof Error ? error.message : "Falha ao carregar fontes do notebook."
+        error instanceof Error ? error.message : "Failed to load notebook sources."
       setSources([])
       setSelectedSourceIds(new Set())
       setSourceLoadError(message)
@@ -202,7 +202,7 @@ export function SourceDownloadPanel() {
     } catch (error) {
       setToast({
         status: "error",
-        message: error instanceof Error ? error.message : "Erro ao abrir modal de download.",
+        message: error instanceof Error ? error.message : "Failed to open the download modal.",
         progress: 0
       })
     }
@@ -249,13 +249,6 @@ export function SourceDownloadPanel() {
     dispatchSourcePanelToggle(nextVisible)
   }
 
-  const resetSourcePanelState = (): void => {
-    clearNativeSourceSearchInputs()
-    dispatchSourcePanelReset()
-    dispatchSourcePanelToggle(true)
-    setIsFilterPanelVisible(true)
-  }
-
   const refreshGDocSources = useCallback(async () => {
     if (isSyncingGDocs) {
       return
@@ -265,7 +258,7 @@ export function SourceDownloadPanel() {
     if (!notebookId) {
       setToast({
         status: "error",
-        message: "Notebook ID nao encontrado para sincronizar Google Docs.",
+        message: "Notebook ID was not found for Google Docs sync.",
         progress: 0
       })
       return
@@ -274,7 +267,7 @@ export function SourceDownloadPanel() {
     setIsSyncingGDocs(true)
     setToast({
       status: "running",
-      message: "Atualizando fontes Google Docs...",
+      message: "Refreshing Google Docs sources...",
       progress: 10
     })
 
@@ -283,7 +276,7 @@ export function SourceDownloadPanel() {
         notebookId
       })
       if (!response.success) {
-        throw new Error(response.error ?? "Falha ao sincronizar fontes Google Docs.")
+        throw new Error(response.error ?? "Failed to sync Google Docs sources.")
       }
 
       const payload = (response.payload ?? response.data) as
@@ -312,10 +305,10 @@ export function SourceDownloadPanel() {
         message: String(
           payload?.message ??
             (total === 0
-              ? "Nao ha fontes Google Docs para atualizar."
+              ? "There are no Google Docs sources to refresh."
               : failedSourceTitleList.length > 0
-                ? `Atualizacao parcial: ${syncedCount}/${total}.`
-                : `Atualizadas ${syncedCount}/${total} fontes.`)
+                ? `Partial refresh: ${syncedCount}/${total}.`
+                : `Refreshed ${syncedCount}/${total} sources.`)
         ),
         progress: 100
       })
@@ -326,13 +319,31 @@ export function SourceDownloadPanel() {
     } catch (error) {
       setToast({
         status: "error",
-        message: error instanceof Error ? error.message : "Falha ao sincronizar Google Docs.",
+        message: error instanceof Error ? error.message : "Failed to sync Google Docs sources.",
         progress: 0
       })
     } finally {
       setIsSyncingGDocs(false)
     }
   }, [isOpen, isSyncingGDocs, loadSources])
+
+  useEffect(() => {
+    const onExport = () => {
+      void openModal()
+    }
+
+    const onRefresh = () => {
+      void refreshGDocSources()
+    }
+
+    window.addEventListener(SOURCE_PANEL_EXPORT_EVENT, onExport)
+    window.addEventListener(SOURCE_PANEL_REFRESH_EVENT, onRefresh)
+
+    return () => {
+      window.removeEventListener(SOURCE_PANEL_EXPORT_EVENT, onExport)
+      window.removeEventListener(SOURCE_PANEL_REFRESH_EVENT, onRefresh)
+    }
+  }, [openModal, refreshGDocSources])
 
   const handleDownloadSelected = useCallback(async () => {
     if (isRunningDownload) {
@@ -342,19 +353,19 @@ export function SourceDownloadPanel() {
     setIsRunningDownload(true)
     setToast({
       status: "running",
-      message: "Comecando download das fontes...",
+      message: "Starting source download...",
       progress: 0
     })
 
     try {
       const notebookId = resolveNotebookIdFromRoute()
       if (!notebookId) {
-        throw new Error("Notebook ID nao encontrado.")
+        throw new Error("Notebook ID was not found.")
       }
 
       const selected = sources.filter((source) => selectedSourceIds.has(source.sourceId))
       if (selected.length === 0) {
-        throw new Error("Selecione pelo menos uma fonte para baixar.")
+        throw new Error("Select at least one source to download.")
       }
 
       const missingBackend = selected.filter(
@@ -365,7 +376,7 @@ export function SourceDownloadPanel() {
       )
       if (missingBackend.length > 0) {
         throw new Error(
-          `Algumas fontes nao possuem ID valido para exportacao: ${formatTitleList(
+          `Some sources do not have a valid export ID: ${formatTitleList(
             missingBackend.map((source) => source.sourceTitle)
           )}`
         )
@@ -382,7 +393,7 @@ export function SourceDownloadPanel() {
 
       setToast({
         status: "running",
-        message: "Buscando conteudo das fontes...",
+        message: "Fetching source content...",
         progress: 24
       })
 
@@ -391,7 +402,7 @@ export function SourceDownloadPanel() {
         sourceIds: selectedBackendIds
       })
       if (!response.success) {
-        throw new Error(response.error ?? "Falha ao buscar conteudo das fontes.")
+        throw new Error(response.error ?? "Failed to fetch source content.")
       }
 
       const payload = (response.payload ?? response.data) as
@@ -450,7 +461,7 @@ export function SourceDownloadPanel() {
           .map((source) => source.sourceTitle)
 
         throw new Error(
-          `Nao foi encontrado conteudo real para: ${formatTitleList(
+          `No real content was found for: ${formatTitleList(
             titles.length > 0 ? titles : withoutContentTitles
           )}`
         )
@@ -464,7 +475,7 @@ export function SourceDownloadPanel() {
         )
         setToast({
           status: "success",
-          message: "Download concluido com sucesso.",
+          message: "Download completed successfully.",
           progress: 100
         })
         return
@@ -479,14 +490,14 @@ export function SourceDownloadPanel() {
 
         setToast({
           status: "running",
-          message: `Preparando ${index + 1}/${exportRecords.length}...`,
+          message: `Preparing ${index + 1}/${exportRecords.length}...`,
           progress: Math.round(((index + 1) / exportRecords.length) * 88)
         })
       }
 
       setToast({
         status: "running",
-        message: "Compactando ZIP...",
+        message: "Building ZIP...",
         progress: 96
       })
 
@@ -498,13 +509,13 @@ export function SourceDownloadPanel() {
 
       setToast({
         status: "success",
-        message: "Download ZIP concluido com sucesso.",
+        message: "ZIP download completed successfully.",
         progress: 100
       })
     } catch (error) {
       setToast({
         status: "error",
-        message: error instanceof Error ? error.message : "Nao foi possivel concluir o download.",
+        message: error instanceof Error ? error.message : "The download could not be completed.",
         progress: 0
       })
     } finally {
@@ -518,34 +529,12 @@ export function SourceDownloadPanel() {
 
   return (
     <>
-      <div className="inline-flex items-center gap-2 whitespace-nowrap">
+      <div className="liquid-metal-toolbar whitespace-nowrap">
         <ActionIconButton
-          title="Exportar fontes visiveis"
-          onClick={openModal}
-          disabled={isRunningDownload || isLoadingSources}
-          active={isOpen}>
-          <Download size={16} strokeWidth={1.8} />
-        </ActionIconButton>
-
-        <ActionIconButton
-          title={isSyncingGDocs ? "Atualizando Google Docs..." : "Atualizar fontes Google Docs"}
-          onClick={() => {
-            void refreshGDocSources()
-          }}
-          disabled={isSyncingGDocs}
-          active={isSyncingGDocs}>
-          <RefreshCw size={16} strokeWidth={1.8} className={isSyncingGDocs ? "animate-spin" : ""} />
-        </ActionIconButton>
-
-        <ActionIconButton
-          title="Mostrar ou ocultar painel de filtros"
+          title="Show or hide the filters panel"
           onClick={toggleFilterPanelVisibility}
           active={!isFilterPanelVisible}>
           <ListFilter size={16} strokeWidth={1.8} />
-        </ActionIconButton>
-
-        <ActionIconButton title="Limpar filtros e restaurar painel" onClick={resetSourcePanelState}>
-          <Trash2 size={16} strokeWidth={1.8} />
         </ActionIconButton>
       </div>
 
@@ -560,11 +549,11 @@ export function SourceDownloadPanel() {
           <section
             role="dialog"
             aria-modal="true"
-            aria-label="Baixar fontes"
+            aria-label="Download sources"
             className="flex max-h-[86vh] w-full max-w-[620px] flex-col overflow-hidden rounded-2xl border border-slate-400/35 bg-[linear-gradient(180deg,rgba(31,41,59,0.98)_0%,rgba(17,24,39,0.98)_100%)] text-slate-100 shadow-2xl">
             <header className="flex items-center justify-between gap-3 border-b border-slate-400/25 px-5 pb-3 pt-5">
               <h2 className="text-[30px] font-semibold leading-none tracking-tight text-slate-50">
-                Baixar fontes
+                Download sources
               </h2>
               <button
                 type="button"
@@ -581,7 +570,7 @@ export function SourceDownloadPanel() {
                   type="search"
                   value={sourceSearch}
                   onChange={(event) => setSourceSearch(event.target.value)}
-                  placeholder="Fontes de filtro..."
+                  placeholder="Filter sources..."
                   className="w-full bg-transparent text-sm text-slate-100 outline-none placeholder:text-slate-400"
                 />
               </div>
@@ -593,13 +582,13 @@ export function SourceDownloadPanel() {
                   onChange={toggleSelectAllFilteredSources}
                   className="h-4 w-4 cursor-pointer accent-emerald-500"
                 />
-                Selecionar todas as fontes
+                Select all sources
               </label>
 
               <div className="grid grid-cols-3 gap-2 rounded-xl border border-slate-400/30 bg-slate-800/55 p-2">
                 {(["markdown", "text", "pdf"] as DownloadFormat[]).map((item) => {
                   const active = format === item
-                  const label = item === "markdown" ? "Markdown" : item === "text" ? "Texto simples" : "PDF"
+                  const label = item === "markdown" ? "Markdown" : item === "text" ? "Plain text" : "PDF"
                   const subtitle = item === "markdown" ? "(.md)" : item === "text" ? "(.txt)" : "(.pdf)"
 
                   return (
@@ -623,7 +612,7 @@ export function SourceDownloadPanel() {
 
             <div className="mx-5 mt-3 min-h-[152px] max-h-[260px] overflow-y-auto rounded-xl border border-slate-400/30 bg-slate-900/45 p-1.5 scrollbar-thin">
               {isLoadingSources && (
-                <div className="px-3 py-6 text-sm text-slate-400">Carregando fontes do backend...</div>
+                <div className="px-3 py-6 text-sm text-slate-400">Loading sources from the backend...</div>
               )}
 
               {!isLoadingSources && sourceLoadError && (
@@ -634,7 +623,7 @@ export function SourceDownloadPanel() {
 
               {!isLoadingSources && !sourceLoadError && filteredSources.length === 0 && (
                 <div className="px-3 py-6 text-sm text-slate-400">
-                  Nenhuma fonte encontrada com esse filtro.
+                  No sources matched this filter.
                 </div>
               )}
 
@@ -658,7 +647,7 @@ export function SourceDownloadPanel() {
                         </span>
                       </span>
                       <span className="mt-0.5 block text-xs text-slate-400">
-                        {source.sourceKind === "youtube" ? "YouTube" : "Documento"}
+                        {source.sourceKind === "youtube" ? "YouTube" : "Document"}
                         {source.isGDoc ? " • GDoc" : ""}
                       </span>
                     </span>
@@ -674,7 +663,7 @@ export function SourceDownloadPanel() {
                 }}
                 disabled={isSyncingGDocs || isRunningDownload}
                 className="inline-flex min-h-[44px] items-center justify-center rounded-xl border border-indigo-400/70 bg-indigo-600/80 px-4 text-sm font-semibold text-indigo-100 disabled:cursor-not-allowed disabled:opacity-55">
-                {isSyncingGDocs ? "Sincronizando..." : "Atualizar GDocs"}
+                {isSyncingGDocs ? "Syncing..." : "Refresh GDocs"}
               </button>
 
               <button
@@ -685,8 +674,8 @@ export function SourceDownloadPanel() {
                 disabled={selectedSources.length === 0 || isRunningDownload || isLoadingSources}
                 className="inline-flex min-h-[44px] items-center justify-center rounded-xl bg-emerald-500 px-4 text-base font-semibold text-emerald-950 shadow-[0_10px_24px_rgba(16,185,129,0.25)] disabled:cursor-not-allowed disabled:opacity-55">
                 {isRunningDownload
-                  ? "Baixando..."
-                  : `Baixar selecionado (${selectedSources.length})`}
+                  ? "Downloading..."
+                  : `Download selected (${selectedSources.length})`}
               </button>
             </footer>
           </section>
@@ -697,11 +686,11 @@ export function SourceDownloadPanel() {
         <aside className="fixed bottom-4 right-4 z-[2147483647] w-[min(360px,calc(100vw-32px))] rounded-2xl border border-slate-400/35 bg-slate-900/95 p-3 text-slate-100 shadow-2xl">
           <header className="mb-2 flex items-center justify-between gap-2">
             <strong className="text-base leading-none">
-              {isSyncingGDocs ? "Atualizacao de fontes" : "Baixando fontes"}
+              {isSyncingGDocs ? "Source refresh" : "Downloading sources"}
             </strong>
             <button
               type="button"
-              aria-label="Fechar aviso"
+              aria-label="Close notice"
               onClick={() => setToast({ status: "idle", message: "", progress: 0 })}
               className="inline-flex h-5 w-5 items-center justify-center text-slate-400 hover:text-slate-100">
               <X size={14} strokeWidth={1.8} />
@@ -743,12 +732,12 @@ function ActionIconButton(props: {
       type="button"
       title={title}
       aria-label={title}
+      aria-pressed={active}
       onClick={onClick}
       disabled={disabled}
+      data-active={active ? "true" : "false"}
       className={[
-        "inline-flex h-6 w-6 items-center justify-center rounded border border-transparent bg-transparent text-slate-200 transition-colors",
-        "hover:border-slate-400/45 hover:bg-slate-700/35",
-        active ? "border-blue-400/75 bg-blue-800/35" : "",
+        "liquid-metal-button",
         disabled ? "cursor-not-allowed opacity-50" : "cursor-pointer"
       ].join(" ")}>
       {children}
@@ -776,7 +765,7 @@ async function sendBackgroundCommand<T = unknown>(
           return
         }
 
-        resolve(response ?? { success: false, error: "Sem resposta do background." })
+        resolve(response ?? { success: false, error: "No response from the background script." })
       }
     )
   })
@@ -800,7 +789,7 @@ function toSourceRow(source: Partial<Source>, index: number): SourceRow {
   const sourceTitle =
     typeof source.title === "string" && source.title.trim()
       ? source.title.trim()
-      : `Fonte ${index + 1}`
+      : `Source ${index + 1}`
   const sourceUrl = typeof source.url === "string" && source.url.trim() ? source.url.trim() : undefined
 
   const isYoutube =

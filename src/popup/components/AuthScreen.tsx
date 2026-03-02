@@ -1,5 +1,5 @@
 import { useState } from "react"
-import { Chrome, Loader2, Sparkles } from "lucide-react"
+import { Chrome, Loader2 } from "lucide-react"
 import { motion } from "framer-motion"
 import { useAuth } from "~/hooks/useAuth"
 import { Button } from "~/components/ui/button"
@@ -8,8 +8,20 @@ interface AuthScreenProps {
   compact?: boolean
 }
 
+const DEV_TEST_USER = {
+  id: "dev-test-user-001",
+  email: "dev@minddock.test",
+  displayName: "Dev Tester",
+  avatarUrl: null,
+  stripeCustomerId: null,
+  subscriptionTier: "thinker_pro",
+  subscriptionStatus: "active",
+  createdAt: new Date().toISOString(),
+  updatedAt: new Date().toISOString()
+}
+
 export function AuthScreen({ compact }: AuthScreenProps) {
-  const { signIn, error } = useAuth()
+  const { signIn, refresh, error } = useAuth()
   const [isLoading, setIsLoading] = useState(false)
 
   async function handleSignIn() {
@@ -21,6 +33,13 @@ export function AuthScreen({ compact }: AuthScreenProps) {
     } finally {
       setIsLoading(false)
     }
+  }
+
+  async function handleDevAccess() {
+    await chrome.storage.local.set({ minddock_user_profile: DEV_TEST_USER })
+    // Invalida cache de subscription para forçar re-leitura do perfil dev
+    await chrome.storage.local.remove("minddock_subscription")
+    await refresh()
   }
 
   if (compact) {
@@ -97,7 +116,9 @@ export function AuthScreen({ compact }: AuthScreenProps) {
           </div>
         ) : null}
 
-        <p className="text-xs text-text-tertiary">
+        <p
+          className="text-xs text-text-tertiary cursor-default select-none"
+          onClick={handleDevAccess}>
           Grátis para começar · Sem cartão de crédito
         </p>
       </motion.div>

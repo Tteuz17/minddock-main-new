@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -51,7 +51,7 @@
 }
 
 html, body {
-  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
   background: var(--bg-primary);
   color: var(--text-primary);
   -webkit-font-smoothing: antialiased;
@@ -89,6 +89,159 @@ html, body {
     border-radius: 14px;
   }
 
+  .liquid-glass-panel {
+    position: relative;
+    isolation: isolate;
+    overflow: hidden;
+    background:
+      linear-gradient(180deg, rgba(255, 255, 255, 0.075) 0%, rgba(255, 255, 255, 0.022) 36%, rgba(255, 255, 255, 0.008) 100%),
+      rgba(7, 8, 10, 0.72);
+    border: 1px solid rgba(255, 255, 255, 0.075);
+    backdrop-filter: blur(28px) saturate(145%);
+    -webkit-backdrop-filter: blur(28px) saturate(145%);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.11),
+      inset 0 -12px 26px rgba(0, 0, 0, 0.16),
+      0 16px 34px rgba(0, 0, 0, 0.3),
+      0 0 0 1px rgba(255, 255, 255, 0.015);
+  }
+
+  .liquid-glass-panel::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    background:
+      linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0) 32%);
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  .liquid-glass-panel::after {
+    content: "";
+    position: absolute;
+    inset: 1px;
+    border-radius: inherit;
+    border: 1px solid rgba(255, 255, 255, 0.03);
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  .liquid-glass-soft {
+    position: relative;
+    isolation: isolate;
+    overflow: hidden;
+    background:
+      linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.02)),
+      rgba(10, 11, 14, 0.64);
+    border: 1px solid rgba(255, 255, 255, 0.075);
+    backdrop-filter: blur(22px) saturate(140%);
+    -webkit-backdrop-filter: blur(22px) saturate(140%);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.08),
+      0 8px 20px rgba(0, 0, 0, 0.2);
+  }
+
+  .liquid-glass-soft::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    background:
+      linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0) 34%);
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  .liquid-glass-content {
+    position: relative;
+    z-index: 1;
+  }
+
+  .liquid-metal-toolbar {
+    position: relative;
+    isolation: isolate;
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 3px;
+    border-radius: 16px;
+    overflow: hidden;
+    background:
+      linear-gradient(180deg, rgba(52, 54, 58, 0.62) 0%, rgba(14, 15, 18, 0.96) 100%);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.16),
+      inset 0 -10px 18px rgba(0, 0, 0, 0.5),
+      0 10px 24px rgba(0, 0, 0, 0.34);
+    backdrop-filter: blur(20px) saturate(145%);
+    -webkit-backdrop-filter: blur(20px) saturate(145%);
+  }
+
+  .liquid-metal-toolbar::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    background:
+      radial-gradient(120% 100% at 50% 0%, rgba(255, 255, 255, 0.18), rgba(255, 255, 255, 0) 42%),
+      linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0) 28%);
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  .liquid-metal-toolbar::after {
+    content: "";
+    position: absolute;
+    inset: 1px;
+    border-radius: inherit;
+    border: 1px solid rgba(255, 255, 255, 0.025);
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  .liquid-metal-button {
+    position: relative;
+    z-index: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    border: 0;
+    border-radius: 12px;
+    background:
+      linear-gradient(180deg, rgba(70, 73, 78, 0.42), rgba(16, 17, 20, 0.9));
+    color: #8a8d93;
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.08),
+      inset 0 -8px 12px rgba(0, 0, 0, 0.34);
+  }
+
+  .liquid-metal-button::before {
+    content: "";
+    position: absolute;
+    inset: 1px;
+    border-radius: inherit;
+    background:
+      radial-gradient(120% 90% at 50% 0%, rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0) 42%),
+      linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0) 34%);
+    pointer-events: none;
+  }
+
+  .liquid-metal-button:hover {
+    color: #ffffff;
+    transform: translateY(-1px);
+  }
+
+  .liquid-metal-button[data-active="true"] {
+    color: #facc15;
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.1),
+      inset 0 -8px 12px rgba(0, 0, 0, 0.34),
+      0 0 0 1px rgba(250, 204, 21, 0.12);
+  }
+
   /* ─── Elevation ─────────────────────────────────────────────── */
   .elevation-1 {
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
@@ -121,37 +274,37 @@ html, body {
 
   /* ─── Inputs ────────────────────────────────────────────────── */
   .input-base {
-    @apply bg-bg-secondary border border-white/8 text-white rounded-md px-3 py-2 text-body;
-    @apply focus:outline-none focus:border-action focus:ring-1 focus:ring-action/30;
+    @apply bg-bg-secondary border border-white/[0.08] text-white rounded-md px-3 py-2 text-body;
+    @apply focus:outline-none focus:border-action focus:ring-1 focus:ring-action/[0.30];
     @apply placeholder:text-text-tertiary;
   }
 
   /* ─── Cards ─────────────────────────────────────────────────── */
   .card-base {
-    @apply bg-bg-secondary border border-white/8 rounded-lg p-4;
-    @apply hover:border-white/15 hover:bg-bg-tertiary;
+    @apply bg-bg-secondary border border-white/[0.08] rounded-lg p-4;
+    @apply hover:border-white/[0.15] hover:bg-bg-tertiary;
   }
 
   /* ─── Badges / Tags ─────────────────────────────────────────── */
   .badge {
-    @apply inline-flex items-center bg-white/8 text-white text-xs font-medium;
+    @apply inline-flex items-center bg-white/[0.08] text-white text-xs font-medium;
     @apply rounded px-2 py-0.5 gap-1;
   }
 
   .badge-yellow {
-    @apply badge bg-action/15 text-action;
+    @apply badge bg-action/[0.15] text-action;
   }
 
   .badge-green {
-    @apply badge bg-success/15 text-success;
+    @apply badge bg-success/[0.15] text-success;
   }
 
   .badge-red {
-    @apply badge bg-error/15 text-error;
+    @apply badge bg-error/[0.15] text-error;
   }
 
   .badge-blue {
-    @apply badge bg-info/15 text-info;
+    @apply badge bg-info/[0.15] text-info;
   }
 
   /* ─── Scrollbar ─────────────────────────────────────────────── */
@@ -179,7 +332,7 @@ html, body {
 
   /* ─── Divider ───────────────────────────────────────────────── */
   .divider {
-    @apply border-t border-white/8 my-3;
+    @apply border-t border-white/[0.08] my-3;
   }
 
   /* ─── Tooltip ───────────────────────────────────────────────── */
@@ -197,8 +350,9 @@ html, body {
   /* ─── MindDock Popup container ──────────────────────────────── */
   .popup-container {
     width: 380px;
-    min-height: 520px;
-    max-height: 600px;
+    height: 620px;
+    min-height: 620px;
+    max-height: 620px;
     @apply bg-bg overflow-hidden flex flex-col;
   }
 
@@ -212,7 +366,7 @@ html, body {
   /* ─── Section header ────────────────────────────────────────── */
   .section-header {
     @apply flex items-center justify-between px-4 py-3;
-    @apply border-b border-white/8;
+    @apply border-b border-white/[0.08];
   }
 
   /* ─── Empty state ───────────────────────────────────────────── */
@@ -223,7 +377,7 @@ html, body {
   /* ─── Keyboard shortcut badge ───────────────────────────────── */
   .kbd {
     @apply inline-flex items-center justify-center;
-    @apply bg-white/8 border border-white/10 text-text-secondary text-xs;
+    @apply bg-white/[0.08] border border-white/10 text-text-secondary text-xs;
     @apply rounded px-1.5 py-0.5 font-mono;
   }
 }
@@ -239,7 +393,7 @@ html, body {
 
 /* ─── Injected UI (NotebookLM overlay) ────────────────────────── */
 #minddock-root {
-  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
   font-size: 14px;
   color: #ffffff;
   -webkit-font-smoothing: antialiased;

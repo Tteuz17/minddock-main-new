@@ -4,13 +4,21 @@ import { subscriptionManager } from "./subscription"
 import { aiService } from "~/services/ai-service"
 import { exportService } from "~/services/export-service"
 import { zettelkastenService } from "~/services/zettelkasten"
+import { threadService } from "~/services/thread-service"
+import { STORAGE_KEYS } from "~/lib/constants"
 import {
   FIXED_STORAGE_KEYS,
   MESSAGE_ACTIONS,
   type StandardResponse
 } from "~/lib/contracts"
-import { formatChatAsMarkdown, getFromStorage } from "~/lib/utils"
-import type { ChromeMessage, ChromeMessageResponse, Notebook } from "~/lib/types"
+import { formatChatAsMarkdown } from "~/lib/utils"
+import type {
+  ChromeMessage,
+  ChromeMessageResponse,
+  Notebook,
+  SidePanelLaunchTarget,
+  SidePanelNoteDraft
+} from "~/lib/types"
 
 type MessageSender = chrome.runtime.MessageSender
 
@@ -53,8 +61,18 @@ class MessageRouter {
     this.register("MINDDOCK_CHECK_SUBSCRIPTION", this.handleCheckSubscription)
     this.register("MINDDOCK_IMPROVE_PROMPT", this.handleImprovePrompt)
     this.register("MINDDOCK_ATOMIZE_NOTE", this.handleAtomizeNote)
+    this.register(MESSAGE_ACTIONS.ATOMIZE_PREVIEW, this.handleAtomizePreview)
+    this.register(MESSAGE_ACTIONS.SAVE_ATOMIC_NOTES, this.handleSaveAtomicNotes)
+    this.register(MESSAGE_ACTIONS.PROMPT_OPTIONS, this.handlePromptOptions)
     this.register("MINDDOCK_EXPORT_SOURCES", this.handleExportSources)
     this.register("MINDDOCK_HIGHLIGHT_SNIPE", this.handleHighlightSnipe)
+    this.register(MESSAGE_ACTIONS.THREAD_LIST, this.handleThreadList)
+    this.register(MESSAGE_ACTIONS.THREAD_CREATE, this.handleThreadCreate)
+    this.register(MESSAGE_ACTIONS.THREAD_DELETE, this.handleThreadDelete)
+    this.register(MESSAGE_ACTIONS.THREAD_RENAME, this.handleThreadRename)
+    this.register(MESSAGE_ACTIONS.THREAD_MESSAGES, this.handleThreadMessages)
+    this.register(MESSAGE_ACTIONS.THREAD_SAVE_MESSAGES, this.handleThreadSaveMessages)
+    this.register(MESSAGE_ACTIONS.OPEN_SIDEPANEL, this.handleOpenSidePanel)
   }
 
   private register(command: string, handler: Handler): void {
@@ -83,7 +101,10 @@ class MessageRouter {
       const result = await handler(payload, sender)
       sendResponse(this.normalizeResponse(result))
     } catch (err) {
-      const errorMsg = err instanceof Error ? err.message : "Erro desconhecido"
+      const errorMsg =
+        err instanceof Error
+          ? err.message
+          : (err as { message?: string })?.message ?? "Erro desconhecido"
       console.error(`[MindDock Router] ${action}:`, err)
       sendResponse(
         this.normalizeResponse({
@@ -427,6 +448,106 @@ class MessageRouter {
     return this.ok({ improved })
   }
 
+  private async handlePromptOptions(payload: unknown): Promise<StandardResponse> {
+    const { prompt } = payload as { prompt: string }
+    const options = await aiService.generatePromptOptions(prompt)
+    return this.ok({ options })
+  }
+
+  // ─── Focus Threads ─────────────────────────────────────────────────────────
+
+  private async handleThreadList(payload: unknown): Promise<StandardResponse> {
+    const { userId, notebookId } = payload as { userId: string; notebookId: string }
+    const threads = await threadService.getThreads(userId, notebookId)
+    return this.ok({ threads })
+  }
+
+  private async handleThreadCreate(payload: unknown): Promise<StandardResponse> {
+    const { userId, notebookId, name } = payload as {
+      userId: string; notebookId: string; name: string
+    }
+    const thread = await threadService.createThread(userId, notebookId, name)
+    return this.ok({ thread })
+  }
+
+  private async handleThreadDelete(payload: unknown): Promise<StandardResponse> {
+    const { threadId } = payload as { threadId: string }
+    await threadService.deleteThread(threadId)
+    return this.ok({})
+  }
+
+  private async handleThreadRename(payload: unknown): Promise<StandardResponse> {
+    const { threadId, name } = payload as { threadId: string; name: string }
+    const thread = await threadService.renameThread(threadId, name)
+    return this.ok({ thread })
+  }
+
+  private async handleThreadMessages(payload: unknown): Promise<StandardResponse> {
+    const { threadId } = payload as { threadId: string }
+    const messages = await threadService.getMessages(threadId)
+    return this.ok({ messages })
+  }
+
+  private async handleThreadSaveMessages(payload: unknown): Promise<StandardResponse> {
+    const { threadId, messages } = payload as {
+      threadId: string
+      messages: Array<{ role: "user" | "assistant"; content: string }>
+    }
+    await threadService.saveMessages(threadId, messages)
+    return this.ok({})
+  }
+
+  private async handleOpenSidePanel(
+    payload: unknown,
+    sender: MessageSender
+  ): Promise<StandardResponse> {
+    const raw = (payload ?? {}) as {
+      target?: SidePanelLaunchTarget
+      draft?: SidePanelNoteDraft | null
+    }
+
+    const target = String(raw.target ?? "").trim() as SidePanelLaunchTarget
+    const validTargets: SidePanelLaunchTarget[] = ["notes", "graph", "create_note", "link_note"]
+
+    if (!validTargets.includes(target)) {
+      return this.fail("Target invalido para abrir o side panel.")
+    }
+
+    const storagePayload: Record<string, unknown> = {
+      [STORAGE_KEYS.SIDEPANEL_VIEW]: target
+    }
+
+    const hasDraft =
+      raw.draft &&
+      typeof raw.draft.title === "string" &&
+      typeof raw.draft.content === "string" &&
+      raw.draft.title.trim() &&
+      raw.draft.content.trim()
+
+    if (hasDraft) {
+      storagePayload[STORAGE_KEYS.SIDEPANEL_NOTE_DRAFT] = {
+        title: raw.draft!.title.trim(),
+        content: raw.draft!.content.trim(),
+        tags: Array.isArray(raw.draft!.tags)
+          ? raw.draft!.tags.map((tag) => String(tag).trim()).filter(Boolean)
+          : []
+      }
+    } else {
+      storagePayload[STORAGE_KEYS.SIDEPANEL_NOTE_DRAFT] = null
+    }
+
+    await chrome.storage.local.set(storagePayload)
+
+    if (!chrome.sidePanel?.open) {
+      return this.fail("API de side panel indisponivel.")
+    }
+
+    const targetWindowId = sender.tab?.windowId ?? chrome.windows.WINDOW_ID_CURRENT
+    await chrome.sidePanel.open({ windowId: targetWindowId })
+
+    return this.ok()
+  }
+
   private async handleAtomizeNote(payload: unknown): Promise<StandardResponse> {
     const { content } = payload as { content: string }
     const canUseZettel = await subscriptionManager.canUseFeature("zettelkasten")
@@ -480,6 +601,36 @@ class MessageRouter {
     )
   }
 
+  private async handleAtomizePreview(payload: unknown): Promise<StandardResponse> {
+    const { content } = payload as { content: string }
+    if (!content?.trim()) {
+      return this.fail("Conteudo vazio para atomizacao.")
+    }
+    const notes = await aiService.atomizeContent(content)
+    return this.ok({ notes })
+  }
+
+  private async handleSaveAtomicNotes(payload: unknown): Promise<StandardResponse> {
+    const { notes } = payload as {
+      notes: Array<{ title: string; content: string; tags: string[]; source?: string }>
+    }
+    if (!Array.isArray(notes) || notes.length === 0) {
+      return this.fail("Nenhuma nota para salvar.")
+    }
+    const user = await authManager.getCurrentUser()
+    if (!user) {
+      return this.fail("Nao autenticado.")
+    }
+    const sanitized = notes.map((n) => ({
+      title: String(n.title ?? "").trim() || "Nota sem titulo",
+      content: String(n.content ?? "").trim(),
+      tags: Array.isArray(n.tags) ? n.tags.map((t) => String(t).trim()).filter(Boolean) : [],
+      source: "zettel_maker"
+    }))
+    const saved = await zettelkastenService.saveAtomicNotes(user.id, sanitized)
+    return this.ok({ count: saved.length, notes: saved })
+  }
+
   private async fetchAvailableNotebooks(): Promise<Notebook[]> {
     const snapshot = await chrome.storage.local.get(this.notebookCacheKey)
     const rawItems = Array.isArray(snapshot[this.notebookCacheKey])
@@ -488,8 +639,16 @@ class MessageRouter {
     const now = new Date().toISOString()
 
     return rawItems
-      .filter((item): item is { id?: unknown; title?: unknown; createTime?: unknown; updateTime?: unknown; sourceCount?: unknown } =>
-        typeof item === "object" && item !== null
+      .filter(
+        (
+          item
+        ): item is {
+          id?: unknown
+          title?: unknown
+          createTime?: unknown
+          updateTime?: unknown
+          sourceCount?: unknown
+        } => typeof item === "object" && item !== null
       )
       .map((item) => ({
         id: String(item.id ?? "").trim(),

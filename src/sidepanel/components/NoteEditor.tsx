@@ -1,26 +1,49 @@
-import { ArrowLeft, Save, Trash2, Link2, Tag, Loader2 } from "lucide-react"
-import { useState, useEffect, useRef } from "react"
+import { ArrowLeft, Link2, Loader2, Save, Tag, Trash2 } from "lucide-react"
+import { useEffect, useRef, useState } from "react"
 import { motion } from "framer-motion"
+
 import { useNotes } from "~/hooks/useNotes"
 import { Button } from "~/components/ui/button"
-import { Input } from "~/components/ui/input"
 import { Badge } from "~/components/ui/badge"
 import { extractWikilinks } from "~/lib/utils"
-import type { Note } from "~/lib/types"
+import type { SidePanelNoteDraft } from "~/lib/types"
 
 interface NoteEditorProps {
   noteId: string | null
+  draftMode?: "blank" | "link"
+  draftSeed?: SidePanelNoteDraft | null
   onBack: () => void
 }
 
-export function NoteEditor({ noteId, onBack }: NoteEditorProps) {
-  const { notes, createNote, updateNote, deleteNote } = useNotes()
-  const note = noteId ? notes.find((n) => n.id === noteId) : null
+const DRAFT_SEEDS = {
+  blank: {
+    title: "",
+    content: ""
+  },
+  link: {
+    title: "Ponte entre ideias",
+    content:
+      "Ideia central:\n\nRelacao principal:\n- Conecta com [[Outra nota]]\n- Explica por que essa ponte importa\n"
+  }
+} as const
 
-  const [title, setTitle] = useState(note?.title ?? "")
-  const [content, setContent] = useState(note?.content ?? "")
+export function NoteEditor({
+  noteId,
+  draftMode = "blank",
+  draftSeed = null,
+  onBack
+}: NoteEditorProps) {
+  const { notes, createNote, updateNote, deleteNote } = useNotes()
+  const note = noteId ? notes.find((entry) => entry.id === noteId) : null
+
+  const [title, setTitle] = useState(
+    note?.title ?? draftSeed?.title ?? DRAFT_SEEDS[draftMode].title
+  )
+  const [content, setContent] = useState(
+    note?.content ?? draftSeed?.content ?? DRAFT_SEEDS[draftMode].content
+  )
   const [tagInput, setTagInput] = useState("")
-  const [tags, setTags] = useState<string[]>(note?.tags ?? [])
+  const [tags, setTags] = useState<string[]>(note?.tags ?? draftSeed?.tags ?? [])
   const [isSaving, setIsSaving] = useState(false)
   const [hasChanges, setHasChanges] = useState(false)
   const saveTimeout = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -30,14 +53,28 @@ export function NoteEditor({ noteId, onBack }: NoteEditorProps) {
       setTitle(note.title)
       setContent(note.content)
       setTags(note.tags)
+      setTagInput("")
+      setHasChanges(false)
+      return
     }
-  }, [note?.id])
 
-  // Auto-save com debounce
+    if (!noteId) {
+      setTitle(draftSeed?.title ?? DRAFT_SEEDS[draftMode].title)
+      setContent(draftSeed?.content ?? DRAFT_SEEDS[draftMode].content)
+      setTags(draftSeed?.tags ?? [])
+      setTagInput("")
+      setHasChanges(false)
+    }
+  }, [note?.id, noteId, draftMode, draftSeed])
+
   useEffect(() => {
     if (!hasChanges) return
     if (saveTimeout.current) clearTimeout(saveTimeout.current)
-    saveTimeout.current = setTimeout(() => handleSave(), 1500)
+
+    saveTimeout.current = setTimeout(() => {
+      void handleSave()
+    }, 1500)
+
     return () => {
       if (saveTimeout.current) clearTimeout(saveTimeout.current)
     }
@@ -46,6 +83,7 @@ export function NoteEditor({ noteId, onBack }: NoteEditorProps) {
   async function handleSave() {
     if (!title.trim()) return
     setIsSaving(true)
+
     try {
       if (noteId) {
         await updateNote(noteId, { title, content, tags })
@@ -53,6 +91,7 @@ export function NoteEditor({ noteId, onBack }: NoteEditorProps) {
         await createNote({ title, content, tags, source: "manual" })
         onBack()
       }
+
       setHasChanges(false)
     } finally {
       setIsSaving(false)
@@ -67,36 +106,45 @@ export function NoteEditor({ noteId, onBack }: NoteEditorProps) {
 
   function addTag() {
     const tag = tagInput.trim().toLowerCase()
-    if (tag && !tags.includes(tag)) {
-      const newTags = [...tags, tag]
-      setTags(newTags)
-      setTagInput("")
-      setHasChanges(true)
-    }
+    if (!tag || tags.includes(tag)) return
+
+    setTags((current) => [...current, tag])
+    setTagInput("")
+    setHasChanges(true)
   }
 
   function removeTag(tag: string) {
-    setTags((prev) => prev.filter((t) => t !== tag))
+    setTags((current) => current.filter((entry) => entry !== tag))
     setHasChanges(true)
   }
 
   const wikilinks = extractWikilinks(content)
+  const isLinkDraft = !noteId && draftMode === "link"
+  const toolbarLabel = hasChanges
+    ? "Mudancas pendentes"
+    : noteId
+      ? "Salvo"
+      : isLinkDraft
+        ? "Nova ponte"
+        : "Nova nota"
+  const contentPlaceholder = isLinkDraft
+    ? "Descreva a conexao e use [[Nome da nota]] para costurar ideias."
+    : "Escreva sua nota em Markdown...\n\nUse [[Nome da nota]] para criar links bidirecionais."
 
   return (
     <motion.div
-      className="flex flex-col h-full"
+      className="flex h-full flex-col"
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}>
-      {/* Toolbar */}
-      <div className="flex items-center gap-2 px-3 py-2 border-b border-white/8">
+      <div className="flex items-center gap-2 border-b border-white/8 px-3 py-2">
         <Button variant="ghost" size="icon" className="h-7 w-7" onClick={onBack}>
           <ArrowLeft size={14} strokeWidth={1.5} />
         </Button>
-        <span className="text-xs text-text-tertiary flex-1">
-          {hasChanges ? "Alterações não salvas" : noteId ? "Salvo" : "Nova nota"}
-        </span>
-        {isSaving && <Loader2 size={12} strokeWidth={1.5} className="animate-spin text-action" />}
-        <Button variant="ghost" size="icon" className="h-7 w-7" onClick={handleSave}>
+        <span className="flex-1 text-xs text-text-tertiary">{toolbarLabel}</span>
+        {isSaving && (
+          <Loader2 size={12} strokeWidth={1.5} className="animate-spin text-action" />
+        )}
+        <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => void handleSave()}>
           <Save size={14} strokeWidth={1.5} />
         </Button>
         {noteId && (
@@ -104,25 +152,25 @@ export function NoteEditor({ noteId, onBack }: NoteEditorProps) {
             variant="ghost"
             size="icon"
             className="h-7 w-7 hover:text-error"
-            onClick={handleDelete}>
+            onClick={() => void handleDelete()}>
             <Trash2 size={14} strokeWidth={1.5} />
           </Button>
         )}
       </div>
 
-      {/* Editor */}
-      <div className="flex-1 overflow-y-auto scrollbar-thin p-3 space-y-3">
-        {/* Title */}
+      <div className="flex-1 space-y-3 overflow-y-auto p-3 scrollbar-thin">
         <input
           type="text"
           value={title}
-          onChange={(e) => { setTitle(e.target.value); setHasChanges(true) }}
-          placeholder="Título da nota..."
+          onChange={(event) => {
+            setTitle(event.target.value)
+            setHasChanges(true)
+          }}
+          placeholder="Titulo da nota..."
           className="w-full bg-transparent text-base font-semibold text-white placeholder:text-text-tertiary focus:outline-none"
         />
 
-        {/* Tags */}
-        <div className="flex flex-wrap gap-1.5 items-center">
+        <div className="flex flex-wrap items-center gap-1.5">
           {tags.map((tag) => (
             <Badge
               key={tag}
@@ -130,59 +178,73 @@ export function NoteEditor({ noteId, onBack }: NoteEditorProps) {
               className="cursor-pointer"
               onClick={() => removeTag(tag)}>
               <Tag size={9} strokeWidth={1.5} />
-              {tag} ×
+              {tag} x
             </Badge>
           ))}
           <input
             type="text"
             value={tagInput}
-            onChange={(e) => setTagInput(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" || e.key === ",") {
-                e.preventDefault()
+            onChange={(event) => setTagInput(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" || event.key === ",") {
+                event.preventDefault()
                 addTag()
               }
             }}
             placeholder="+ tag"
-            className="text-xs bg-transparent text-text-secondary placeholder:text-text-tertiary focus:outline-none w-16"
+            className="w-16 bg-transparent text-xs text-text-secondary placeholder:text-text-tertiary focus:outline-none"
           />
         </div>
 
-        {/* Divider */}
         <div className="border-t border-white/8" />
 
-        {/* Content */}
+        {isLinkDraft && (
+          <div className="rounded-lg border border-info/15 bg-info/5 p-2.5">
+            <div className="flex items-center gap-1.5 text-xs font-medium text-info">
+              <Link2 size={11} strokeWidth={1.5} />
+              Draft de conexao
+            </div>
+            <p className="mt-1 text-xs leading-5 text-text-secondary">
+              Use esse rascunho para criar uma nota-ponte. Os links em [[ ]] vao virar
+              relacoes no grafo.
+            </p>
+          </div>
+        )}
+
         <textarea
           value={content}
-          onChange={(e) => { setContent(e.target.value); setHasChanges(true) }}
-          placeholder={`Escreva sua nota em Markdown...\n\nUse [[Nome da nota]] para criar links bidirecionais.`}
-          className="w-full min-h-[200px] bg-transparent text-sm text-text-secondary placeholder:text-text-tertiary focus:outline-none resize-none leading-relaxed font-mono"
+          onChange={(event) => {
+            setContent(event.target.value)
+            setHasChanges(true)
+          }}
+          placeholder={contentPlaceholder}
+          className="min-h-[200px] w-full resize-none bg-transparent font-mono text-sm leading-relaxed text-text-secondary placeholder:text-text-tertiary focus:outline-none"
         />
 
-        {/* Wikilinks detectados */}
         {wikilinks.length > 0 && (
-          <div className="flex flex-col gap-1.5 p-2.5 bg-info/5 border border-info/15 rounded-lg">
-            <div className="flex items-center gap-1.5 text-xs text-info font-medium">
+          <div className="flex flex-col gap-1.5 rounded-lg border border-info/15 bg-info/5 p-2.5">
+            <div className="flex items-center gap-1.5 text-xs font-medium text-info">
               <Link2 size={11} strokeWidth={1.5} />
               Links detectados
             </div>
             {wikilinks.map((link) => (
-              <span key={link} className="text-xs text-text-secondary pl-4">
+              <span key={link} className="pl-4 text-xs text-text-secondary">
                 [[{link}]]
               </span>
             ))}
           </div>
         )}
 
-        {/* Backlinks */}
         {note && note.backlinks.length > 0 && (
-          <div className="flex flex-col gap-1.5 p-2.5 bg-white/3 border border-white/8 rounded-lg">
-            <span className="text-xs text-text-tertiary font-medium">
-              ← Backlinks ({note.backlinks.length})
+          <div className="flex flex-col gap-1.5 rounded-lg border border-white/8 bg-white/3 p-2.5">
+            <span className="text-xs font-medium text-text-tertiary">
+              Backlinks ({note.backlinks.length})
             </span>
-            {note.backlinks.map((bl) => (
-              <span key={bl.noteId} className="text-xs text-text-secondary hover:text-white cursor-pointer pl-4 transition-colors">
-                {bl.noteTitle}
+            {note.backlinks.map((backlink) => (
+              <span
+                key={backlink.noteId}
+                className="cursor-pointer pl-4 text-xs text-text-secondary transition-colors hover:text-white">
+                {backlink.noteTitle}
               </span>
             ))}
           </div>

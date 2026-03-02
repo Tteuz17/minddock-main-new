@@ -42,7 +42,7 @@ async function ensureMindDockSelectionContextMenu() {
 
   await createContextMenu({
     id: MINDDOCK_SELECTION_CAPTURE_MENU_ID,
-    title: "Enviar para o NotebookLM (MindDock)",
+    title: "Send to NotebookLM (MindDock)",
     contexts: ["selection"]
   })
 }
