@@ -113,46 +113,49 @@ function buildSuggestions(prompt: string): PromptSuggestion[] {
   if (prompt.trim().length < 70) {
     suggestions.push({
       key: "context",
-      label: "Adicionar contexto",
-      hint: "Explique melhor o cenario para reduzir respostas vagas.",
-      suffix: "\n\nContexto: considere o tema, as fontes do notebook e o objetivo final antes de responder."
+      label: "Add context",
+      hint: "Clarify the scenario to reduce vague answers.",
+      suffix:
+        "\n\nContext: consider the topic, the notebook sources, and the final goal before answering."
     })
   }
 
-  if (!/(topicos|tabela|passo a passo|formato|markdown|lista|quadro)/.test(normalized)) {
+  if (!/(topics|table|step by step|format|markdown|list|outline|topicos|tabela|passo a passo|formato|lista|quadro)/.test(normalized)) {
     suggestions.push({
       key: "format",
-      label: "Definir formato",
-      hint: "Peca uma estrutura de saida mais previsivel.",
-      suffix: "\n\nFormato de saida: responda em topicos curtos, com subtitulos claros e conclusao final."
+      label: "Define format",
+      hint: "Ask for a more predictable output structure.",
+      suffix:
+        "\n\nOutput format: answer in short bullet points, with clear subheadings and a final conclusion."
     })
   }
 
-  if (!/(criterio|priori|compare|diferenca|vantagem|desvantagem|evidencia)/.test(normalized)) {
+  if (!/(criteria|priority|compare|difference|advantage|disadvantage|evidence|criterio|priori|diferenca|vantagem|desvantagem|evidencia)/.test(normalized)) {
     suggestions.push({
       key: "criteria",
-      label: "Adicionar criterio",
-      hint: "Forca o NotebookLM a priorizar qualidade e precisao.",
-      suffix: "\n\nCriterios: priorize precisao, use evidencias das fontes e destaque divergencias quando existirem."
+      label: "Add criteria",
+      hint: "Push NotebookLM to prioritize quality and accuracy.",
+      suffix:
+        "\n\nCriteria: prioritize accuracy, use evidence from the sources, and highlight divergences when they exist."
     })
   }
 
-  if (!/(exemplo|caso pratico|aplique|na pratica)/.test(normalized)) {
+  if (!/(example|examples|use case|practical|apply|real world|exemplo|caso pratico|aplique|na pratica)/.test(normalized)) {
     suggestions.push({
       key: "examples",
-      label: "Pedir exemplos",
-      hint: "Melhora a utilidade pratica da resposta.",
-      suffix: "\n\nInclua exemplos praticos e aplicacoes reais ao final da resposta."
+      label: "Ask for examples",
+      hint: "Make the answer more practical and useful.",
+      suffix: "\n\nInclude practical examples and real-world applications at the end of the answer."
     })
   }
 
   if (suggestions.length === 0) {
     suggestions.push({
       key: "depth",
-      label: "Pedir mais profundidade",
-      hint: "Torna a resposta mais util para estudo e pesquisa.",
+      label: "Ask for more depth",
+      hint: "Make the answer more useful for study and research.",
       suffix:
-        "\n\nAprofunde a resposta, organize por etapas e destaque pontos criticos para estudo."
+        "\n\nGo deeper in the answer, organize it in steps, and highlight critical points for study."
     })
   }
 
@@ -251,20 +254,20 @@ export function PromptCoachBubble() {
       })
 
       if (!response?.success) {
-        throw new Error(response?.error ?? "Nao foi possivel melhorar o prompt.")
+        throw new Error(response?.error ?? "Unable to improve the prompt.")
       }
 
       const improved = response?.payload?.improved ?? response?.data?.improved
       if (typeof improved !== "string" || !improved.trim()) {
-        throw new Error("Resposta invalida ao melhorar o prompt.")
+        throw new Error("Invalid response while improving the prompt.")
       }
 
       writeComposerValue(composer, improved.trim())
       setPrompt(improved.trim())
-      setFeedback("Prompt refinado")
+      setFeedback("Prompt refined")
       setIsExpanded(false)
     } catch (error) {
-      setFeedback(error instanceof Error ? error.message : "Falha ao melhorar")
+      setFeedback(error instanceof Error ? error.message : "Improvement failed")
     } finally {
       setIsImproving(false)
     }
@@ -278,7 +281,7 @@ export function PromptCoachBubble() {
     const nextPrompt = `${current}${separator}${suggestion.suffix.trim()}`
     writeComposerValue(composer, nextPrompt)
     setPrompt(nextPrompt)
-    setFeedback("Sugestao aplicada")
+    setFeedback("Suggestion applied")
     setIsExpanded(false)
   }
 
@@ -313,10 +316,10 @@ export function PromptCoachBubble() {
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0">
                           <p className="text-[10px] font-medium uppercase tracking-[0.14em] text-zinc-500">
-                            Otimizacoes
+                            Optimizations
                           </p>
                           <p className="mt-0.5 text-[10px] text-zinc-300">
-                            Ajustes para melhorar seus resultados.
+                            Improvements to get better results.
                           </p>
                         </div>
 
@@ -326,7 +329,7 @@ export function PromptCoachBubble() {
                             onClick={() => void improveWithAI()}
                             className="liquid-glass-soft inline-flex h-8 shrink-0 items-center gap-1.5 rounded-[12px] px-2.5 text-[10px] font-medium text-zinc-100 hover:-translate-y-px hover:text-white">
                             <Wand2 size={11} strokeWidth={1.9} />
-                            {isImproving ? "Refinando..." : "IA"}
+                            {isImproving ? "Refining..." : "AI"}
                           </button>
                         ) : null}
                       </div>
@@ -345,7 +348,7 @@ export function PromptCoachBubble() {
                               </p>
                             </div>
                             <span className="liquid-glass-content mt-0.5 text-[9px] text-zinc-500">
-                              aplicar
+                              apply
                             </span>
                           </button>
                         ))}
@@ -369,7 +372,7 @@ export function PromptCoachBubble() {
                   <Sparkles size={12} strokeWidth={2} />
                 </span>
                 <span className="truncate text-[11px] font-semibold tracking-[-0.01em] text-black">
-                  Temos otimizacoes para sua pergunta
+                  We have optimizations for your prompt
                 </span>
               </div>
               <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[10px] bg-black/10 text-black">

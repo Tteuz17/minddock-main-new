@@ -28,6 +28,7 @@ export const STORAGE_KEYS = {
   USER_PROFILE: "minddock_user_profile",
   SUBSCRIPTION: "minddock_subscription",
   SIDEPANEL_VIEW: "minddock_sidepanel_view",
+  SIDEPANEL_NOTE_DRAFT: "minddock_sidepanel_note_draft",
   NOTEBOOKS_CACHE: "minddock_notebooks_cache",
   SOURCES_CACHE: "minddock_sources_cache",
   DAILY_USAGE: "minddock_daily_usage",

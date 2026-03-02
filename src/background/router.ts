@@ -7,6 +7,7 @@ import { aiService } from "~/services/ai-service"
 import { exportService } from "~/services/export-service"
 import { zettelkastenService } from "~/services/zettelkasten"
 import { threadService } from "~/services/thread-service"
+import { STORAGE_KEYS } from "~/lib/constants"
 import {
   FIXED_STORAGE_KEYS,
   MESSAGE_ACTIONS,
@@ -14,7 +15,12 @@ import {
   type StandardResponse
 } from "~/lib/contracts"
 import { formatChatAsMarkdown, getFromStorage } from "~/lib/utils"
-import type { ChromeMessage, ChromeMessageResponse } from "~/lib/types"
+import type {
+  ChromeMessage,
+  ChromeMessageResponse,
+  SidePanelLaunchTarget,
+  SidePanelNoteDraft
+} from "~/lib/types"
 
 type MessageSender = chrome.runtime.MessageSender
 
@@ -65,6 +71,7 @@ class MessageRouter {
     this.register(MESSAGE_ACTIONS.THREAD_RENAME, this.handleThreadRename)
     this.register(MESSAGE_ACTIONS.THREAD_MESSAGES, this.handleThreadMessages)
     this.register(MESSAGE_ACTIONS.THREAD_SAVE_MESSAGES, this.handleThreadSaveMessages)
+    this.register(MESSAGE_ACTIONS.OPEN_SIDEPANEL, this.handleOpenSidePanel)
   }
 
   private register(command: string, handler: Handler): void {
@@ -606,6 +613,57 @@ class MessageRouter {
     }
     await threadService.saveMessages(threadId, messages)
     return this.ok({})
+  }
+
+  private async handleOpenSidePanel(
+    payload: unknown,
+    sender: MessageSender
+  ): Promise<StandardResponse> {
+    const raw = (payload ?? {}) as {
+      target?: SidePanelLaunchTarget
+      draft?: SidePanelNoteDraft | null
+    }
+
+    const target = String(raw.target ?? "").trim() as SidePanelLaunchTarget
+    const validTargets: SidePanelLaunchTarget[] = ["notes", "graph", "create_note", "link_note"]
+
+    if (!validTargets.includes(target)) {
+      return this.fail("Target invalido para abrir o side panel.")
+    }
+
+    const storagePayload: Record<string, unknown> = {
+      [STORAGE_KEYS.SIDEPANEL_VIEW]: target
+    }
+
+    const hasDraft =
+      raw.draft &&
+      typeof raw.draft.title === "string" &&
+      typeof raw.draft.content === "string" &&
+      raw.draft.title.trim() &&
+      raw.draft.content.trim()
+
+    if (hasDraft) {
+      storagePayload[STORAGE_KEYS.SIDEPANEL_NOTE_DRAFT] = {
+        title: raw.draft!.title.trim(),
+        content: raw.draft!.content.trim(),
+        tags: Array.isArray(raw.draft!.tags)
+          ? raw.draft!.tags.map((tag) => String(tag).trim()).filter(Boolean)
+          : []
+      }
+    } else {
+      storagePayload[STORAGE_KEYS.SIDEPANEL_NOTE_DRAFT] = null
+    }
+
+    await chrome.storage.local.set(storagePayload)
+
+    if (!chrome.sidePanel?.open) {
+      return this.fail("API de side panel indisponivel.")
+    }
+
+    const targetWindowId = sender.tab?.windowId ?? chrome.windows.WINDOW_ID_CURRENT
+    await chrome.sidePanel.open({ windowId: targetWindowId })
+
+    return this.ok()
   }
 
   private async handleAtomizeNote(payload: unknown): Promise<StandardResponse> {
