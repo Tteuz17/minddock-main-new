@@ -1,6 +1,6 @@
 import "~/styles/globals.css"
 
-import { useEffect, useState } from "react"
+import { useCallback, useEffect, useState } from "react"
 import { AnimatePresence, motion } from "framer-motion"
 import { Network, StickyNote, Tag } from "lucide-react"
 
@@ -14,7 +14,7 @@ import { LoadingSpinner } from "~/components/LoadingSpinner"
 import { useSubscription } from "~/hooks/useSubscription"
 import { UpgradePrompt } from "~/components/UpgradePrompt"
 import { STORAGE_KEYS } from "~/lib/constants"
-import type { SidePanelLaunchTarget } from "~/lib/types"
+import type { SidePanelLaunchTarget, SidePanelNoteDraft } from "~/lib/types"
 
 export type SidePanelTab = "notes" | "graph" | "tags"
 type NoteDraftMode = "blank" | "link"
@@ -26,30 +26,31 @@ export default function SidePanel() {
   const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null)
   const [isEditing, setIsEditing] = useState(false)
   const [draftMode, setDraftMode] = useState<NoteDraftMode>("blank")
+  const [draftSeed, setDraftSeed] = useState<SidePanelNoteDraft | null>(null)
 
-  useEffect(() => {
-    chrome.storage.local.get(STORAGE_KEYS.SIDEPANEL_VIEW, (snapshot) => {
-      const target = snapshot[STORAGE_KEYS.SIDEPANEL_VIEW] as SidePanelLaunchTarget | undefined
-      if (!target) return
-
+  const applyLaunchTarget = useCallback(
+    (target: SidePanelLaunchTarget, nextDraft: SidePanelNoteDraft | null = null) => {
       switch (target) {
         case "graph":
           setActiveTab("graph")
           setIsEditing(false)
           setSelectedNoteId(null)
           setDraftMode("blank")
+          setDraftSeed(null)
           break
         case "create_note":
           setActiveTab("notes")
           setIsEditing(true)
           setSelectedNoteId(null)
           setDraftMode("blank")
+          setDraftSeed(nextDraft)
           break
         case "link_note":
           setActiveTab("notes")
           setIsEditing(true)
           setSelectedNoteId(null)
           setDraftMode("link")
+          setDraftSeed(null)
           break
         case "notes":
         default:
@@ -57,12 +58,51 @@ export default function SidePanel() {
           setIsEditing(false)
           setSelectedNoteId(null)
           setDraftMode("blank")
+          setDraftSeed(null)
           break
       }
+    },
+    []
+  )
 
-      chrome.storage.local.remove(STORAGE_KEYS.SIDEPANEL_VIEW)
-    })
-  }, [])
+  useEffect(() => {
+    const consumeLaunchState = () => {
+      chrome.storage.local.get(
+        [STORAGE_KEYS.SIDEPANEL_VIEW, STORAGE_KEYS.SIDEPANEL_NOTE_DRAFT],
+        (snapshot) => {
+          const target = snapshot[STORAGE_KEYS.SIDEPANEL_VIEW] as SidePanelLaunchTarget | undefined
+          if (!target) {
+            return
+          }
+
+          const nextDraft =
+            (snapshot[STORAGE_KEYS.SIDEPANEL_NOTE_DRAFT] as SidePanelNoteDraft | null | undefined) ??
+            null
+
+          applyLaunchTarget(target, nextDraft)
+          chrome.storage.local.remove([
+            STORAGE_KEYS.SIDEPANEL_VIEW,
+            STORAGE_KEYS.SIDEPANEL_NOTE_DRAFT
+          ])
+        }
+      )
+    }
+
+    consumeLaunchState()
+
+    const handleStorageChange = (
+      changes: Record<string, chrome.storage.StorageChange>,
+      areaName: string
+    ) => {
+      if (areaName !== "local" || !changes[STORAGE_KEYS.SIDEPANEL_VIEW]) {
+        return
+      }
+      consumeLaunchState()
+    }
+
+    chrome.storage.onChanged.addListener(handleStorageChange)
+    return () => chrome.storage.onChanged.removeListener(handleStorageChange)
+  }, [applyLaunchTarget])
 
   if (isLoading) {
     return (
@@ -106,6 +146,7 @@ export default function SidePanel() {
               setIsEditing(false)
               setSelectedNoteId(null)
               setDraftMode("blank")
+              setDraftSeed(null)
             }}
             className={[
               "flex-1 flex items-center justify-center gap-1.5 py-2.5 text-xs font-medium transition-all",
@@ -134,11 +175,13 @@ export default function SidePanel() {
                   setSelectedNoteId(id)
                   setIsEditing(true)
                   setDraftMode("blank")
+                  setDraftSeed(null)
                 }}
                 onCreateNote={() => {
                   setSelectedNoteId(null)
                   setIsEditing(true)
                   setDraftMode("blank")
+                  setDraftSeed(null)
                 }}
               />
             </motion.div>
@@ -155,10 +198,12 @@ export default function SidePanel() {
               <NoteEditor
                 noteId={selectedNoteId}
                 draftMode={draftMode}
+                draftSeed={draftSeed}
                 onBack={() => {
                   setIsEditing(false)
                   setSelectedNoteId(null)
                   setDraftMode("blank")
+                  setDraftSeed(null)
                 }}
               />
             </motion.div>
@@ -178,6 +223,7 @@ export default function SidePanel() {
                   setActiveTab("notes")
                   setIsEditing(true)
                   setDraftMode("blank")
+                  setDraftSeed(null)
                 }}
               />
             </motion.div>

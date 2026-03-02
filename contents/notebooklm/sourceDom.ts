@@ -207,6 +207,7 @@ export function clearNativeSourceSearchInputs(): void {
   const searchSelectors = [
     "source-picker input[type='text']",
     "source-picker input[placeholder*='Pesquise']",
+    "source-picker input[placeholder*='Search']",
     ".source-panel input[type='text']"
   ] as const
 
@@ -255,12 +256,12 @@ export function ensureOriginalDisplay(row: HTMLElement): string {
 
 export function formatTitleList(titles: string[]): string {
   if (titles.length === 0) {
-    return "fontes desconhecidas"
+    return "unknown sources"
   }
   if (titles.length <= 3) {
     return titles.join(", ")
   }
-  return `${titles.slice(0, 3).join(", ")} e +${titles.length - 3}`
+  return `${titles.slice(0, 3).join(", ")} and +${titles.length - 3}`
 }
 
 export function extractUrlFromSnippets(snippets: string[]): string | undefined {
@@ -348,4 +349,146 @@ export function captureVisibleMessages(): Array<{ role: "user" | "assistant"; co
   }
 
   return messages
+}
+
+function resolveConversationLabel(): HTMLElement | null {
+  const labels = ["Conversa", "Conversation", "Chat"]
+
+  for (const root of getDeepRoots()) {
+    const candidates = Array.from(
+      "querySelectorAll" in root
+        ? (root as Document | ShadowRoot).querySelectorAll<HTMLElement>(
+            "span, div, h2, h3, button, a, [role='tab']"
+          )
+        : []
+    )
+
+    for (const element of candidates) {
+      if (!isVisible(element)) continue
+
+      const text = String(element.textContent ?? "").trim()
+      if (!labels.some((label) => text === label)) continue
+
+      const rect = element.getBoundingClientRect()
+      if (rect.top > 140 || rect.height > 80) continue
+
+      return element
+    }
+  }
+
+  return null
+}
+
+function clickElement(element: HTMLElement): boolean {
+  element.dispatchEvent(
+    new MouseEvent("mousedown", {
+      bubbles: true,
+      cancelable: true,
+      view: window
+    })
+  )
+  element.dispatchEvent(
+    new MouseEvent("mouseup", {
+      bubbles: true,
+      cancelable: true,
+      view: window
+    })
+  )
+  element.click()
+  return true
+}
+
+function isMindDockInjectedElement(element: HTMLElement): boolean {
+  return !!element.closest(
+    "#minddock-focus-threads-root, #minddock-agile-bar-root, #minddock-source-actions-root, #minddock-source-filters-root"
+  )
+}
+
+function isLikelyNativeConversationTrigger(
+  candidate: HTMLElement,
+  labelRect?: DOMRect
+): boolean {
+  if (!isVisible(candidate) || isMindDockInjectedElement(candidate)) {
+    return false
+  }
+
+  const text = String(candidate.textContent ?? "").trim()
+  const aria = String(candidate.getAttribute("aria-label") ?? candidate.getAttribute("title") ?? "")
+    .trim()
+    .toLowerCase()
+  const rect = candidate.getBoundingClientRect()
+
+  if (
+    text === "+" ||
+    aria.includes("new conversation") ||
+    aria.includes("new chat") ||
+    aria.includes("nova conversa") ||
+    aria.includes("novo chat")
+  ) {
+    return true
+  }
+
+  if (!labelRect) {
+    return false
+  }
+
+  const isCompact = rect.width <= 32 && rect.height <= 32
+  const isRightNextToLabel =
+    rect.left >= labelRect.right - 6 &&
+    rect.left <= labelRect.right + 44 &&
+    Math.abs(rect.top - labelRect.top) <= 16
+
+  return isCompact && isRightNextToLabel
+}
+
+export function triggerNotebookNewConversation(): boolean {
+  const label = resolveConversationLabel()
+  const labelRect = label?.getBoundingClientRect()
+  const headerHost = resolveConversationHeaderHost()
+
+  if (headerHost) {
+    const directCandidates = Array.from(
+      headerHost.querySelectorAll<HTMLElement>("button, [role='button'], a, span, div")
+    )
+
+    for (const candidate of directCandidates) {
+      if (isLikelyNativeConversationTrigger(candidate, labelRect)) {
+        return clickElement(candidate)
+      }
+    }
+  }
+
+  if (!label) {
+    return false
+  }
+
+  const row = label.parentElement ?? label
+  const siblingCandidates = Array.from(
+    row.querySelectorAll<HTMLElement>("button, [role='button'], a, span")
+  )
+
+  for (const candidate of siblingCandidates) {
+    if (candidate === label) continue
+
+    if (isLikelyNativeConversationTrigger(candidate, labelRect)) {
+      return clickElement(candidate)
+    }
+  }
+
+  const rowRect = row.getBoundingClientRect()
+  const nearbyInteractive = queryDeepAll<HTMLElement>(["button", "[role='button']", "a", "span", "div"]).filter(
+    (candidate) => {
+      if (!isLikelyNativeConversationTrigger(candidate, labelRect)) return false
+      const rect = candidate.getBoundingClientRect()
+      if (Math.abs(rect.top - rowRect.top) > 28) return false
+      if (rect.left < rowRect.right - 8 || rect.left > rowRect.right + 80) return false
+      return true
+    }
+  )
+
+  if (nearbyInteractive[0]) {
+    return clickElement(nearbyInteractive[0])
+  }
+
+  return false
 }

@@ -54,6 +54,12 @@ export interface AuthState {
 
 export type SidePanelLaunchTarget = "notes" | "graph" | "create_note" | "link_note"
 
+export interface SidePanelNoteDraft {
+  title: string
+  content: string
+  tags?: string[]
+}
+
 // ─── Zettelkasten Types ─────────────────────────────────────────────────────
 
 export interface Note {
@@ -193,6 +199,7 @@ export type MessageCommand =
   | "MINDDOCK_ATOMIZE_NOTE"
   | "MINDDOCK_EXPORT_SOURCES"
   | "MINDDOCK_HIGHLIGHT_SNIPE"
+  | "MINDDOCK_OPEN_SIDEPANEL"
 
 export interface ChromeMessage<T = unknown> {
   command: MessageCommand

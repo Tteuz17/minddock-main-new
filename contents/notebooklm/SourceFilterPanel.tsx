@@ -30,11 +30,11 @@ import {
 const SAVED_VIEW_KEY = "minddock:source-panel-saved-view"
 
 const FILTERS: Array<{ type: SourceFilterType; label: string; icon: LucideIcon }> = [
-  { type: "All", label: "Todos", icon: LayoutGrid },
+  { type: "All", label: "All", icon: LayoutGrid },
   { type: "PDFs", label: "PDFs", icon: FileText },
   { type: "GDocs", label: "GDocs", icon: Files },
   { type: "Web", label: "Web", icon: Globe },
-  { type: "Text", label: "Texto", icon: Type },
+  { type: "Text", label: "Text", icon: Type },
   { type: "YouTube", label: "YouTube", icon: Youtube }
 ]
 
@@ -204,25 +204,25 @@ export function SourceFilterPanel() {
               type="search"
               value={searchText}
               onChange={(event) => setSearchText(event.target.value)}
-              placeholder="Fontes de pesquisa..."
+              placeholder="Search sources..."
               className="w-full bg-transparent text-[12px] text-white outline-none placeholder:text-[#6f7580]"
             />
           </div>
 
           <div className="inline-flex shrink-0 items-center gap-1 rounded-[16px] border border-white/[0.06] bg-[#0d0f12] p-1">
-            <PanelActionButton title="Exportar fontes visiveis" onClick={openExportPanel}>
+            <PanelActionButton title="Export visible sources" onClick={openExportPanel}>
               <Download size={15} strokeWidth={1.8} />
             </PanelActionButton>
-            <PanelActionButton title="Atualizar fontes Google Docs" onClick={refreshSources}>
+            <PanelActionButton title="Refresh Google Docs sources" onClick={refreshSources}>
               <RefreshCw size={15} strokeWidth={1.8} />
             </PanelActionButton>
             <PanelActionButton
-              title={areFiltersOpen ? "Ocultar filtros" : "Mostrar filtros"}
+              title={areFiltersOpen ? "Hide filters" : "Show filters"}
               onClick={toggleFilters}
               active={areFiltersOpen}>
               <ListFilter size={15} strokeWidth={1.8} />
             </PanelActionButton>
-            <PanelActionButton title="Limpar filtros e restaurar painel" onClick={resetAllSources}>
+            <PanelActionButton title="Clear filters and reset panel" onClick={resetAllSources}>
               <Trash2 size={15} strokeWidth={1.8} />
             </PanelActionButton>
           </div>
@@ -259,7 +259,7 @@ export function SourceFilterPanel() {
             type="button"
             onClick={saveView}
             className="ml-auto rounded-full border border-white/[0.06] bg-[#101216] px-3.5 py-1.5 text-[11px] font-medium text-white transition-colors hover:bg-[#14171c]">
-            Salvar visualizacao
+            Save view
           </button>
           </div>
         </div>

@@ -6,10 +6,12 @@ import { useNotes } from "~/hooks/useNotes"
 import { Button } from "~/components/ui/button"
 import { Badge } from "~/components/ui/badge"
 import { extractWikilinks } from "~/lib/utils"
+import type { SidePanelNoteDraft } from "~/lib/types"
 
 interface NoteEditorProps {
   noteId: string | null
   draftMode?: "blank" | "link"
+  draftSeed?: SidePanelNoteDraft | null
   onBack: () => void
 }
 
@@ -28,15 +30,20 @@ const DRAFT_SEEDS = {
 export function NoteEditor({
   noteId,
   draftMode = "blank",
+  draftSeed = null,
   onBack
 }: NoteEditorProps) {
   const { notes, createNote, updateNote, deleteNote } = useNotes()
   const note = noteId ? notes.find((entry) => entry.id === noteId) : null
 
-  const [title, setTitle] = useState(note?.title ?? DRAFT_SEEDS[draftMode].title)
-  const [content, setContent] = useState(note?.content ?? DRAFT_SEEDS[draftMode].content)
+  const [title, setTitle] = useState(
+    note?.title ?? draftSeed?.title ?? DRAFT_SEEDS[draftMode].title
+  )
+  const [content, setContent] = useState(
+    note?.content ?? draftSeed?.content ?? DRAFT_SEEDS[draftMode].content
+  )
   const [tagInput, setTagInput] = useState("")
-  const [tags, setTags] = useState<string[]>(note?.tags ?? [])
+  const [tags, setTags] = useState<string[]>(note?.tags ?? draftSeed?.tags ?? [])
   const [isSaving, setIsSaving] = useState(false)
   const [hasChanges, setHasChanges] = useState(false)
   const saveTimeout = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -52,13 +59,13 @@ export function NoteEditor({
     }
 
     if (!noteId) {
-      setTitle(DRAFT_SEEDS[draftMode].title)
-      setContent(DRAFT_SEEDS[draftMode].content)
-      setTags([])
+      setTitle(draftSeed?.title ?? DRAFT_SEEDS[draftMode].title)
+      setContent(draftSeed?.content ?? DRAFT_SEEDS[draftMode].content)
+      setTags(draftSeed?.tags ?? [])
       setTagInput("")
       setHasChanges(false)
     }
-  }, [note?.id, noteId, draftMode])
+  }, [note?.id, noteId, draftMode, draftSeed])
 
   useEffect(() => {
     if (!hasChanges) return
