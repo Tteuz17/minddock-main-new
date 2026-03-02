@@ -9,13 +9,15 @@ interface AuthScreenProps {
 }
 
 export function AuthScreen({ compact }: AuthScreenProps) {
-  const { signIn } = useAuth()
+  const { signIn, error } = useAuth()
   const [isLoading, setIsLoading] = useState(false)
 
   async function handleSignIn() {
     setIsLoading(true)
     try {
       await signIn()
+    } catch {
+      // O erro ja e exposto pelo hook.
     } finally {
       setIsLoading(false)
     }
@@ -88,6 +90,12 @@ export function AuthScreen({ compact }: AuthScreenProps) {
           )}
           {isLoading ? "Entrando..." : "Continuar com Google"}
         </Button>
+
+        {error ? (
+          <div className="w-full rounded-xl border border-red-400/30 bg-red-500/10 px-3 py-2 text-left">
+            <p className="text-xs leading-relaxed text-red-200">{error}</p>
+          </div>
+        ) : null}
 
         <p className="text-xs text-text-tertiary">
           Grátis para começar · Sem cartão de crédito

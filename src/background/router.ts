@@ -1,5 +1,3 @@
-import { notebookLMClient } from "./notebooklm-client"
-import { NotebookClient, NotebookRpcHttpError } from "./notebook-client"
 import { authManager } from "./auth-manager"
 import { storageManager } from "./storage-manager"
 import { subscriptionManager } from "./subscription"
@@ -9,11 +7,10 @@ import { zettelkastenService } from "~/services/zettelkasten"
 import {
   FIXED_STORAGE_KEYS,
   MESSAGE_ACTIONS,
-  type SessionTokens,
   type StandardResponse
 } from "~/lib/contracts"
 import { formatChatAsMarkdown, getFromStorage } from "~/lib/utils"
-import type { ChromeMessage, ChromeMessageResponse } from "~/lib/types"
+import type { ChromeMessage, ChromeMessageResponse, Notebook } from "~/lib/types"
 
 type MessageSender = chrome.runtime.MessageSender
 
@@ -24,6 +21,8 @@ type Handler = (
 
 class MessageRouter {
   private handlers: Map<string, Handler> = new Map()
+  private readonly notebookCacheKey = "minddock_cached_notebooks"
+  private readonly backgroundSyncAction = "SYNC_NOTEBOOKS"
 
   constructor() {
     // Phase 1 fixed actions.
@@ -36,6 +35,7 @@ class MessageRouter {
     this.register(MESSAGE_ACTIONS.CMD_GET_SOURCE_CONTENTS, this.handleGetSourceContents)
     this.register(MESSAGE_ACTIONS.CMD_REFRESH_GDOC_SOURCES, this.handleRefreshGDocSources)
     this.register(MESSAGE_ACTIONS.CMD_SYNC_ALL_GDOCS, this.handleRefreshGDocSources)
+    this.register(this.backgroundSyncAction, this.handleSyncNotebooks)
 
     // Legacy aliases kept to avoid regressions in existing popup/sidepanel code.
     this.register("MINDDOCK_SAVE_TOKENS", this.handleStoreSessionTokens)
@@ -83,20 +83,6 @@ class MessageRouter {
       const result = await handler(payload, sender)
       sendResponse(this.normalizeResponse(result))
     } catch (err) {
-      if (err instanceof NotebookRpcHttpError) {
-        sendResponse(
-          this.normalizeResponse({
-            success: false,
-            error: `NotebookLM RPC ${err.rpcId} falhou com HTTP ${err.status}`,
-            payload: {
-              rpcId: err.rpcId,
-              status: err.status
-            }
-          })
-        )
-        return
-      }
-
       const errorMsg = err instanceof Error ? err.message : "Erro desconhecido"
       console.error(`[MindDock Router] ${action}:`, err)
       sendResponse(
@@ -209,8 +195,38 @@ class MessageRouter {
       return this.fail("Payload invalido para MINDDOCK_STORE_SESSION_TOKENS: at/bl obrigatorios.")
     }
 
-    await notebookLMClient.saveTokens({ at, bl, sessionId, authUser })
+    await chrome.storage.local.set({
+      [FIXED_STORAGE_KEYS.AT_TOKEN]: at,
+      [FIXED_STORAGE_KEYS.BL_TOKEN]: bl,
+      [FIXED_STORAGE_KEYS.SESSION_ID]: sessionId,
+      [FIXED_STORAGE_KEYS.AUTH_USER]: authUser,
+      [FIXED_STORAGE_KEYS.TOKEN_EXPIRES_AT]: Date.now() + 60 * 60 * 1000
+    })
     return this.ok()
+  }
+
+  private async handleSyncNotebooks(payload: unknown): Promise<StandardResponse> {
+    const rawNotebooks = Array.isArray((payload as { notebooks?: unknown[] } | undefined)?.notebooks)
+      ? ((payload as { notebooks?: unknown[] }).notebooks as unknown[])
+      : []
+
+    const now = new Date().toISOString()
+    const notebooks = rawNotebooks
+      .filter((item): item is { id?: unknown; title?: unknown } => typeof item === "object" && item !== null)
+      .map((item) => ({
+        id: String(item.id ?? "").trim(),
+        title: String(item.title ?? "").trim(),
+        createTime: now,
+        updateTime: now,
+        sourceCount: 0
+      }))
+      .filter((item) => item.id && item.title)
+
+    await chrome.storage.local.set({
+      [this.notebookCacheKey]: notebooks
+    })
+
+    return this.ok({ syncedCount: notebooks.length })
   }
 
   private async handleAuthSignIn(payload: unknown): Promise<StandardResponse> {
@@ -235,157 +251,29 @@ class MessageRouter {
   }
 
   private async handleGetNotebooks(): Promise<StandardResponse> {
-    const client = await this.createNotebookClientFromStorage()
-    const notebooks = await client.fetchNotebooks()
+    const notebooks = await this.fetchAvailableNotebooks()
     return this.ok(notebooks)
   }
 
   private async handleGetNotebookSources(payload: unknown): Promise<StandardResponse> {
-    const notebookId = (payload as { notebookId?: string })?.notebookId
-    if (!notebookId) {
-      return this.fail("notebookId obrigatorio para listar fontes.")
-    }
-
-    const client = await this.createNotebookClientFromStorage({ requireSessionId: true })
-    const sources = await client.fetchNotebookSources(notebookId)
-    return this.ok(sources)
+    void payload
+    return this.fail(
+      "Leitura de fontes via background foi desativada. Use o content script para sincronizar dados do NotebookLM."
+    )
   }
 
   private async handleGetSourceContents(payload: unknown): Promise<StandardResponse> {
-    const notebookId = (payload as { notebookId?: string })?.notebookId
-    const sourceIds = (payload as { sourceIds?: string[] })?.sourceIds
-
-    if (!notebookId?.trim()) {
-      return this.fail("notebookId obrigatorio para buscar conteudos.")
-    }
-    if (!Array.isArray(sourceIds) || sourceIds.length === 0) {
-      return this.fail("sourceIds obrigatorio e deve conter pelo menos 1 item.")
-    }
-
-    const client = await this.createNotebookClientFromStorage({ requireSessionId: true })
-    const uniqueIds = Array.from(
-      new Set(sourceIds.map((id) => id?.trim()).filter((id): id is string => !!id))
+    void payload
+    return this.fail(
+      "Leitura de conteudo de fontes via background foi desativada. Use o content script para sincronizar dados do NotebookLM."
     )
-
-    const backendSources = await client.fetchNotebookSources(notebookId)
-    const titleMap = new Map(backendSources.map((source) => [source.id, source.title]))
-    const titles = uniqueIds.map((sourceId) => titleMap.get(sourceId) ?? sourceId)
-
-    console.log("[download:selected]", { notebookId, sourceIds: uniqueIds, titles })
-    console.log(
-      "[sources:backend]",
-      backendSources.map((source) => ({ id: source.id, title: source.title }))
-    )
-
-    const sourceSnippets = await client.fetchSourceContentBatch(notebookId, uniqueIds)
-    const failedSourceIds = uniqueIds.filter((sourceId) => {
-      const snippets = sourceSnippets[sourceId]
-      return !Array.isArray(snippets) || snippets.length === 0
-    })
-
-    return this.ok({
-      notebookId,
-      sourceSnippets,
-      failedSourceIds
-    })
   }
 
   private async handleRefreshGDocSources(payload: unknown): Promise<StandardResponse> {
-    const notebookId = (payload as { notebookId?: string })?.notebookId
-    if (!notebookId?.trim()) {
-      return this.fail("notebookId obrigatorio para sincronizar fontes GDoc.")
-    }
-
-    const client = await this.createNotebookClientFromStorage({ requireSessionId: true })
-    const sources = await client.fetchNotebookSources(notebookId)
-    console.log(
-      "[sources:backend]",
-      sources.map((source) => ({ id: source.id, title: source.title }))
+    void payload
+    return this.fail(
+      "Sincronizacao GDoc via background foi desativada. Use o content script para sincronizar dados do NotebookLM."
     )
-
-    const gdocSources = sources.filter((source) => source.isGDoc === true && !!source.id?.trim())
-    const batchSize = 3
-    let syncedCount = 0
-    const failedSourceTitleList: string[] = []
-
-    for (let i = 0; i < gdocSources.length; i += batchSize) {
-      const batch = gdocSources.slice(i, i + batchSize)
-
-      const batchResults = await Promise.all(
-        batch.map(async (source) => {
-          try {
-            await client.syncGDocSource(notebookId, source.id)
-            return { success: true, title: source.title }
-          } catch {
-            return { success: false, title: source.title }
-          }
-        })
-      )
-
-      for (const result of batchResults) {
-        if (result.success) {
-          syncedCount++
-        } else {
-          failedSourceTitleList.push(result.title)
-        }
-      }
-    }
-
-    const total = gdocSources.length
-    const message =
-      total === 0
-        ? "Nenhuma fonte Google Docs encontrada para sincronizar."
-        : failedSourceTitleList.length === 0
-          ? `Sincronizacao concluida: ${syncedCount}/${total} fontes GDoc atualizadas.`
-          : `Sincronizacao parcial: ${syncedCount}/${total} atualizadas.`
-
-    console.log("[sync:gdoc]", {
-      synced: syncedCount,
-      total,
-      failures: failedSourceTitleList.length
-    })
-
-    return this.ok({
-      notebookId,
-      syncedCount,
-      total,
-      failedSourceTitleList,
-      message
-    })
-  }
-
-  private async createNotebookClientFromStorage(options?: {
-    requireSessionId?: boolean
-  }): Promise<NotebookClient> {
-    const at = await getFromStorage<string>(FIXED_STORAGE_KEYS.AT_TOKEN)
-    const bl = await getFromStorage<string>(FIXED_STORAGE_KEYS.BL_TOKEN)
-    const sessionId = await getFromStorage<string>(FIXED_STORAGE_KEYS.SESSION_ID)
-    const authUser = await getFromStorage<string>(FIXED_STORAGE_KEYS.AUTH_USER)
-    const expiresAt = await getFromStorage<number>(FIXED_STORAGE_KEYS.TOKEN_EXPIRES_AT)
-
-    if (!at || !bl) {
-      throw new Error(
-        "Sessao NotebookLM ausente. Abra o NotebookLM, gere trafego e tente novamente para capturar at/bl."
-      )
-    }
-    if (options?.requireSessionId && !sessionId?.trim()) {
-      throw new Error(
-        "Sessao NotebookLM incompleta. Abra o NotebookLM e gere trafego para capturar f.sid."
-      )
-    }
-    if (typeof expiresAt === "number" && Date.now() > expiresAt) {
-      throw new Error(
-        "Sessao NotebookLM expirada. Reabra o NotebookLM e gere trafego para recapturar tokens."
-      )
-    }
-
-    const tokens: SessionTokens = {
-      at,
-      bl,
-      sessionId: sessionId?.trim() || null,
-      authUser: authUser?.trim() || null
-    }
-    return new NotebookClient(tokens)
   }
 
   // Legacy auth command preserved for popup flow that still uses OAuth Google.
@@ -397,16 +285,22 @@ class MessageRouter {
       return this.handleAuthSignIn(payload)
     }
 
-    const { url } = await authManager.signInWithGoogle()
-    return new Promise((resolve) => {
-      chrome.identity.launchWebAuthFlow({ url, interactive: true }, async (redirectUrl) => {
-        if (chrome.runtime.lastError || !redirectUrl) {
-          resolve(this.fail("Login cancelado ou falhou."))
-          return
-        }
+      const { url } = await authManager.signInWithGoogle()
+      return new Promise((resolve) => {
+        chrome.identity.launchWebAuthFlow({ url, interactive: true }, async (redirectUrl) => {
+          const runtimeErrorMessage = String(chrome.runtime.lastError?.message ?? "").trim()
+          if (runtimeErrorMessage || !redirectUrl) {
+            resolve(
+              this.fail(
+                runtimeErrorMessage ||
+                  "Falha no login Google: nenhum redirect OAuth foi retornado. Verifique o redirect URL da extensao no Supabase."
+              )
+            )
+            return
+          }
 
-        try {
-          const user = await authManager.completeOAuthFlow(redirectUrl)
+          try {
+            const user = await authManager.completeOAuthFlow(redirectUrl)
           resolve(this.ok({ isAuthenticated: !!user, user }))
         } catch (error) {
           resolve(this.fail(error instanceof Error ? error.message : "Falha ao concluir login."))
@@ -417,38 +311,24 @@ class MessageRouter {
 
   // Existing non-phase1 handlers
   private async handleGetSourceContent(payload: unknown): Promise<StandardResponse> {
-    const { notebookId, sourceId } = payload as { notebookId: string; sourceId: string }
-    const canView = await subscriptionManager.canUseFeature("source_views")
-    if (!canView) {
-      return this.fail("Limite de visualizacoes atingido. Faca upgrade para Pro.")
-    }
-    await storageManager.incrementUsage("exports")
-    const content = await notebookLMClient.getSourceContent(notebookId, sourceId)
-    return this.ok(content)
+    void payload
+    return this.fail(
+      "Visualizacao de fonte via background foi desativada. Use o content script para sincronizar dados do NotebookLM."
+    )
   }
 
   private async handleAddSource(payload: unknown): Promise<StandardResponse> {
-    const { notebookId, title, content } = payload as {
-      notebookId: string
-      title: string
-      content: string
-    }
-    const canImport = await storageManager.checkUsageLimit(
-      "imports",
-      (await subscriptionManager.getLimits()).imports_per_day
+    void payload
+    return this.fail(
+      "Envio de fonte via background foi desativado. Use o content script para acionar operacoes no NotebookLM."
     )
-    if (!canImport) {
-      return this.fail("Limite diario de importacoes atingido. Faca upgrade para Pro.")
-    }
-    const id = await this.appendTextSourceWithRpc(notebookId, title, content)
-    await storageManager.incrementUsage("imports")
-    return this.ok({ sourceId: id })
   }
 
   private async handleSyncGdoc(payload: unknown): Promise<StandardResponse> {
-    const { notebookId, url } = payload as { notebookId: string; url: string }
-    await notebookLMClient.syncGoogleDoc(notebookId, url)
-    return this.ok()
+    void payload
+    return this.fail(
+      "Sync de GDoc via background foi desativado. Use o content script para acionar operacoes no NotebookLM."
+    )
   }
 
   private async handleProtocolAppendSource(payload: unknown): Promise<StandardResponse> {
@@ -512,14 +392,15 @@ class MessageRouter {
       conversationTitle ||
       `Conversa ${platform} - ${new Date(capturedAt).toLocaleDateString("pt-BR")}`
 
-    await this.appendTextSourceWithRpc(resolvedNotebookId, title, content)
-    await storageManager.incrementUsage("imports")
-
-    chrome.action.setBadgeText({ text: "ok" })
-    chrome.action.setBadgeBackgroundColor({ color: "#22c55e" })
-    setTimeout(() => chrome.action.setBadgeText({ text: "" }), 3000)
-
-    return this.ok({ notebookId: resolvedNotebookId, title })
+    void platform
+    void conversationTitle
+    void content
+    void capturedAt
+    void resolvedNotebookId
+    void title
+    return this.fail(
+      "Importacao de chats via background foi desativada. Use o content script para acionar operacoes no NotebookLM."
+    )
   }
 
   private async handleCheckSubscription(): Promise<StandardResponse> {
@@ -592,40 +473,35 @@ class MessageRouter {
       return this.fail("Conteudo vazio para captura.")
     }
 
-    const canCapture = await storageManager.checkUsageLimit(
-      "captures",
-      (await subscriptionManager.getLimits()).captures
+    void notebookId
+    void title
+    return this.fail(
+      "Captura de selecao via background foi desativada. Use o content script para acionar operacoes no NotebookLM."
     )
-    if (!canCapture) {
-      return this.fail("Limite de capturas atingido. Faca upgrade para Pro.")
-    }
-
-    const resolvedNotebookId = await this.resolvePreferredNotebookId(notebookId, true)
-    const sourceTitle =
-      String(title ?? "").trim().slice(0, 140) ||
-      `Selection - MindDock - ${new Date()
-        .toISOString()
-        .slice(0, 19)
-        .split("-")
-        .join("")
-        .split(":")
-        .join("")
-        .replace("T", "")}`
-    await this.appendTextSourceWithRpc(resolvedNotebookId, sourceTitle, sourceContent)
-    await storageManager.incrementUsage("captures")
-
-    return this.ok({ notebookId: resolvedNotebookId, sourceTitle })
   }
 
-  private async appendTextSourceWithRpc(
-    notebookId: string,
-    title: string,
-    content: string
-  ): Promise<string> {
-    const client = await this.createNotebookClientFromStorage()
-    const sourceId = await client.addTextSource(notebookId, title, content)
-    await notebookLMClient.invalidateCache(notebookId)
-    return sourceId
+  private async fetchAvailableNotebooks(): Promise<Notebook[]> {
+    const snapshot = await chrome.storage.local.get(this.notebookCacheKey)
+    const rawItems = Array.isArray(snapshot[this.notebookCacheKey])
+      ? (snapshot[this.notebookCacheKey] as unknown[])
+      : []
+    const now = new Date().toISOString()
+
+    return rawItems
+      .filter((item): item is { id?: unknown; title?: unknown; createTime?: unknown; updateTime?: unknown; sourceCount?: unknown } =>
+        typeof item === "object" && item !== null
+      )
+      .map((item) => ({
+        id: String(item.id ?? "").trim(),
+        title: String(item.title ?? "").trim(),
+        createTime: String(item.createTime ?? "").trim() || now,
+        updateTime: String(item.updateTime ?? "").trim() || now,
+        sourceCount:
+          typeof item.sourceCount === "number" && Number.isFinite(item.sourceCount)
+            ? item.sourceCount
+            : 0
+      }))
+      .filter((item) => item.id && item.title)
   }
 
   private async resolvePreferredNotebookId(
@@ -668,8 +544,7 @@ class MessageRouter {
     candidateNotebookId: string | null,
     fallbackToFirstNotebook: boolean
   ): Promise<string> {
-    const client = await this.createNotebookClientFromStorage()
-    const notebooks = await client.fetchNotebooks()
+    const notebooks = await this.fetchAvailableNotebooks()
     if (notebooks.length === 0) {
       throw new Error("Nenhum notebook encontrado. Crie um no NotebookLM primeiro.")
     }
