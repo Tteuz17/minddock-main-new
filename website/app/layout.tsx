@@ -1,5 +1,6 @@
 import type { Metadata } from "next"
 import { Fraunces, Manrope } from "next/font/google"
+import { ThemeProvider } from "next-themes"
 import "./globals.css"
 
 const sansFont = Manrope({
@@ -26,7 +27,11 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
-      <body className={`${sansFont.variable} ${serifFont.variable}`}>{children}</body>
+      <body className={`${sansFont.variable} ${serifFont.variable}`}>
+          <ThemeProvider attribute="class" defaultTheme="dark" enableSystem={false}>
+            {children}
+          </ThemeProvider>
+        </body>
     </html>
   )
 }
