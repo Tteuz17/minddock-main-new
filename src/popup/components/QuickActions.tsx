@@ -21,7 +21,7 @@ export function QuickActions() {
     {
       icon: <MessageSquare size={16} strokeWidth={1.5} />,
       label: "Importar conversa",
-      description: "Vá para ChatGPT, Claude ou Gemini e clique no botão MindDock",
+      description: "Vá para um site suportado e clique no botão universal MindDock",
       onClick: () => chrome.tabs.create({ url: URLS.CHATGPT })
     },
     {

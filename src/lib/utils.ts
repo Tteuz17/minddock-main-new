@@ -85,6 +85,36 @@ export function slugify(text: string): string {
     .replace(/^-|-$/g, "")
 }
 
+function normalizeChatPlatformLabel(platform: string): string {
+  const rawValue = String(platform ?? "").trim()
+  if (!rawValue) {
+    return "CHAT"
+  }
+
+  const normalizedValue = rawValue
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+
+  if (normalizedValue.includes("gemini") || normalizedValue.includes("gemeos")) {
+    return "GEMINI"
+  }
+
+  if (normalizedValue.includes("chatgpt")) {
+    return "CHATGPT"
+  }
+
+  if (normalizedValue.includes("claude")) {
+    return "CLAUDE"
+  }
+
+  if (normalizedValue.includes("perplexity")) {
+    return "PERPLEXITY"
+  }
+
+  return rawValue.toUpperCase()
+}
+
 // ─── Chat capture helpers ────────────────────────────────────────────────────
 
 export function formatChatAsMarkdown(
@@ -101,6 +131,50 @@ export function formatChatAsMarkdown(
     })
     .join("\n\n---\n\n")
   return header + meta + body
+}
+
+export function formatChatAsReadableMarkdown(
+  platform: string,
+  messages: Array<{ role: string; content: string }>,
+  title?: string
+): string {
+  const normalizedPlatform = normalizeChatPlatformLabel(platform)
+  const normalizedTitle = String(title ?? "").trim()
+  const divider = "------------------------------------------------------------"
+  const header = normalizedTitle
+    ? `# ${normalizedTitle}\n\n`
+    : `# Conversa - ${normalizedPlatform}\n\n`
+  const meta = `> Importado do ${normalizedPlatform} via MindDock em ${new Date().toLocaleString("pt-BR")}\n\n${divider}\n\n`
+  const body = messages
+    .map((message) => {
+      const roleLabel = message.role === "user" ? "Voce:" : `${normalizedPlatform}:`
+      return `${roleLabel}\n\n${String(message.content ?? "").trim()}`
+    })
+    .join(`\n\n${divider}\n\n`)
+
+  return `${header}${meta}${body}`
+}
+
+export function formatChatAsReadableMarkdownV2(
+  platform: string,
+  messages: Array<{ role: string; content: string }>,
+  title?: string
+): string {
+  const normalizedPlatform = normalizeChatPlatformLabel(platform)
+  const normalizedTitle = String(title ?? "").trim()
+  const divider = "------------------------------------------------------------"
+  const header = normalizedTitle
+    ? `# ${normalizedTitle}\n\n`
+    : `# Conversa - ${normalizedPlatform}\n\n`
+  const meta = `> Importado do ${normalizedPlatform} via MindDock em ${new Date().toLocaleString("pt-BR")}\n\n${divider}\n\n`
+  const body = messages
+    .map((message) => {
+      const roleLabel = message.role === "user" ? "Usuario:" : `${normalizedPlatform}:`
+      return `${roleLabel}\n\n${String(message.content ?? "").trim()}`
+    })
+    .join(`\n\n${divider}\n\n`)
+
+  return `${header}${meta}${body}`
 }
 
 // ─── RPC helpers ────────────────────────────────────────────────────────────

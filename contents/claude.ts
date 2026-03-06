@@ -3,8 +3,14 @@
  */
 
 import type { PlasmoCSConfig } from "plasmo"
-import type { AIChatMessage } from "~/lib/types"
-import { sendChatCaptureToBackground } from "./common/chat-capture"
+import type { ChromeMessageResponse } from "~/lib/types"
+import {
+  buildDomChatCaptureInputAsync,
+  resolveChatCaptureSuccessMessage,
+  sendChatCaptureToBackground,
+  UNIVERSAL_CAPTURE_RESULT_EVENT,
+  UNIVERSAL_CAPTURE_REQUEST_EVENT
+} from "./common/chat-capture"
 import { installHighlightMessageListener } from "./common/highlight-handler"
 import { createMindDockButton, showMindDockToast } from "./common/minddock-ui"
 import { injectAtomizeButton } from "./common/atomize-button"
@@ -17,6 +23,7 @@ export const config: PlasmoCSConfig = {
 
 const INJECTED_ATTR = "data-minddock-btn"
 const PLATFORM_LABEL = "Claude"
+const UNIVERSAL_CAPTURE_LISTENER_KEY = "__MINDDOCK_CLAUDE_UNIVERSAL_CAPTURE__"
 
 const SELECTORS = {
   assistantMessage: '[data-testid="assistant-message"]'
@@ -24,22 +31,93 @@ const SELECTORS = {
 
 installHighlightMessageListener()
 
-function captureConversation(): AIChatMessage[] {
-  const messages: AIChatMessage[] = []
+interface RunCaptureOptions {
+  suppressToast?: boolean
+}
 
-  document
-    .querySelectorAll("[data-testid='user-message'], [data-testid='assistant-message']")
-    .forEach((element) => {
-      const role = element.getAttribute("data-testid")?.includes("assistant")
-        ? "assistant"
-        : "user"
-      const content = (element as HTMLElement).innerText.trim()
-      if (content) {
-        messages.push({ role, content })
+async function buildCaptureInput(preferredNotebookId?: string) {
+  return buildDomChatCaptureInputAsync({
+    platform: "claude",
+    platformLabel: PLATFORM_LABEL,
+    title: document.title.replace(" - Claude", "").trim() || "Conversa Claude",
+    messageSelectors: ["[data-testid='user-message']", "[data-testid='assistant-message']"],
+    containerSelectors: ["main", "div[role='main']", "[data-testid='chat-messages']"],
+    preferredNotebookId,
+    resolveRole: (element) =>
+      element.getAttribute("data-testid")?.includes("assistant") ? "assistant" : "user"
+  })
+}
+
+async function submitConversationCapture(
+  input: Awaited<ReturnType<typeof buildCaptureInput>>,
+  options?: RunCaptureOptions
+): Promise<ChromeMessageResponse<Record<string, unknown>>> {
+  try {
+    const response = await sendChatCaptureToBackground(input)
+
+    if (response.success) {
+      if (!options?.suppressToast) {
+        showMindDockToast({
+          message: resolveChatCaptureSuccessMessage(response),
+          variant: "success"
+        })
       }
-    })
 
-  return messages
+      return response
+    }
+
+    if (!options?.suppressToast) {
+      showMindDockToast({
+        message: response.error ?? "Nao foi possivel enviar a conversa.",
+        variant: "error",
+        timeoutMs: 3200
+      })
+    }
+
+    return response
+  } catch (error) {
+    const errorMessage =
+      error instanceof Error ? error.message : "Erro inesperado ao capturar conversa."
+
+    if (!options?.suppressToast) {
+      showMindDockToast({
+        message: errorMessage,
+        variant: "error",
+        timeoutMs: 3200
+      })
+    }
+
+    return {
+      success: false,
+      error: errorMessage
+    }
+  }
+}
+
+async function runConversationCapture(
+  preferredNotebookId?: string,
+  options?: RunCaptureOptions
+): Promise<ChromeMessageResponse<Record<string, unknown>>> {
+  try {
+    const input = await buildCaptureInput(preferredNotebookId)
+    return await submitConversationCapture(input, options)
+  } catch (error) {
+    const errorMessage =
+      error instanceof Error ? error.message : "Erro inesperado ao capturar conversa."
+
+    if (!options?.suppressToast) {
+      showMindDockToast({
+        message: errorMessage,
+        variant: "error",
+        timeoutMs: 3200
+      })
+    }
+
+    return {
+      success: false,
+      error: errorMessage
+    }
+  }
 }
 
 function injectCaptureButton(targetElement: Element) {
@@ -56,41 +134,85 @@ function injectCaptureButton(targetElement: Element) {
   button.addEventListener("click", async () => {
     setState("loading")
 
-    try {
-      const response = await sendChatCaptureToBackground({
-        platform: "claude",
-        platformLabel: PLATFORM_LABEL,
-        title: document.title.replace(" - Claude", "").trim() || "Conversa Claude",
-        messages: captureConversation(),
-        capturedFromUrl: window.location.href
-      })
-
-      if (response.success) {
-        setState("success")
-        showMindDockToast({ message: "Conversa enviada para o NotebookLM.", variant: "success" })
-      } else {
-        setState("error")
-        showMindDockToast({
-          message: response.error ?? "Nao foi possivel enviar a conversa.",
-          variant: "error",
-          timeoutMs: 3200
-        })
-      }
-    } catch (error) {
-      setState("error")
-      showMindDockToast({
-        message: error instanceof Error ? error.message : "Erro inesperado ao capturar conversa.",
-        variant: "error",
-        timeoutMs: 3200
-      })
-    } finally {
-      window.setTimeout(() => {
-        setState("idle")
-      }, 1800)
-    }
+    const response = await runConversationCapture()
+    setState(response.success ? "success" : "error")
+    window.setTimeout(() => {
+      setState("idle")
+    }, 1800)
   })
 
   targetElement.appendChild(button)
+}
+
+function installUniversalCaptureListener(): void {
+  const globalRecord = window as typeof window & Record<string, unknown>
+  if (globalRecord[UNIVERSAL_CAPTURE_LISTENER_KEY]) {
+    return
+  }
+
+  globalRecord[UNIVERSAL_CAPTURE_LISTENER_KEY] = true
+
+  window.addEventListener(UNIVERSAL_CAPTURE_REQUEST_EVENT, (event: Event) => {
+    const detail = (event as CustomEvent<{ notebookId?: unknown; requestId?: unknown }>).detail
+    const notebookId = String(detail?.notebookId ?? "").trim()
+    const requestId = String(detail?.requestId ?? "").trim()
+    if (!notebookId) {
+      return
+    }
+
+    try {
+      const captureInputPromise = buildCaptureInput(notebookId)
+
+      if (requestId) {
+        window.dispatchEvent(
+          new CustomEvent(UNIVERSAL_CAPTURE_RESULT_EVENT, {
+            bubbles: true,
+            composed: true,
+            detail: {
+              requestId,
+              success: true
+            }
+          })
+        )
+      }
+
+      void captureInputPromise
+        .then((captureInput) => submitConversationCapture(captureInput))
+        .catch((error) => {
+          if (!requestId) {
+            return
+          }
+
+          window.dispatchEvent(
+            new CustomEvent(UNIVERSAL_CAPTURE_RESULT_EVENT, {
+              bubbles: true,
+              composed: true,
+              detail: {
+                requestId,
+                success: false,
+                error: error instanceof Error ? error.message : "Erro inesperado ao capturar conversa."
+              }
+            })
+          )
+        })
+    } catch (error) {
+      if (!requestId) {
+        return
+      }
+
+      window.dispatchEvent(
+        new CustomEvent(UNIVERSAL_CAPTURE_RESULT_EVENT, {
+          bubbles: true,
+          composed: true,
+          detail: {
+            requestId,
+            success: false,
+            error: error instanceof Error ? error.message : "Erro inesperado ao capturar conversa."
+          }
+        })
+      )
+    }
+  })
 }
 
 function injectAll() {
@@ -106,6 +228,7 @@ function injectAll() {
 
 const observer = new MutationObserver(() => injectAll())
 observer.observe(document.body, { childList: true, subtree: true })
+installUniversalCaptureListener()
 injectAll()
 
 export {}

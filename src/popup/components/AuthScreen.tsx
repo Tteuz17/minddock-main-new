@@ -83,7 +83,7 @@ export function AuthScreen({ compact }: AuthScreenProps) {
         {/* Features */}
         <div className="space-y-2 text-left w-full">
           {[
-            "Importar conversas do ChatGPT, Claude e Gemini",
+            "Importar conteúdos com botão universal em sites suportados",
             "Organizar notebooks com pastas e tags",
             "Zettelkasten com links bidirecionais",
             "Prompts Ágeis com 1 clique"

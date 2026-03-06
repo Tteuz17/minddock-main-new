@@ -6,7 +6,12 @@ import { FocusThreadsBar } from "../../contents/notebooklm/FocusThreadsBar"
 import { SourceDownloadPanel } from "../../contents/notebooklm/SourceDownloadPanel"
 import { SourceFilterPanel } from "../../contents/notebooklm/SourceFilterPanel"
 import { ZettelButton } from "../../contents/notebooklm/ZettelButton"
-import { getDeepRoots, isVisible, resolveSourceActionsHost, resolveSourceFiltersHost } from "../../contents/notebooklm/sourceDom"
+import {
+  getDeepRoots,
+  isVisible,
+  resolveSourceActionsHost,
+  resolveSourceFiltersHost
+} from "../../contents/notebooklm/sourceDom"
 
 export const config: PlasmoCSConfig = {
   matches: ["https://notebooklm.google.com/*"],
@@ -28,6 +33,10 @@ interface InjectionTarget {
 interface MountedRootRecord {
   root: Root
   host: HTMLElement
+}
+
+interface NotebooklmInjectorGlobalState {
+  cleanup?: (() => void) | null
 }
 
 const TARGETS: readonly InjectionTarget[] = [
@@ -58,6 +67,35 @@ let refreshTimer: number | null = null
 let agilePositionTimer: number | null = null
 let focusThreadsPositionTimer: number | null = null
 let zettelObserver: MutationObserver | null = null
+const INJECTOR_GLOBAL_KEY = "__MINDDOCK_NOTEBOOKLM_INJECTOR_STATE__"
+
+function resolveGlobalState(): NotebooklmInjectorGlobalState {
+  const globalRecord = window as typeof window & Record<string, unknown>
+  const existing = globalRecord[INJECTOR_GLOBAL_KEY]
+
+  if (existing && typeof existing === "object") {
+    return existing as NotebooklmInjectorGlobalState
+  }
+
+  const nextState: NotebooklmInjectorGlobalState = {}
+  globalRecord[INJECTOR_GLOBAL_KEY] = nextState
+  return nextState
+}
+
+function cleanupPreviousInstance(): void {
+  const globalState = resolveGlobalState()
+  if (typeof globalState.cleanup !== "function") {
+    return
+  }
+
+  try {
+    globalState.cleanup()
+  } catch (error) {
+    console.warn("[MindDock] NotebookLM injector cleanup failed", error)
+  } finally {
+    globalState.cleanup = null
+  }
+}
 
 function isNotebookWorkspaceRoute(): boolean {
   return /\/notebook\/[^/]+/i.test(String(window.location.pathname ?? ""))
@@ -411,6 +449,8 @@ function cleanup(): void {
   window.removeEventListener("resize", updateAgileBarPosition)
   window.removeEventListener("scroll", updateAgileBarPosition, true)
   window.removeEventListener("resize", updateFocusThreadsBarPosition)
+  window.removeEventListener("pagehide", cleanup)
+  window.removeEventListener("beforeunload", cleanup)
 
   for (const [key, mounted] of mountedRoots.entries()) {
     mounted.root.unmount()
@@ -420,12 +460,20 @@ function cleanup(): void {
       mounted.host.remove()
     }
   }
+
+  const globalState = resolveGlobalState()
+  if (globalState.cleanup === cleanup) {
+    globalState.cleanup = null
+  }
 }
 
 function bootstrap(): void {
+  cleanupPreviousInstance()
+
   const run = () => {
     refreshUi()
     startObservers()
+    resolveGlobalState().cleanup = cleanup
   }
 
   if (document.readyState === "loading") {
@@ -436,6 +484,7 @@ function bootstrap(): void {
 }
 
 bootstrap()
+window.addEventListener("pagehide", cleanup)
 window.addEventListener("beforeunload", cleanup)
 
 const NotebooklmInjectorMount = () => null

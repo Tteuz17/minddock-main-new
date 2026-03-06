@@ -3,6 +3,7 @@
  * Inicializa router, auth, context menu e listeners globais.
  */
 
+import "~/background"
 import { authManager } from "~/background/auth-manager"
 import { router } from "~/background/router"
 import { storageManager } from "~/background/storage-manager"
@@ -233,11 +234,6 @@ chrome.runtime.onInstalled.addListener(async ({ reason }) => {
 
 chrome.runtime.onStartup?.addListener(() => {
   void ensureMindDockSelectionContextMenu()
-})
-
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  void router.handle(message, sender, sendResponse)
-  return true
 })
 
 chrome.contextMenus.onClicked.addListener((contextMenuInfo, sourceTabRecord) => {

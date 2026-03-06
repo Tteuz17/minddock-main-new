@@ -53,12 +53,12 @@ async function resolveSupabaseConfig(): Promise<SupabaseConfig> {
     if (!missingConfigLogged) {
       missingConfigLogged = true
       console.error(
-        "[MindDock][supabase] Configuracao ausente. Defina nexus_project_url/nexus_anon_key no chrome.storage.local ou PLASMO_PUBLIC_SUPABASE_URL/PLASMO_PUBLIC_SUPABASE_ANON_KEY no ambiente."
+        "[MindDock][supabase] Configuracao ausente. Defina as chaves do projeto no chrome.storage.local ou use PLASMO_PUBLIC_SUPABASE_URL/PLASMO_PUBLIC_SUPABASE_ANON_KEY no ambiente."
       )
     }
 
     throw new Error(
-      "Configuracao Supabase ausente. Configure nexus_project_url/nexus_anon_key ou variaveis PLASMO_PUBLIC_SUPABASE_URL e PLASMO_PUBLIC_SUPABASE_ANON_KEY."
+      "Configuracao Supabase ausente. Configure as chaves do projeto no storage local ou variaveis PLASMO_PUBLIC_SUPABASE_URL e PLASMO_PUBLIC_SUPABASE_ANON_KEY."
     )
   }
 

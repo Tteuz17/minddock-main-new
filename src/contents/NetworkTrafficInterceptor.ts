@@ -12,6 +12,12 @@ const MESSAGE_SOURCE = "MINDDOCK_HOOK"
 const MESSAGE_TYPE = "NOTEBOOK_LIST_UPDATED"
 const INTERCEPTOR_GUARD_KEY = "__MINDDOCK_NETWORK_TRAFFIC_INTERCEPTOR__"
 const XHR_URL_KEY = "__minddockTrackedRequestUrl__"
+const BLOCKED_NOTEBOOK_TITLE_KEYS = new Set([
+  "conversa",
+  "conversas",
+  "conversation",
+  "conversations"
+])
 
 export interface NotebookEntry {
   id: string
@@ -22,6 +28,88 @@ console.log("🚀 MindDock: Interceptor carregado no MAIN world")
 
 function normalizeString(value: unknown): string {
   return typeof value === "string" ? value.trim() : ""
+}
+
+function normalizeAccountEmail(value: unknown): string {
+  const normalizedValue = normalizeString(value).toLowerCase()
+  if (!normalizedValue) {
+    return ""
+  }
+
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/u.test(normalizedValue) ? normalizedValue : ""
+}
+
+function extractAccountEmail(value: unknown): string {
+  const normalizedValue = String(value ?? "")
+  if (!normalizedValue) {
+    return ""
+  }
+
+  const directEmail = normalizeAccountEmail(normalizedValue)
+  if (directEmail) {
+    return directEmail
+  }
+
+  const match = normalizedValue.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/iu)
+  return normalizeAccountEmail(match?.[0] ?? "")
+}
+
+function resolveAuthUserFromUrl(rawUrl: string): string {
+  try {
+    const resolvedUrl = new URL(rawUrl, window.location.origin)
+    return normalizeString(resolvedUrl.searchParams.get("authuser"))
+  } catch {
+    return ""
+  }
+}
+
+function resolveAccountEmailFromWizGlobalData(): string {
+  const globalWindow = window as typeof window & Record<string, unknown>
+  const rawWizGlobalData = globalWindow.WIZ_global_data
+  if (!rawWizGlobalData || typeof rawWizGlobalData !== "object") {
+    return ""
+  }
+
+  const wizGlobalData = rawWizGlobalData as Record<string, unknown>
+  for (const [key, value] of Object.entries(wizGlobalData)) {
+    const normalizedKey = normalizeString(key).toLowerCase()
+    if (!/(mail|email|account)/u.test(normalizedKey)) {
+      continue
+    }
+
+    const directEmail = extractAccountEmail(value)
+    if (directEmail) {
+      return directEmail
+    }
+  }
+
+  return ""
+}
+
+function resolveAccountEmailFromDom(): string {
+  const accountElement = document.querySelector("a[aria-label*='@'], button[aria-label*='@']")
+  if (!(accountElement instanceof HTMLElement)) {
+    return ""
+  }
+
+  return extractAccountEmail(accountElement.getAttribute("aria-label"))
+}
+
+function resolveNotebookAccountHints(requestUrl: string): { accountEmail?: string; authUser?: string } {
+  const authUser = resolveAuthUserFromUrl(requestUrl) || resolveAuthUserFromUrl(window.location.href)
+  const accountEmail = resolveAccountEmailFromDom() || resolveAccountEmailFromWizGlobalData()
+
+  return {
+    accountEmail: accountEmail || undefined,
+    authUser: authUser || undefined
+  }
+}
+
+function normalizeNotebookTitleKey(value: string): string {
+  return normalizeString(value)
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
 }
 
 function isTargetRequestUrl(requestUrl: string): boolean {
@@ -73,29 +161,6 @@ function upsertNotebook(output: Map<string, NotebookEntry>, notebook: NotebookEn
   }
 }
 
-function parseEmbeddedJson(value: string, parsedStrings: Set<string>): unknown | null {
-  const normalizedValue = normalizeString(value)
-  if (!normalizedValue || parsedStrings.has(normalizedValue)) {
-    return null
-  }
-
-  const looksLikeJson =
-    (normalizedValue.startsWith("[") && normalizedValue.endsWith("]")) ||
-    (normalizedValue.startsWith("{") && normalizedValue.endsWith("}"))
-
-  if (!looksLikeJson) {
-    return null
-  }
-
-  parsedStrings.add(normalizedValue)
-
-  try {
-    return JSON.parse(normalizedValue)
-  } catch {
-    return null
-  }
-}
-
 function extractNotebookFromArray(candidate: readonly unknown[]): NotebookEntry | null {
   if (!Array.isArray(candidate) || candidate.length < 3) {
     return null
@@ -109,11 +174,16 @@ function extractNotebookFromArray(candidate: readonly unknown[]): NotebookEntry 
   }
 
   const notebookTitle = potentialTitle.trim()
+  const notebookTitleKey = normalizeNotebookTitleKey(notebookTitle)
   if (!notebookTitle) {
     return null
   }
 
   if (notebookTitle === "generic") {
+    return null
+  }
+
+  if (BLOCKED_NOTEBOOK_TITLE_KEYS.has(notebookTitleKey)) {
     return null
   }
 
@@ -158,16 +228,116 @@ function extractNotebookFromArray(candidate: readonly unknown[]): NotebookEntry 
   }
 }
 
-export function findNotebooksInObject(obj: unknown): Array<{ id: string; title: string }> {
+function resolveRowsFromPayload(payload: unknown): unknown[][] {
+  const queue: unknown[] = [payload]
+  const seen = new Set<unknown>()
+
+  while (queue.length > 0) {
+    const current = queue.shift()
+    if (!current || typeof current !== "object") {
+      continue
+    }
+
+    if (seen.has(current)) {
+      continue
+    }
+    seen.add(current)
+
+    if (Array.isArray(current)) {
+      const isRows = current.length > 0 && current.every((entry) => Array.isArray(entry))
+      if (isRows) {
+        return current as unknown[][]
+      }
+      queue.push(...current)
+      continue
+    }
+
+    queue.push(...Object.values(current))
+  }
+
+  return []
+}
+
+function resolveNotebookRows(payload: unknown): unknown[][] {
+  const byContract = (payload as { 0?: { 1?: unknown } } | undefined)?.[0]?.[1]
+  if (Array.isArray(byContract) && byContract.every((entry) => Array.isArray(entry))) {
+    return byContract as unknown[][]
+  }
+
+  return resolveRowsFromPayload(payload)
+}
+
+function extractNotebookPathHints(rawResponseText: string): Set<string> {
+  const hints = new Set<string>()
+  const normalizedResponseText = String(rawResponseText ?? "")
+  if (!normalizedResponseText) {
+    return hints
+  }
+
+  const pathPatterns = [
+    /(?:\/notebook\/)([A-Za-z0-9_-]{10,})/gu,
+    /(?:%2Fnotebook%2F)([A-Za-z0-9_-]{10,})/giu,
+    /(?:\\u002fnotebook\\u002f)([A-Za-z0-9_-]{10,})/giu
+  ]
+  for (const pattern of pathPatterns) {
+    for (const match of normalizedResponseText.matchAll(pattern)) {
+      const candidateId = normalizeString(match[1])
+      if (candidateId) {
+        hints.add(candidateId)
+      }
+    }
+  }
+
+  return hints
+}
+
+export function findNotebooksInObject(
+  obj: unknown,
+  rawResponseText?: string
+): Array<{ id: string; title: string }> {
   const notebooks = new Map<string, NotebookEntry>()
+  const notebookPathHints = extractNotebookPathHints(String(rawResponseText ?? ""))
+  const notebookRows = resolveNotebookRows(obj)
+
+  for (const row of notebookRows) {
+    const notebook = extractNotebookFromArray(row)
+    if (!notebook) {
+      continue
+    }
+
+    if (notebookPathHints.size > 0 && !notebookPathHints.has(notebook.id)) {
+      continue
+    }
+
+    upsertNotebook(notebooks, notebook)
+  }
+
+  if (notebooks.size > 0) {
+    return Array.from(notebooks.values())
+  }
+
   const seenObjects = new WeakSet<object>()
   const parsedStrings = new Set<string>()
 
   const visit = (node: unknown): void => {
     if (typeof node === "string") {
-      const embeddedJson = parseEmbeddedJson(node, parsedStrings)
-      if (embeddedJson !== null) {
-        visit(embeddedJson)
+      const normalizedValue = normalizeString(node)
+      if (!normalizedValue || parsedStrings.has(normalizedValue)) {
+        return
+      }
+
+      const looksLikeJson =
+        (normalizedValue.startsWith("[") && normalizedValue.endsWith("]")) ||
+        (normalizedValue.startsWith("{") && normalizedValue.endsWith("}"))
+      if (!looksLikeJson) {
+        return
+      }
+
+      parsedStrings.add(normalizedValue)
+      try {
+        visit(JSON.parse(normalizedValue))
+      } catch {
+        // no-op
       }
       return
     }
@@ -179,13 +349,14 @@ export function findNotebooksInObject(obj: unknown): Array<{ id: string; title: 
     if (seenObjects.has(node)) {
       return
     }
-
     seenObjects.add(node)
 
     if (Array.isArray(node)) {
       const notebook = extractNotebookFromArray(node)
       if (notebook) {
-        upsertNotebook(notebooks, notebook)
+        if (notebookPathHints.size === 0 || notebookPathHints.has(notebook.id)) {
+          upsertNotebook(notebooks, notebook)
+        }
       }
 
       for (const item of node) {
@@ -242,13 +413,20 @@ function parseGoogleRpcResponse(rawData: string): unknown[] {
   }
 }
 
-function broadcastNotebookList(notebooks: NotebookEntry[]): void {
+function broadcastNotebookList(
+  notebooks: NotebookEntry[],
+  accountHints?: { accountEmail?: string; authUser?: string }
+): void {
   try {
     window.postMessage(
       {
         source: MESSAGE_SOURCE,
         type: MESSAGE_TYPE,
-        payload: notebooks
+        payload: {
+          notebooks,
+          authUser: accountHints?.authUser,
+          accountEmail: accountHints?.accountEmail
+        }
       },
       window.location.origin
     )
@@ -257,7 +435,7 @@ function broadcastNotebookList(notebooks: NotebookEntry[]): void {
   }
 }
 
-function processRawNetworkResponse(rawNetworkResponse: string): void {
+function processRawNetworkResponse(rawNetworkResponse: string, requestUrl: string): void {
   try {
     const parsedNodes = parseGoogleRpcResponse(rawNetworkResponse)
     if (parsedNodes.length === 0) {
@@ -266,13 +444,14 @@ function processRawNetworkResponse(rawNetworkResponse: string): void {
 
     const notebooks = new Map<string, NotebookEntry>()
     for (const parsedNode of parsedNodes) {
-      const extractedNotebooks = findNotebooksInObject(parsedNode)
+      const extractedNotebooks = findNotebooksInObject(parsedNode, rawNetworkResponse)
       for (const notebook of extractedNotebooks) {
         upsertNotebook(notebooks, notebook)
       }
     }
 
-    broadcastNotebookList(Array.from(notebooks.values()))
+    const accountHints = resolveNotebookAccountHints(requestUrl)
+    broadcastNotebookList(Array.from(notebooks.values()), accountHints)
   } catch {
     // Silent by design: parsing failures must not affect the page.
   }
@@ -287,7 +466,7 @@ function interceptGoogleCloudRpc(requestUrl: string, rawNetworkResponse: string)
     return
   }
 
-  processRawNetworkResponse(rawNetworkResponse)
+  processRawNetworkResponse(rawNetworkResponse, requestUrl)
 }
 
 function resolveRequestUrl(requestInput: RequestInfo | URL): string {

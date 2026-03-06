@@ -3,6 +3,7 @@ import { storageManager } from "./storage-manager"
 import { subscriptionManager } from "./subscription"
 import { aiService } from "~/services/ai-service"
 import { exportService } from "~/services/export-service"
+import { NotebookLMService } from "~/services/NotebookLMService"
 import { zettelkastenService } from "~/services/zettelkasten"
 import { threadService } from "~/services/thread-service"
 import { STORAGE_KEYS } from "~/lib/constants"
@@ -11,7 +12,7 @@ import {
   MESSAGE_ACTIONS,
   type StandardResponse
 } from "~/lib/contracts"
-import { formatChatAsMarkdown } from "~/lib/utils"
+import { formatChatAsReadableMarkdownV2 } from "~/lib/utils"
 import type {
   ChromeMessage,
   ChromeMessageResponse,
@@ -19,18 +20,153 @@ import type {
   SidePanelLaunchTarget,
   SidePanelNoteDraft
 } from "~/lib/types"
+import {
+  buildNotebookAccountKey,
+  buildScopedStorageKey,
+  isConfirmedNotebookAccountKey,
+  normalizeAccountEmail,
+  normalizeAuthUser
+} from "~/lib/notebook-account-scope"
 
 type MessageSender = chrome.runtime.MessageSender
+type CaptureSourceKind = "chat" | "doc"
 
 type Handler = (
   payload: unknown,
   sender: MessageSender
 ) => Promise<StandardResponse>
 
+// Temporary operational override requested by user:
+// disable daily import gating until product policy is re-enabled.
+const IMPORT_LIMIT_DISABLED = true
+const RESYNC_TOTAL_BUDGET_MS = 90_000
+const RESYNC_PROGRESS_EVENT = "MINDDOCK_RESYNC_PROGRESS"
+const RESYNC_SUCCESS_EVENT = "MINDDOCK_RESYNC_SUCCESS"
+const RESYNC_FLOW_VERSION = "resync-v6"
+const BLOCKED_NOTEBOOK_TITLE_KEYS = new Set([
+  "conversa",
+  "conversas",
+  "conversation",
+  "conversations"
+])
+
+function normalizeNotebookTitleKey(value: string): string {
+  return String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+}
+
+function isBlockedNotebookTitle(value: string): boolean {
+  return BLOCKED_NOTEBOOK_TITLE_KEYS.has(normalizeNotebookTitleKey(value))
+}
+
+function normalizePlatformLabel(value: string): string {
+  const rawValue = String(value ?? "").trim()
+  if (!rawValue) {
+    return "CHAT"
+  }
+
+  const normalizedValue = rawValue
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+
+  if (normalizedValue.includes("gemini") || normalizedValue.includes("gemeos")) {
+    return "GEMINI"
+  }
+
+  if (normalizedValue.includes("chatgpt")) {
+    return "CHATGPT"
+  }
+
+  if (normalizedValue.includes("claude")) {
+    return "CLAUDE"
+  }
+
+  if (normalizedValue.includes("perplexity")) {
+    return "PERPLEXITY"
+  }
+
+  return rawValue.toUpperCase()
+}
+
+function normalizeCaptureSourceKind(value: unknown): CaptureSourceKind {
+  const normalized = String(value ?? "")
+    .trim()
+    .toLowerCase()
+  if (normalized === "doc" || normalized === "document") {
+    return "doc"
+  }
+  return "chat"
+}
+
+function extractGoogleDocIdFromValue(value: unknown): string {
+  const normalizedValue = String(value ?? "").trim()
+  if (!normalizedValue) {
+    return ""
+  }
+
+  const urlMatch = normalizedValue.match(/\/document\/(?:u\/\d+\/)?d\/([A-Za-z0-9_-]+)/u)
+  if (urlMatch?.[1]) {
+    return String(urlMatch[1] ?? "").trim()
+  }
+
+  if (/^[A-Za-z0-9_-]{20,}$/u.test(normalizedValue)) {
+    return normalizedValue
+  }
+
+  return ""
+}
+
+function stripTrailingContextSnippet(value: string): string {
+  const normalizedValue = String(value ?? "").trim()
+  if (!normalizedValue) {
+    return ""
+  }
+
+  const parentheticalMatch = normalizedValue.match(/\s*\(([^()]{1,140})\)\s*$/u)
+  if (!parentheticalMatch) {
+    return normalizedValue
+  }
+
+  const [fullMatch, innerRaw] = parentheticalMatch
+  const inner = String(innerRaw ?? "").trim()
+  const words = inner.split(/\s+/u).filter(Boolean)
+  const hasLetters = /[A-Za-zÀ-ÖØ-öø-ÿ]/u.test(inner)
+  const looksLikeContextSnippet = hasLetters && (words.length >= 3 || inner.length >= 22)
+
+  if (!looksLikeContextSnippet) {
+    return normalizedValue
+  }
+
+  return normalizedValue.slice(0, normalizedValue.length - fullMatch.length).trim()
+}
+
+interface ChatSourceBindingRecord {
+  sourceId: string
+  sourceTitle: string
+  lastSyncHash?: string
+  updatedAt: string
+}
+
 class MessageRouter {
   private handlers: Map<string, Handler> = new Map()
   private readonly notebookCacheKey = "minddock_cached_notebooks"
+  private readonly notebookCacheSyncKey = "minddock_cached_notebooks_synced_at"
+  private readonly notebookAccountEmailKey = "nexus_notebook_account_email"
+  private readonly strictNotebookAccountMode = true
   private readonly backgroundSyncAction = "SYNC_NOTEBOOKS"
+  private readonly pendingNotebookNameKey = "minddock_pending_notebook_name"
+  private readonly pendingNotebookRequestedAtKey = "minddock_pending_notebook_requested_at"
+  private readonly pendingNotebookPhaseKey = "minddock_pending_notebook_phase"
+  private readonly pendingNotebookResultKey = "minddock_pending_notebook_result"
+  private readonly pendingNotebookErrorKey = "minddock_pending_notebook_error"
+  private readonly chatSourceBindingsKey = "minddock_chat_source_bindings"
+  private readonly maxChatSourceBindings = 250
+  private readonly resyncInFlight = new Set<string>()
+  private createNotebookRequestLocked = false
 
   constructor() {
     // Phase 1 fixed actions.
@@ -39,6 +175,7 @@ class MessageRouter {
     this.register(MESSAGE_ACTIONS.CMD_AUTH_SIGN_OUT, this.handleAuthSignOut)
     this.register(MESSAGE_ACTIONS.CMD_AUTH_GET_STATUS, this.handleAuthGetStatus)
     this.register(MESSAGE_ACTIONS.CMD_GET_NOTEBOOKS, this.handleGetNotebooks)
+    this.register(MESSAGE_ACTIONS.CMD_CREATE_NOTEBOOK, this.handleCreateNotebook)
     this.register(MESSAGE_ACTIONS.CMD_GET_NOTEBOOK_SOURCES, this.handleGetNotebookSources)
     this.register(MESSAGE_ACTIONS.CMD_GET_SOURCE_CONTENTS, this.handleGetSourceContents)
     this.register(MESSAGE_ACTIONS.CMD_REFRESH_GDOC_SOURCES, this.handleRefreshGDocSources)
@@ -137,8 +274,155 @@ class MessageRouter {
     return { success: true, payload }
   }
 
-  private fail(error: string): StandardResponse {
-    return { success: false, error }
+  private fail<T = never>(error: string, payload?: T): StandardResponse<T> {
+    if (payload === undefined) {
+      return { success: false, error }
+    }
+    return { success: false, error, payload }
+  }
+
+  private emitResyncProgress(
+    capturedFromUrl: string,
+    stage: "starting" | "polling" | "uploading" | "fallback" | "done" | "error",
+    attempt?: number,
+    totalAttempts?: number,
+    message?: string
+  ): void {
+    const normalizedUrl = String(capturedFromUrl ?? "").trim()
+    if (!normalizedUrl || !chrome.runtime?.sendMessage) {
+      return
+    }
+
+    try {
+      chrome.runtime.sendMessage(
+        {
+          command: RESYNC_PROGRESS_EVENT,
+          payload: {
+            url: normalizedUrl,
+            stage,
+            attempt,
+            totalAttempts,
+            flowVersion: RESYNC_FLOW_VERSION,
+            message: String(message ?? "").trim() || undefined,
+            emittedAt: new Date().toISOString()
+          }
+        },
+        () => {
+          void chrome.runtime?.lastError
+        }
+      )
+    } catch {
+      // no-op: progress events are best-effort
+    }
+  }
+
+  private buildResyncErrorPayload(
+    notebookId: string,
+    attemptedSourceId: string,
+    startedAtMs: number,
+    details: string
+  ): {
+    flowVersion: string
+    details: string
+    diagnostics: {
+      notebookId: string
+      attemptedSourceId: string | undefined
+      elapsedMs: number
+    }
+  } {
+    return {
+      flowVersion: RESYNC_FLOW_VERSION,
+      details,
+      diagnostics: {
+        notebookId,
+        attemptedSourceId: String(attemptedSourceId ?? "").trim() || undefined,
+        elapsedMs: Math.max(0, Date.now() - startedAtMs)
+      }
+    }
+  }
+
+  private classifyResyncErrorCode(errorMessage: string): string {
+    const normalizedMessage = String(errorMessage ?? "").trim()
+    if (!normalizedMessage) {
+      return "RESYNC_UNKNOWN_ERROR"
+    }
+
+    if (/BINDING_INVALIDO/i.test(normalizedMessage)) {
+      return "RESYNC_BINDING_INVALID"
+    }
+
+    if (/DELETE_FAILED|STRICT_DELETE|CRITICAL:\s*Failed to delete old source/i.test(normalizedMessage)) {
+      return "RESYNC_DELETE_FAILED"
+    }
+
+    if (/INSERT_VALIDATION_FAILED|INSERT_NOT_FOUND/i.test(normalizedMessage)) {
+      return "RESYNC_INSERT_INVALID"
+    }
+
+    if (/TIMEOUT|45s|RESYNC_ABORTED/i.test(normalizedMessage)) {
+      return "RESYNC_TIMEOUT"
+    }
+
+    return "RESYNC_UNKNOWN_ERROR"
+  }
+
+  private emitResyncSuccess(
+    capturedFromUrl: string,
+    notebookId: string,
+    sourceId: string,
+    lastHash?: string
+  ): void {
+    const normalizedUrl = String(capturedFromUrl ?? "").trim()
+    const normalizedNotebookId = String(notebookId ?? "").trim()
+    const normalizedSourceId = String(sourceId ?? "").trim()
+    const normalizedLastHash = String(lastHash ?? "").trim()
+
+    if (!normalizedUrl || !normalizedNotebookId || !normalizedSourceId || !chrome.runtime?.sendMessage) {
+      return
+    }
+
+    try {
+      chrome.runtime.sendMessage(
+        {
+          command: RESYNC_SUCCESS_EVENT,
+          payload: {
+            url: normalizedUrl,
+            notebookId: normalizedNotebookId,
+            sourceId: normalizedSourceId,
+            lastHash: normalizedLastHash || undefined,
+            flowVersion: RESYNC_FLOW_VERSION,
+            emittedAt: new Date().toISOString()
+          }
+        },
+        () => {
+          void chrome.runtime?.lastError
+        }
+      )
+    } catch {
+      // no-op: success event is best-effort
+    }
+  }
+
+  private async withTimeout<T>(
+    operation: Promise<T>,
+    timeoutMs: number,
+    timeoutMessage: string
+  ): Promise<T> {
+    const boundedTimeout = Math.max(250, timeoutMs)
+    let timeoutId: ReturnType<typeof setTimeout> | null = null
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timeoutId = setTimeout(() => {
+        reject(new Error(timeoutMessage))
+      }, boundedTimeout)
+    })
+
+    try {
+      return (await Promise.race([operation, timeoutPromise])) as T
+    } finally {
+      if (timeoutId !== null) {
+        clearTimeout(timeoutId)
+      }
+    }
   }
 
   private resolveIncomingAction(
@@ -195,9 +479,16 @@ class MessageRouter {
             atToken?: string
             blToken?: string
             sessionId?: string
+            accountEmail?: string
             authUser?: string
             authUserIndex?: string
-            tokens?: { at?: string; bl?: string; atToken?: string; blToken?: string }
+            tokens?: {
+              at?: string
+              bl?: string
+              atToken?: string
+              blToken?: string
+              accountEmail?: string
+            }
           }
       | undefined) ?? { tokens: {} }
 
@@ -210,20 +501,142 @@ class MessageRouter {
       String(raw.bl ?? raw.blToken ?? nestedTokens.bl ?? nestedTokens.blToken ?? "").trim() ||
       null
     const sessionId = String(raw.sessionId ?? "").trim() || null
+    const accountEmail = normalizeAccountEmail(raw.accountEmail ?? nestedTokens.accountEmail)
     const authUser = String(raw.authUser ?? raw.authUserIndex ?? "").trim() || null
 
     if (!at || !bl) {
       return this.fail("Payload invalido para MINDDOCK_STORE_SESSION_TOKENS: at/bl obrigatorios.")
     }
 
-    await chrome.storage.local.set({
+    const storagePatch: Record<string, unknown> = {
       [FIXED_STORAGE_KEYS.AT_TOKEN]: at,
       [FIXED_STORAGE_KEYS.BL_TOKEN]: bl,
       [FIXED_STORAGE_KEYS.SESSION_ID]: sessionId,
       [FIXED_STORAGE_KEYS.AUTH_USER]: authUser,
       [FIXED_STORAGE_KEYS.TOKEN_EXPIRES_AT]: Date.now() + 60 * 60 * 1000
-    })
+    }
+    if (accountEmail) {
+      storagePatch[this.notebookAccountEmailKey] = accountEmail
+    }
+
+    await chrome.storage.local.set(storagePatch)
     return this.ok()
+  }
+
+  private buildNotebookAccountUnconfirmedError(): string {
+    return (
+      "Conta do NotebookLM nao confirmada. Abra o NotebookLM na conta correta, recarregue a pagina e tente novamente."
+    )
+  }
+
+  private async resolveNotebookAccountScope(): Promise<{
+    accountKey: string
+    accountEmail: string | null
+    authUser: string | null
+    confirmed: boolean
+  }> {
+    try {
+      const snapshot = await chrome.storage.local.get([
+        FIXED_STORAGE_KEYS.AUTH_USER,
+        this.notebookAccountEmailKey,
+        "notebooklm_session",
+        STORAGE_KEYS.SETTINGS
+      ])
+
+      const fixedAuthUser = normalizeAuthUser(snapshot[FIXED_STORAGE_KEYS.AUTH_USER])
+      const fixedAccountEmail = normalizeAccountEmail(snapshot[this.notebookAccountEmailKey])
+
+      const session = snapshot["notebooklm_session"]
+      const sessionTokens =
+        session && typeof session === "object"
+          ? (session as { authUser?: unknown; accountEmail?: unknown })
+          : {}
+
+      const sessionAuthUser = normalizeAuthUser(sessionTokens.authUser)
+      const sessionAccountEmail = normalizeAccountEmail(sessionTokens.accountEmail)
+
+      const settings =
+        snapshot[STORAGE_KEYS.SETTINGS] && typeof snapshot[STORAGE_KEYS.SETTINGS] === "object"
+          ? (snapshot[STORAGE_KEYS.SETTINGS] as Record<string, unknown>)
+          : {}
+      const settingsAccountEmail = normalizeAccountEmail(settings.notebookAccountEmail)
+
+      const accountEmail = fixedAccountEmail ?? sessionAccountEmail ?? settingsAccountEmail
+      const authUser = fixedAuthUser ?? sessionAuthUser
+      const accountKey = buildNotebookAccountKey({ accountEmail, authUser })
+
+      return {
+        accountKey,
+        accountEmail,
+        authUser,
+        confirmed: isConfirmedNotebookAccountKey(accountKey)
+      }
+    } catch {
+      const accountKey = buildNotebookAccountKey(null)
+      return {
+        accountKey,
+        accountEmail: null,
+        authUser: null,
+        confirmed: false
+      }
+    }
+  }
+
+  private async requireConfirmedNotebookAccount(): Promise<{
+    accountKey: string
+    accountEmail: string | null
+    authUser: string | null
+    confirmed: boolean
+  }> {
+    const accountScope = await this.resolveNotebookAccountScope()
+    if (this.strictNotebookAccountMode && !accountScope.confirmed) {
+      throw new Error(this.buildNotebookAccountUnconfirmedError())
+    }
+
+    return accountScope
+  }
+
+  private async resolveScopedNotebookStorage(
+    requireConfirmedAccount = true
+  ): Promise<{
+    accountKey: string
+    notebookCacheKey: string
+    notebookCacheSyncKey: string
+    defaultNotebookKey: string
+    legacyDefaultNotebookKey: string
+  }> {
+    const accountScope = requireConfirmedAccount
+      ? await this.requireConfirmedNotebookAccount()
+      : await this.resolveNotebookAccountScope()
+    const accountKey = accountScope.accountKey
+
+    return {
+      accountKey,
+      notebookCacheKey: buildScopedStorageKey(this.notebookCacheKey, accountKey),
+      notebookCacheSyncKey: buildScopedStorageKey(this.notebookCacheSyncKey, accountKey),
+      defaultNotebookKey: buildScopedStorageKey("nexus_default_notebook_id", accountKey),
+      legacyDefaultNotebookKey: buildScopedStorageKey("minddock_default_notebook", accountKey)
+    }
+  }
+
+  private async persistDefaultNotebookIdByAccount(
+    accountKey: string,
+    notebookId: string
+  ): Promise<void> {
+    const settings = await storageManager.getSettings()
+    const defaultByAccount =
+      typeof settings.defaultNotebookByAccount === "object" && settings.defaultNotebookByAccount !== null
+        ? (settings.defaultNotebookByAccount as Record<string, unknown>)
+        : {}
+
+    const patch: Record<string, unknown> = {
+      defaultNotebookByAccount: {
+        ...defaultByAccount,
+        [accountKey]: notebookId
+      }
+    }
+
+    await storageManager.updateSettings(patch)
   }
 
   private async handleSyncNotebooks(payload: unknown): Promise<StandardResponse> {
@@ -243,8 +656,10 @@ class MessageRouter {
       }))
       .filter((item) => item.id && item.title)
 
+    const scoped = await this.resolveScopedNotebookStorage()
     await chrome.storage.local.set({
-      [this.notebookCacheKey]: notebooks
+      [scoped.notebookCacheKey]: notebooks,
+      [scoped.notebookCacheSyncKey]: now
     })
 
     return this.ok({ syncedCount: notebooks.length })
@@ -272,8 +687,79 @@ class MessageRouter {
   }
 
   private async handleGetNotebooks(): Promise<StandardResponse> {
-    const notebooks = await this.fetchAvailableNotebooks()
-    return this.ok(notebooks)
+    try {
+      const notebooks = await this.loadNotebooksPreferLive()
+      return this.ok(notebooks)
+    } catch (error) {
+      return this.fail(error instanceof Error ? error.message : "Falha ao listar notebooks no NotebookLM.")
+    }
+  }
+
+  private async handleCreateNotebook(
+    payload: unknown,
+    sender: MessageSender
+  ): Promise<StandardResponse> {
+    const data =
+      (payload as {
+        name?: unknown
+        title?: unknown
+        content?: unknown
+        initialContent?: unknown
+        sourceTitle?: unknown
+      }) ?? {}
+    const notebookName = await this.resolveNotebookCreationTitle(data, sender)
+    const initialContent = String(data.initialContent ?? data.content ?? "").trim()
+    const initialSourceTitle = String(data.sourceTitle ?? "").trim() || notebookName
+
+    if (this.createNotebookRequestLocked) {
+      return this.fail("Ja existe uma criacao de caderno em andamento.")
+    }
+
+    try {
+      this.createNotebookRequestLocked = true
+      await this.clearPendingNotebookOperation()
+
+      const service = new NotebookLMService()
+      const notebookId = await service.createNotebook(notebookName)
+
+      let sourceAdded = false
+      let warning = ""
+
+      try {
+        await this.upsertCreatedNotebookCache(notebookId, notebookName)
+      } catch (cacheError) {
+        const cacheErrorMessage =
+          cacheError instanceof Error ? cacheError.message : String(cacheError ?? "")
+        warning =
+          cacheErrorMessage ||
+          "Caderno criado, mas nao foi possivel atualizar o cache local da conta atual."
+      }
+
+      if (initialContent) {
+        try {
+          await service.addSource(notebookId, initialSourceTitle, initialContent)
+          sourceAdded = true
+        } catch (error) {
+          const sourceWarning =
+            error instanceof Error
+              ? `Caderno criado, mas falhou ao adicionar o conteudo inicial: ${error.message}`
+              : "Caderno criado, mas falhou ao adicionar o conteudo inicial."
+          warning = warning ? `${warning} ${sourceWarning}` : sourceWarning
+        }
+      }
+
+      return this.ok({
+        notebookId,
+        name: notebookName,
+        title: notebookName,
+        sourceAdded,
+        warning
+      })
+    } catch (error) {
+      return this.fail(error instanceof Error ? error.message : "Falha ao criar o novo caderno.")
+    } finally {
+      this.createNotebookRequestLocked = false
+    }
   }
 
   private async handleGetNotebookSources(payload: unknown): Promise<StandardResponse> {
@@ -339,10 +825,45 @@ class MessageRouter {
   }
 
   private async handleAddSource(payload: unknown): Promise<StandardResponse> {
-    void payload
-    return this.fail(
-      "Envio de fonte via background foi desativado. Use o content script para acionar operacoes no NotebookLM."
-    )
+    const data = (payload as { notebookId?: string; title?: string; content?: string }) ?? {}
+    const requestedNotebookId = String(data.notebookId ?? "").trim()
+    const title = String(data.title ?? "").trim()
+    const content = String(data.content ?? "").trim()
+
+    if (!requestedNotebookId) {
+      return this.fail("notebookId obrigatorio para adicionar fonte.")
+    }
+
+    if (!title) {
+      return this.fail("title obrigatorio para adicionar fonte.")
+    }
+
+    if (!content) {
+      return this.fail("content obrigatorio para adicionar fonte.")
+    }
+
+    if (!IMPORT_LIMIT_DISABLED) {
+      const canImport = await storageManager.checkUsageLimit(
+        "imports",
+        (await subscriptionManager.getLimits()).imports_per_day
+      )
+      if (!canImport) {
+        return this.fail("Limite diario de importacoes atingido. Faca upgrade pro plano Pro.")
+      }
+    }
+
+    try {
+      const service = new NotebookLMService()
+      const resolvedNotebookId = await this.resolvePreferredNotebookId(requestedNotebookId, true)
+      const sourceId = await service.addSource(resolvedNotebookId, title, content)
+      if (!String(sourceId ?? "").trim()) {
+        return this.fail("NotebookLM nao confirmou a criacao da fonte. Nenhum sourceId foi retornado.")
+      }
+      await storageManager.incrementUsage("imports")
+      return this.ok({ success: true, notebookId: resolvedNotebookId, sourceId })
+    } catch (error) {
+      return this.fail(error instanceof Error ? error.message : "Falha ao adicionar fonte.")
+    }
   }
 
   private async handleSyncGdoc(payload: unknown): Promise<StandardResponse> {
@@ -353,18 +874,42 @@ class MessageRouter {
   }
 
   private async handleProtocolAppendSource(payload: unknown): Promise<StandardResponse> {
-    const { conversation, notebookId, sourceTitle, sourcePlatform, capturedFromUrl } = payload as {
+    const payloadRecord =
+      payload && typeof payload === "object" && !Array.isArray(payload)
+        ? (payload as Record<string, unknown>)
+        : {}
+    const {
+      conversation,
+      notebookId,
+      sourceTitle,
+      sourcePlatform,
+      sourceKind,
+      capturedFromUrl,
+      isResync,
+      overwriteSourceId,
+      currentHash
+    } = payload as {
       conversation?: Array<{ role?: string; content?: string }>
       notebookId?: string
       sourceTitle?: string
       sourcePlatform?: string
+      sourceKind?: string
       capturedFromUrl?: string
+      isResync?: boolean
+      overwriteSourceId?: string
+      overWriteSourceId?: string
+      currentHash?: string
     }
 
     const safeConversation = Array.isArray(conversation)
       ? conversation
           .map((message) => ({
-            role: message?.role === "assistant" ? "assistant" : "user",
+            role:
+              message?.role === "document"
+                ? "document"
+                : message?.role === "assistant"
+                ? "assistant"
+                : "user",
             content: String(message?.content ?? "").trim()
           }))
           .filter((message) => message.content.length > 0)
@@ -374,54 +919,420 @@ class MessageRouter {
       return this.fail("conversation obrigatoria para PROTOCOL_APPEND_SOURCE.")
     }
 
-    const normalizedPlatform = String(sourcePlatform ?? "").trim() || "Chat"
-    const normalizedTitle = String(sourceTitle ?? "").trim() || "Untitled Chat"
+    const normalizedPlatform = normalizePlatformLabel(String(sourcePlatform ?? ""))
+    const normalizedSourceKind = normalizeCaptureSourceKind(sourceKind)
+    const normalizedRawTitle = String(sourceTitle ?? "")
+      .trim()
+      .replace(/^\[[^\]]+\]\s*/u, "")
     const capturedAtIso = new Date().toISOString()
+    const normalizedTitle =
+      normalizedSourceKind === "doc"
+        ? normalizedRawTitle || "Untitled Document"
+        : `[${normalizedPlatform}] ${normalizedRawTitle || "Untitled Chat"}`
 
-    const markdown = formatChatAsMarkdown(normalizedPlatform, safeConversation, normalizedTitle)
+    const googleDocId =
+      normalizedSourceKind === "doc"
+        ? extractGoogleDocIdFromValue(
+            safeConversation.find((message) => message.role === "document")?.content ?? ""
+          ) || extractGoogleDocIdFromValue(capturedFromUrl)
+        : ""
+
+    if (normalizedSourceKind === "doc" && !googleDocId) {
+      return this.fail("Nao foi possivel identificar o ID do Google Docs para importacao.")
+    }
+
+    const content =
+      normalizedSourceKind === "doc"
+        ? googleDocId
+        : formatChatAsReadableMarkdownV2(
+            normalizedPlatform,
+            safeConversation
+              .filter((message): message is { role: "assistant" | "user"; content: string } =>
+                message.role === "assistant" || message.role === "user"
+              ),
+            normalizedTitle
+          )
+
+    if (!content) {
+      return this.fail("Conteudo extraido vazio para importacao.")
+    }
 
     return this.handleImportAIChat({
-      platform: normalizedPlatform.toLowerCase(),
+      platform: normalizedSourceKind === "doc" ? "doc" : normalizedPlatform.toLowerCase(),
       conversationTitle: normalizedTitle,
-      content: markdown,
+      content,
+      sourceKind: normalizedSourceKind,
+      googleDocId: googleDocId || undefined,
       capturedAt: capturedAtIso,
       url: String(capturedFromUrl ?? "").trim(),
-      notebookId: String(notebookId ?? "").trim() || undefined
+      notebookId: String(notebookId ?? "").trim() || undefined,
+      isResync: isResync === true,
+      overwriteSourceId:
+        String(overwriteSourceId ?? payloadRecord.overWriteSourceId ?? "").trim() || undefined,
+      contentHash: String(currentHash ?? "").trim() || undefined
     })
   }
 
   private async handleImportAIChat(payload: unknown): Promise<StandardResponse> {
-    const { platform, conversationTitle, content, capturedAt, notebookId } = payload as {
-      platform: string
-      conversationTitle: string
-      content: string
-      capturedAt: string
+    const data = (payload as {
+      platform?: string
+      conversationTitle?: string
+      title?: string
+      content?: string
+      capturedAt?: string
       notebookId?: string
+      url?: string
+      sourceKind?: string
+      googleDocId?: string
+      isResync?: boolean
+      overwriteSourceId?: string
+      overWriteSourceId?: string
+      contentHash?: string
+    }) ?? {}
+    const rawDataRecord =
+      payload && typeof payload === "object" && !Array.isArray(payload)
+        ? (payload as Record<string, unknown>)
+        : {}
+
+    if (!IMPORT_LIMIT_DISABLED) {
+      const canImport = await storageManager.checkUsageLimit(
+        "imports",
+        (await subscriptionManager.getLimits()).imports_per_day
+      )
+      if (!canImport) {
+        return this.fail("Limite diario de importacoes atingido. Faca upgrade pro plano Pro.")
+      }
     }
 
-    const canImport = await storageManager.checkUsageLimit(
-      "imports",
-      (await subscriptionManager.getLimits()).imports_per_day
-    )
-    if (!canImport) {
-      return this.fail("Limite diario de importacoes atingido. Faca upgrade pro plano Pro.")
-    }
+    const conversation = typeof data.content === "string" ? data.content : ""
+    console.log(`[MindDock Debug] Payload Size: ${conversation?.length || 0} chars`)
+    const content = conversation.trim()
 
-    const resolvedNotebookId = await this.resolvePreferredNotebookId(notebookId, true)
-
+    const sourceKind = normalizeCaptureSourceKind(data.sourceKind)
+    const isDocumentSource = sourceKind === "doc"
+    const platform = normalizePlatformLabel(String(data.platform ?? ""))
+    const resolvedNotebookId = await this.resolvePreferredNotebookId(data.notebookId, true)
     const title =
-      conversationTitle ||
-      `Conversa ${platform} - ${new Date(capturedAt).toLocaleDateString("pt-BR")}`
+      String(data.title ?? "").trim() ||
+      String(data.conversationTitle ?? "").trim() ||
+      (isDocumentSource
+        ? `Documento - ${new Date(data.capturedAt ?? Date.now()).toLocaleDateString("pt-BR")}`
+        : `Conversa ${platform || "chat"} - ${new Date(data.capturedAt ?? Date.now()).toLocaleDateString(
+            "pt-BR"
+          )}`)
+    const capturedFromUrl = String(data.url ?? "").trim()
+    const googleDocId = extractGoogleDocIdFromValue(data.googleDocId) || extractGoogleDocIdFromValue(content)
+    const requestedResync = data.isResync === true
+    const overwriteSourceId = String(
+      data.overwriteSourceId ?? data.overWriteSourceId ?? rawDataRecord.overWriteSourceId ?? ""
+    ).trim()
+    const contentHash = String(data.contentHash ?? "").trim()
+    const resyncStartTs = Date.now()
+    const resyncDeadlineTs = requestedResync ? resyncStartTs + RESYNC_TOTAL_BUDGET_MS : 0
+    let attemptedResyncSourceId = overwriteSourceId
+    const resyncInFlightKey =
+      requestedResync && capturedFromUrl
+        ? this.normalizeChatSourceBindingKey(capturedFromUrl, resolvedNotebookId)
+        : null
 
-    void platform
-    void conversationTitle
-    void content
-    void capturedAt
-    void resolvedNotebookId
-    void title
-    return this.fail(
-      "Importacao de chats via background foi desativada. Use o content script para acionar operacoes no NotebookLM."
-    )
+    if (requestedResync && resyncInFlightKey) {
+      if (this.resyncInFlight.has(resyncInFlightKey)) {
+        return this.fail("Re-sync ja em andamento para este chat.")
+      }
+      this.resyncInFlight.add(resyncInFlightKey)
+    }
+
+    try {
+      if (!content) {
+        throw new Error("Extracted content is empty. Aborting upload.")
+      }
+
+      const service = new NotebookLMService()
+
+      if (isDocumentSource) {
+        if (!googleDocId) {
+          throw new Error("Google Docs ID ausente no payload de importacao.")
+        }
+
+        const sourceId = await service.addGoogleDocSource(resolvedNotebookId, title, googleDocId)
+        await storageManager.incrementUsage("imports")
+
+        return this.ok({
+          success: true,
+          notebookId: resolvedNotebookId,
+          title,
+          sourceId,
+          sourceKind: "doc",
+          docId: googleDocId,
+          updatedExisting: false
+        })
+      }
+
+      const existingBoundSourceRecord = capturedFromUrl
+        ? await this.readChatSourceBindingRecord(capturedFromUrl, resolvedNotebookId)
+        : null
+      const existingBoundSourceId = String(existingBoundSourceRecord?.sourceId ?? "").trim()
+      attemptedResyncSourceId = overwriteSourceId || existingBoundSourceId
+      const existingBoundHash = String(existingBoundSourceRecord?.lastSyncHash ?? "").trim()
+      if (requestedResync) {
+        console.log("[MindDock DEBUG] Resync hash state:", {
+          contentHash,
+          existingBoundHash,
+          existingBoundSourceId,
+          resolvedNotebookId
+        })
+      }
+
+      if (requestedResync && contentHash && existingBoundSourceId && existingBoundHash === contentHash) {
+        let confirmedNoop = false
+        try {
+          confirmedNoop = await this.withTimeout(
+            service.sourceContainsExpectedContent(existingBoundSourceId, content),
+            5_000,
+            "Re-sync nao conseguiu confirmar conteudo atual para no-op."
+          )
+        } catch (noopVerifyError) {
+          console.warn("[MindDock] no-op verify falhou; seguindo com re-sync para evitar falso sucesso.", noopVerifyError)
+          confirmedNoop = false
+        }
+
+        if (confirmedNoop) {
+          this.emitResyncProgress(capturedFromUrl, "done")
+          this.emitResyncSuccess(capturedFromUrl, resolvedNotebookId, existingBoundSourceId, contentHash)
+          return this.ok({
+            success: true,
+            notebookId: resolvedNotebookId,
+            title,
+            sourceId: existingBoundSourceId,
+            contentHash: contentHash || undefined,
+            updatedExisting: false,
+            noop: true
+          })
+        }
+      }
+      const fallbackBoundSourceId =
+        !overwriteSourceId && capturedFromUrl ? existingBoundSourceId : ""
+      const targetSourceToSwap = overwriteSourceId || fallbackBoundSourceId
+      if (
+        requestedResync &&
+        existingBoundSourceId &&
+        overwriteSourceId &&
+        existingBoundSourceId !== overwriteSourceId
+      ) {
+        console.warn("[ROUTER] Mismatch de binding (UI x storage).", {
+          storageSourceId: existingBoundSourceId,
+          uiSourceId: overwriteSourceId
+        })
+      }
+      let swappedExisting = false
+      let updatedInPlace = false
+      let downgradedFromResync = false
+
+      if (requestedResync && !targetSourceToSwap) {
+        downgradedFromResync = true
+        console.warn(
+          "[ROUTER] Re-sync sem binding valido; fallback para nova captura (insert).",
+          {
+            notebookId: resolvedNotebookId,
+            overwriteSourceId,
+            existingBoundSourceId
+          }
+        )
+      }
+
+      if (requestedResync && targetSourceToSwap) {
+        attemptedResyncSourceId = targetSourceToSwap
+        this.emitResyncProgress(capturedFromUrl, "starting", undefined, undefined, "resolving_source")
+        console.debug("[MindDock] Iniciando swap de fontes...", {
+          notebookId: resolvedNotebookId,
+          overwriteSourceId: targetSourceToSwap
+        })
+      }
+
+      if (requestedResync && Date.now() >= resyncDeadlineTs) {
+        return this.fail(
+          "RESYNC_TIMEOUT",
+          this.buildResyncErrorPayload(
+            resolvedNotebookId,
+            targetSourceToSwap,
+            resyncStartTs,
+            "Re-sync excedeu o limite de 45s durante a fase de validacao."
+          )
+        )
+      }
+
+      let sourceId = ""
+      if (requestedResync && targetSourceToSwap) {
+        const remainingForCreateMs = resyncDeadlineTs - Date.now()
+        if (remainingForCreateMs < 900) {
+          this.emitResyncProgress(capturedFromUrl, "error")
+          return this.fail(
+            "RESYNC_TIMEOUT",
+            this.buildResyncErrorPayload(
+              resolvedNotebookId,
+              targetSourceToSwap,
+              resyncStartTs,
+              "Re-sync excedeu o limite de 45s antes de concluir a criacao da nova fonte."
+            )
+          )
+        }
+
+        try {
+          const strictReplaceResult = await this.withTimeout(
+            service.strictReplaceSource(
+              resolvedNotebookId,
+              targetSourceToSwap,
+              title,
+              content,
+              platform,
+              {
+                onProgress: (progressMessage) => {
+                  const normalizedProgress = String(progressMessage ?? "").trim().toLowerCase()
+                  if (normalizedProgress.includes("delet")) {
+                    this.emitResyncProgress(
+                      capturedFromUrl,
+                      "polling",
+                      undefined,
+                      undefined,
+                      progressMessage
+                    )
+                    return
+                  }
+                  if (normalizedProgress.includes("insert")) {
+                    this.emitResyncProgress(
+                      capturedFromUrl,
+                      "uploading",
+                      undefined,
+                      undefined,
+                      progressMessage
+                    )
+                    return
+                  }
+                  if (normalizedProgress.includes("updat")) {
+                    this.emitResyncProgress(
+                      capturedFromUrl,
+                      "uploading",
+                      undefined,
+                      undefined,
+                      progressMessage
+                    )
+                    return
+                  }
+                  this.emitResyncProgress(
+                    capturedFromUrl,
+                    "starting",
+                    undefined,
+                    undefined,
+                    progressMessage
+                  )
+                }
+              }
+            ),
+            remainingForCreateMs,
+            "Re-sync excedeu o limite de 45s ao criar a nova fonte."
+          )
+          sourceId = String(strictReplaceResult.newSourceId ?? "").trim()
+          swappedExisting =
+            strictReplaceResult.wasReplaced === true || strictReplaceResult.updatedInPlace === true
+          updatedInPlace = strictReplaceResult.updatedInPlace === true
+        } catch (strictReplaceError) {
+          const strictReplaceMessage =
+            strictReplaceError instanceof Error
+              ? strictReplaceError.message
+              : String(strictReplaceError ?? "")
+          if (this.classifyResyncErrorCode(strictReplaceMessage) !== "RESYNC_BINDING_INVALID") {
+            throw strictReplaceError
+          }
+
+          downgradedFromResync = true
+          this.emitResyncProgress(
+            capturedFromUrl,
+            "uploading",
+            undefined,
+            undefined,
+            "binding_invalid_fallback_new_insert"
+          )
+          console.warn(
+            "[ROUTER] Binding invalido durante strict replace; fallback para nova captura (insert).",
+            {
+              notebookId: resolvedNotebookId,
+              targetSourceToSwap,
+              strictReplaceMessage
+            }
+          )
+          sourceId = await service.insertSource(resolvedNotebookId, title, content, "NEW")
+          swappedExisting = false
+          updatedInPlace = false
+        }
+      } else if (requestedResync) {
+        this.emitResyncProgress(
+          capturedFromUrl,
+          "uploading",
+          undefined,
+          undefined,
+          "binding_invalid_fallback_new_insert"
+        )
+        sourceId = await service.insertSource(resolvedNotebookId, title, content, "NEW")
+        swappedExisting = false
+        updatedInPlace = false
+      } else {
+        sourceId = await service.insertSource(resolvedNotebookId, title, content, "NEW")
+      }
+      if (!String(sourceId ?? "").trim()) {
+        return this.fail("NotebookLM nao confirmou a criacao da fonte. Nenhum sourceId foi retornado.")
+      }
+
+      if (capturedFromUrl && sourceId) {
+        await this.persistChatSourceBinding(
+          capturedFromUrl,
+          resolvedNotebookId,
+          sourceId,
+          title,
+          contentHash
+        )
+      }
+
+      await storageManager.incrementUsage("imports")
+
+      if (requestedResync) {
+        this.emitResyncProgress(capturedFromUrl, "done")
+        this.emitResyncSuccess(capturedFromUrl, resolvedNotebookId, sourceId, contentHash)
+      }
+
+      return this.ok({
+        success: true,
+        notebookId: resolvedNotebookId,
+        title,
+        sourceId,
+        contentHash: contentHash || undefined,
+        updatedExisting: swappedExisting,
+        updatedInPlace,
+        downgradedFromResync
+      })
+    } catch (error) {
+      if (requestedResync) {
+        this.emitResyncProgress(capturedFromUrl, "error")
+      }
+      const errorMessage = error instanceof Error ? error.message : "Falha ao importar conversa."
+      if (requestedResync) {
+        const normalizedErrorDetail = String(errorMessage ?? "").replace(/\s+/g, " ").trim()
+        const errorCode = this.classifyResyncErrorCode(normalizedErrorDetail)
+        return this.fail(
+          errorCode,
+          this.buildResyncErrorPayload(
+            resolvedNotebookId,
+            attemptedResyncSourceId,
+            resyncStartTs,
+            normalizedErrorDetail
+          )
+        )
+      }
+      return this.fail(errorMessage)
+    } finally {
+      if (requestedResync && resyncInFlightKey) {
+        this.resyncInFlight.delete(resyncInFlightKey)
+      }
+    }
   }
 
   private async handleCheckSubscription(): Promise<StandardResponse> {
@@ -631,11 +1542,469 @@ class MessageRouter {
     return this.ok({ count: saved.length, notes: saved })
   }
 
-  private async fetchAvailableNotebooks(): Promise<Notebook[]> {
-    const snapshot = await chrome.storage.local.get(this.notebookCacheKey)
-    const rawItems = Array.isArray(snapshot[this.notebookCacheKey])
-      ? (snapshot[this.notebookCacheKey] as unknown[])
+  private normalizeChatSourceBindingKey(url: string, notebookId: string): string | null {
+    const normalizedNotebookId = String(notebookId ?? "").trim()
+    const rawUrl = String(url ?? "").trim()
+
+    if (!normalizedNotebookId || !rawUrl) {
+      return null
+    }
+
+    try {
+      const parsed = new URL(rawUrl)
+      const normalizedPath = parsed.pathname.replace(/\/+$/u, "") || "/"
+      return `${parsed.origin}${normalizedPath}::${normalizedNotebookId}`
+    } catch {
+      const normalizedUrl = rawUrl.split("#")[0].split("?")[0].trim()
+      if (!normalizedUrl) {
+        return null
+      }
+      return `${normalizedUrl}::${normalizedNotebookId}`
+    }
+  }
+
+  private async readChatSourceBindingsMap(): Promise<Record<string, ChatSourceBindingRecord>> {
+    const snapshot = await chrome.storage.local.get([this.chatSourceBindingsKey])
+    const rawValue = snapshot[this.chatSourceBindingsKey]
+
+    if (!rawValue || typeof rawValue !== "object" || Array.isArray(rawValue)) {
+      return {}
+    }
+
+    const output: Record<string, ChatSourceBindingRecord> = {}
+    for (const [key, candidate] of Object.entries(rawValue as Record<string, unknown>)) {
+      if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
+        continue
+      }
+
+      const sourceId = String((candidate as { sourceId?: unknown }).sourceId ?? "").trim()
+      if (!sourceId) {
+        continue
+      }
+
+      output[key] = {
+        sourceId,
+        sourceTitle: String((candidate as { sourceTitle?: unknown }).sourceTitle ?? "").trim(),
+        lastSyncHash:
+          String((candidate as { lastSyncHash?: unknown }).lastSyncHash ?? "").trim() || undefined,
+        updatedAt:
+          String((candidate as { updatedAt?: unknown }).updatedAt ?? "").trim() ||
+          new Date(0).toISOString()
+      }
+    }
+
+    return output
+  }
+
+  private async writeChatSourceBindingsMap(
+    bindings: Record<string, ChatSourceBindingRecord>
+  ): Promise<void> {
+    const trimmedBindings = Object.fromEntries(
+      Object.entries(bindings)
+        .sort((left, right) => {
+          const leftTime = Date.parse(left[1].updatedAt)
+          const rightTime = Date.parse(right[1].updatedAt)
+          if (!Number.isFinite(leftTime) || !Number.isFinite(rightTime)) {
+            return 0
+          }
+          return rightTime - leftTime
+        })
+        .slice(0, this.maxChatSourceBindings)
+    )
+
+    await chrome.storage.local.set({
+      [this.chatSourceBindingsKey]: trimmedBindings
+    })
+  }
+
+  private async readChatSourceBinding(url: string, notebookId: string): Promise<string | null> {
+    const record = await this.readChatSourceBindingRecord(url, notebookId)
+    if (!record?.sourceId) {
+      return null
+    }
+
+    return record.sourceId
+  }
+
+  private async readChatSourceBindingRecord(
+    url: string,
+    notebookId: string
+  ): Promise<ChatSourceBindingRecord | null> {
+    const key = this.normalizeChatSourceBindingKey(url, notebookId)
+    if (!key) {
+      return null
+    }
+
+    const bindings = await this.readChatSourceBindingsMap()
+    const binding = bindings[key]
+    if (!binding?.sourceId) {
+      return null
+    }
+
+    return binding
+  }
+
+  private async forceDeleteSourceForResync(
+    service: NotebookLMService,
+    notebookId: string,
+    primarySourceId: string
+  ): Promise<boolean> {
+    const normalizedNotebookId = String(notebookId ?? "").trim()
+    const normalizedPrimarySourceId = String(primarySourceId ?? "").trim()
+    if (!normalizedNotebookId || !normalizedPrimarySourceId) {
+      return true
+    }
+
+    try {
+      return await service.smartDeleteSource(normalizedNotebookId, normalizedPrimarySourceId)
+    } catch (error) {
+      console.warn("[MindDock] smartDeleteSource falhou durante re-sync.", error)
+      return true
+    }
+  }
+
+  private async persistChatSourceBinding(
+    url: string,
+    notebookId: string,
+    sourceId: string,
+    sourceTitle: string,
+    lastSyncHash?: string
+  ): Promise<void> {
+    const key = this.normalizeChatSourceBindingKey(url, notebookId)
+    if (!key) {
+      return
+    }
+
+    const normalizedSourceId = String(sourceId ?? "").trim()
+    if (!normalizedSourceId) {
+      return
+    }
+
+    const bindings = await this.readChatSourceBindingsMap()
+    const normalizedLastSyncHash = String(lastSyncHash ?? "").trim()
+    bindings[key] = {
+      sourceId: normalizedSourceId,
+      sourceTitle: String(sourceTitle ?? "").trim(),
+      lastSyncHash: normalizedLastSyncHash || undefined,
+      updatedAt: new Date().toISOString()
+    }
+
+    await this.writeChatSourceBindingsMap(bindings)
+  }
+
+  private async clearPendingNotebookOperation(): Promise<void> {
+    await chrome.storage.local.remove([
+      this.pendingNotebookNameKey,
+      this.pendingNotebookRequestedAtKey,
+      this.pendingNotebookPhaseKey,
+      this.pendingNotebookResultKey,
+      this.pendingNotebookErrorKey
+    ])
+  }
+
+  private normalizeNotebookCreationTitle(title: string): string {
+    const cleanedTitle = stripTrailingContextSnippet(
+      String(title ?? "")
+      .replace(/\s*-\s*ChatGPT\s*$/i, "")
+      .replace(/\s*-\s*Claude\s*$/i, "")
+      .replace(/\s*\|\s*Claude\s*$/i, "")
+      .replace(/\s*-\s*Gemini\s*$/i, "")
+      .replace(/\s*-\s*Google Gemini\s*$/i, "")
+      .replace(/\s*-\s*Perplexity\s*$/i, "")
+      .replace(/\s*\|\s*Perplexity\s*$/i, "")
+      .replace(/\s*-\s*NotebookLM\s*$/i, "")
+      .trim()
+    )
+
+    return cleanedTitle || "Sem Titulo"
+  }
+
+  private async resolveMetadataTabId(sender: MessageSender): Promise<number | null> {
+    if (typeof sender.tab?.id === "number") {
+      return sender.tab.id
+    }
+
+    return new Promise((resolve) => {
+      try {
+        chrome.tabs.query({ active: true, lastFocusedWindow: true }, (tabs) => {
+          const runtimeErrorMessage = String(chrome.runtime.lastError?.message ?? "").trim()
+          if (runtimeErrorMessage) {
+            resolve(null)
+            return
+          }
+
+          const activeTabId = tabs.find((tab) => typeof tab.id === "number")?.id ?? null
+          resolve(typeof activeTabId === "number" ? activeTabId : null)
+        })
+      } catch {
+        resolve(null)
+      }
+    })
+  }
+
+  private async requestActiveTabMetadata(
+    sender: MessageSender
+  ): Promise<{ title: string; url: string } | null> {
+    const tabId = await this.resolveMetadataTabId(sender)
+    if (tabId === null) {
+      return null
+    }
+
+    return new Promise((resolve) => {
+      try {
+        chrome.tabs.sendMessage(
+          tabId,
+          { command: "GET_PAGE_METADATA" },
+          (response?: ChromeMessageResponse<Record<string, unknown>>) => {
+            const runtimeErrorMessage = String(chrome.runtime.lastError?.message ?? "").trim()
+            if (runtimeErrorMessage || !response?.success) {
+              resolve(null)
+              return
+            }
+
+            const payload = ((response.payload ?? response.data) as Record<string, unknown> | undefined) ?? {}
+            const title = String(payload.title ?? "").trim()
+            const url = String(payload.url ?? "").trim()
+
+            if (!title && !url) {
+              resolve(null)
+              return
+            }
+
+            resolve({ title, url })
+          }
+        )
+      } catch {
+        resolve(null)
+      }
+    })
+  }
+
+  private async resolveNotebookCreationTitle(
+    data: {
+      name?: unknown
+      title?: unknown
+    },
+    sender: MessageSender
+  ): Promise<string> {
+    const requestedTitle = String(data.name ?? data.title ?? "").trim()
+    if (requestedTitle) {
+      return this.normalizeNotebookCreationTitle(requestedTitle)
+    }
+
+    const pageMetadata = await this.requestActiveTabMetadata(sender)
+    if (pageMetadata?.title) {
+      return this.normalizeNotebookCreationTitle(pageMetadata.title)
+    }
+
+    const senderTabTitle = String(sender.tab?.title ?? "").trim()
+    if (senderTabTitle) {
+      return this.normalizeNotebookCreationTitle(senderTabTitle)
+    }
+
+    return "Sem Titulo"
+  }
+
+  private async upsertCreatedNotebookCache(notebookId: string, notebookTitle: string): Promise<void> {
+    const normalizedNotebookId = String(notebookId ?? "").trim()
+    const normalizedNotebookTitle = String(notebookTitle ?? "").trim()
+
+    if (!normalizedNotebookId) {
+      throw new Error("O NotebookLM nao retornou o ID do novo caderno.")
+    }
+
+    if (!normalizedNotebookTitle) {
+      throw new Error("O NotebookLM nao retornou o titulo do novo caderno.")
+    }
+
+    const scoped = await this.resolveScopedNotebookStorage()
+    const snapshot = await chrome.storage.local.get([scoped.notebookCacheKey])
+    const rawItems = Array.isArray(snapshot[scoped.notebookCacheKey])
+      ? (snapshot[scoped.notebookCacheKey] as unknown[])
       : []
+
+    const now = new Date().toISOString()
+
+    let existingCreateTime = now
+    let existingSourceCount = 0
+
+    const nextItems = rawItems
+      .filter(
+        (
+          item
+        ): item is {
+          id?: unknown
+          title?: unknown
+          createTime?: unknown
+          updateTime?: unknown
+          sourceCount?: unknown
+        } => typeof item === "object" && item !== null
+      )
+      .map((item) => ({
+        id: String(item.id ?? "").trim(),
+        title: String(item.title ?? "").trim(),
+        createTime: String(item.createTime ?? "").trim() || now,
+        updateTime: String(item.updateTime ?? "").trim() || now,
+        sourceCount:
+          typeof item.sourceCount === "number" && Number.isFinite(item.sourceCount)
+            ? item.sourceCount
+            : 0
+      }))
+      .filter((item) => item.id && item.title)
+      .filter((item) => {
+        if (item.id !== normalizedNotebookId) {
+          return true
+        }
+
+        existingCreateTime = item.createTime
+        existingSourceCount = item.sourceCount
+        return false
+      })
+
+    nextItems.unshift({
+      id: normalizedNotebookId,
+      title: normalizedNotebookTitle,
+      createTime: existingCreateTime,
+      updateTime: now,
+      sourceCount: existingSourceCount
+    })
+
+    const storagePatch: Record<string, unknown> = {
+      [scoped.notebookCacheKey]: nextItems,
+      [scoped.notebookCacheSyncKey]: now,
+      [scoped.defaultNotebookKey]: normalizedNotebookId,
+      [scoped.legacyDefaultNotebookKey]: normalizedNotebookId
+    }
+
+    await chrome.storage.local.set(storagePatch)
+    await this.persistDefaultNotebookIdByAccount(scoped.accountKey, normalizedNotebookId)
+  }
+
+  private mergeNotebookLists(primaryNotebooks: Notebook[], secondaryNotebooks: Notebook[]): Notebook[] {
+    const merged = new Map<string, Notebook>()
+    const now = new Date().toISOString()
+
+    const upsert = (item: Notebook, preferIncoming: boolean): void => {
+      const id = String(item.id ?? "").trim()
+      const title = String(item.title ?? "").trim()
+      if (!id || !title || isBlockedNotebookTitle(title)) {
+        return
+      }
+
+      const incomingCreateTime = String(item.createTime ?? "").trim() || now
+      const incomingUpdateTime = String(item.updateTime ?? "").trim() || now
+      const incomingSourceCount =
+        typeof item.sourceCount === "number" && Number.isFinite(item.sourceCount) ? item.sourceCount : 0
+      const existing = merged.get(id)
+
+      if (!existing) {
+        merged.set(id, {
+          id,
+          title,
+          createTime: incomingCreateTime,
+          updateTime: incomingUpdateTime,
+          sourceCount: incomingSourceCount
+        })
+        return
+      }
+
+      const existingCreateTime = String(existing.createTime ?? "").trim() || incomingCreateTime
+      const existingUpdateTime = String(existing.updateTime ?? "").trim() || incomingUpdateTime
+      const existingSourceCount =
+        typeof existing.sourceCount === "number" && Number.isFinite(existing.sourceCount)
+          ? existing.sourceCount
+          : 0
+
+      merged.set(id, {
+        id,
+        title: preferIncoming ? title || existing.title : existing.title || title,
+        createTime: existingCreateTime,
+        updateTime: preferIncoming ? incomingUpdateTime : existingUpdateTime,
+        sourceCount: Math.max(existingSourceCount, incomingSourceCount)
+      })
+    }
+
+    for (const notebook of secondaryNotebooks) {
+      upsert(notebook, false)
+    }
+
+    for (const notebook of primaryNotebooks) {
+      upsert(notebook, true)
+    }
+
+    return Array.from(merged.values())
+  }
+
+  private shouldUseNotebookCacheFallback(): boolean {
+    return !this.strictNotebookAccountMode
+  }
+
+  private async refreshNotebookCacheFromNotebookLM(): Promise<Notebook[]> {
+    const service = new NotebookLMService()
+    const liveNotebookEntries = await service.listNotebooks()
+    if (liveNotebookEntries.length === 0) {
+      return []
+    }
+
+    const now = new Date().toISOString()
+
+    const liveNotebooks: Notebook[] = liveNotebookEntries.map((item) => ({
+      id: item.id,
+      title: item.title,
+      createTime: now,
+      updateTime: now,
+      sourceCount: 0
+    }))
+
+    const scoped = await this.resolveScopedNotebookStorage()
+    await chrome.storage.local.set({
+      [scoped.notebookCacheKey]: liveNotebooks,
+      [scoped.notebookCacheSyncKey]: now
+    })
+
+    return liveNotebooks
+  }
+
+  private async loadNotebooksPreferLive(): Promise<Notebook[]> {
+    try {
+      const liveNotebooks = await this.refreshNotebookCacheFromNotebookLM()
+      if (liveNotebooks.length > 0) {
+        return liveNotebooks
+      }
+
+      if (!this.shouldUseNotebookCacheFallback()) {
+        return []
+      }
+
+      const cachedNotebooks = await this.fetchAvailableNotebooks()
+      if (cachedNotebooks.length > 0) {
+        console.warn("[MindDock Router] NotebookLM retornou lista vazia. Usando cache local.")
+        return cachedNotebooks
+      }
+
+      return []
+    } catch (error) {
+      if (!this.shouldUseNotebookCacheFallback()) {
+        throw error
+      }
+
+      const cachedNotebooks = await this.fetchAvailableNotebooks()
+      if (cachedNotebooks.length > 0) {
+        console.warn("[MindDock Router] Falha na listagem live. Usando cache local.", error)
+        return cachedNotebooks
+      }
+
+      throw error
+    }
+  }
+
+  private async fetchAvailableNotebooks(): Promise<Notebook[]> {
+    const scoped = await this.resolveScopedNotebookStorage()
+    const snapshot = await chrome.storage.local.get([scoped.notebookCacheKey])
+    const rawItems = Array.isArray(snapshot[scoped.notebookCacheKey])
+      ? (snapshot[scoped.notebookCacheKey] as unknown[])
+      : []
+
     const now = new Date().toISOString()
 
     return rawItems
@@ -660,7 +2029,7 @@ class MessageRouter {
             ? item.sourceCount
             : 0
       }))
-      .filter((item) => item.id && item.title)
+      .filter((item) => item.id && item.title && !isBlockedNotebookTitle(item.title))
   }
 
   private async resolvePreferredNotebookId(
@@ -669,27 +2038,35 @@ class MessageRouter {
   ): Promise<string> {
     const fromPayload = String(preferredNotebookId ?? "").trim()
     if (fromPayload) {
-      return this.ensureNotebookIdIsValid(fromPayload, fallbackToFirstNotebook)
+      return fromPayload
     }
 
+    const scoped = await this.resolveScopedNotebookStorage()
     const settings = await storageManager.getSettings()
-    const fromSettings = String(settings.defaultNotebookId ?? "").trim()
-    if (fromSettings) {
-      return this.ensureNotebookIdIsValid(fromSettings, fallbackToFirstNotebook)
+
+    const defaultByAccount =
+      typeof settings.defaultNotebookByAccount === "object" && settings.defaultNotebookByAccount !== null
+        ? (settings.defaultNotebookByAccount as Record<string, unknown>)
+        : {}
+
+    const fromScopedSettings = String(defaultByAccount[scoped.accountKey] ?? "").trim()
+    if (fromScopedSettings) {
+      return this.ensureNotebookIdIsValid(fromScopedSettings, fallbackToFirstNotebook)
     }
 
     const storageSnapshot = await chrome.storage.local.get([
-      "nexus_default_notebook_id",
-      "minddock_default_notebook"
+      scoped.defaultNotebookKey,
+      scoped.legacyDefaultNotebookKey
     ])
-    const fromCanonical = String(storageSnapshot.nexus_default_notebook_id ?? "").trim()
-    if (fromCanonical) {
-      return this.ensureNotebookIdIsValid(fromCanonical, fallbackToFirstNotebook)
+
+    const fromScopedCanonical = String(storageSnapshot[scoped.defaultNotebookKey] ?? "").trim()
+    if (fromScopedCanonical) {
+      return this.ensureNotebookIdIsValid(fromScopedCanonical, fallbackToFirstNotebook)
     }
 
-    const fromLegacy = String(storageSnapshot.minddock_default_notebook ?? "").trim()
-    if (fromLegacy) {
-      return this.ensureNotebookIdIsValid(fromLegacy, fallbackToFirstNotebook)
+    const fromScopedLegacy = String(storageSnapshot[scoped.legacyDefaultNotebookKey] ?? "").trim()
+    if (fromScopedLegacy) {
+      return this.ensureNotebookIdIsValid(fromScopedLegacy, fallbackToFirstNotebook)
     }
 
     if (!fallbackToFirstNotebook) {
@@ -703,7 +2080,8 @@ class MessageRouter {
     candidateNotebookId: string | null,
     fallbackToFirstNotebook: boolean
   ): Promise<string> {
-    const notebooks = await this.fetchAvailableNotebooks()
+    const notebooks = await this.loadNotebooksPreferLive()
+
     if (notebooks.length === 0) {
       throw new Error("Nenhum notebook encontrado. Crie um no NotebookLM primeiro.")
     }
@@ -719,11 +2097,16 @@ class MessageRouter {
     }
 
     const fallbackNotebookId = notebooks[0].id
-    await chrome.storage.local.set({
-      nexus_default_notebook_id: fallbackNotebookId,
-      minddock_default_notebook: fallbackNotebookId
-    })
-    await storageManager.updateSettings({ defaultNotebookId: fallbackNotebookId })
+    const scoped = await this.resolveScopedNotebookStorage()
+
+    const storagePatch: Record<string, unknown> = {
+      [scoped.defaultNotebookKey]: fallbackNotebookId,
+      [scoped.legacyDefaultNotebookKey]: fallbackNotebookId
+    }
+
+    await chrome.storage.local.set(storagePatch)
+    await this.persistDefaultNotebookIdByAccount(scoped.accountKey, fallbackNotebookId)
+
     return fallbackNotebookId
   }
 }
