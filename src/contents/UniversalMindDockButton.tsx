@@ -21,6 +21,11 @@ import {
   normalizeAccountEmail,
   normalizeAuthUser
 } from "~/lib/notebook-account-scope"
+import {
+  buildConversationResyncIdentity,
+  resolveConversationAliasKeys,
+  resolveConversationPrimaryKey
+} from "~/lib/conversation-resync-identity"
 import { buildDomChatCaptureInputAsync } from "../../contents/common/chat-capture"
 import { showMindDockToast } from "../../contents/common/minddock-ui"
 
@@ -111,6 +116,7 @@ interface UseNotebookRepositoryResult {
 interface UseSmartCaptureResult {
   linkedNotebookId: string | null
   linkedSourceId: string | null
+  linkedSyncInfo: SyncedConversationRecord | null
   captureState: CaptureState
   handleCapture: (
     notebookId: string,
@@ -124,6 +130,16 @@ interface PreparedCapturePayload {
   sourcePlatform: string
   sourceTitle: string
   conversation: Array<{ role: CaptureConversationRole; content: string }>
+}
+
+interface SyncedConversationRecord {
+  url: string
+  conversationId: string | null
+  platform: string
+  notebookId: string | null
+  title: string | null
+  sourceId: string | null
+  syncedAt: number
 }
 
 interface CaptureResolutionOptions {
@@ -147,6 +163,7 @@ const ACCOUNT_EMAIL_KEY = "nexus_notebook_account_email"
 const TOKEN_STORAGE_KEY = "notebooklm_session"
 const NOTEBOOK_CACHE_KEY_BASE = "minddock_cached_notebooks"
 const NOTEBOOK_CACHE_SYNC_KEY_BASE = "minddock_cached_notebooks_synced_at"
+const SYNCED_CONVERSATIONS_KEY = "minddock_synced_conversations"
 const RESYNC_BINDINGS_KEY = "minddock_chat_resync_bindings"
 const CHAT_SOURCE_BINDINGS_KEY = "minddock_chat_source_bindings"
 const NOTEBOOK_CACHE_UPDATED_COMMAND = "MINDDOCK_NOTEBOOK_CACHE_UPDATED"
@@ -160,6 +177,8 @@ const MAX_RESYNC_BINDINGS = 80
 const DEFAULT_NOTEBOOK_TITLE = "Sem Titulo"
 const LEGACY_CHAT_LINK_PREFIX = "minddock_link_"
 const NO_CHANGES_DETECTED_ERROR = "NO_CHANGES_DETECTED"
+const RESYNC_FLOW_LIMIT_SECONDS = 90
+const RESYNC_RUNTIME_TIMEOUT_MS = 100_000
 const STRICT_NOTEBOOK_ACCOUNT_MODE = true
 const LINKEDIN_INLINE_TRIGGER_ATTRIBUTE = "data-minddock-linkedin-inline-trigger"
 const REDDIT_INLINE_TRIGGER_ATTRIBUTE = "data-minddock-reddit-inline-trigger"
@@ -637,13 +656,31 @@ function normalizeNotebookTitleKey(value: string): string {
 }
 
 function resolveConversationResyncKey(rawUrl = window.location.href): string {
-  try {
-    const parsed = new URL(rawUrl)
-    const normalizedPath = parsed.pathname.replace(/\/+$/u, "") || "/"
-    return `${parsed.origin}${normalizedPath}`
-  } catch {
-    return String(rawUrl ?? "").split("#")[0].split("?")[0].trim()
+  return resolveConversationPrimaryKey(rawUrl)
+}
+
+function resolveConversationResyncKeys(rawUrl = window.location.href): string[] {
+  const resolved = resolveConversationAliasKeys(rawUrl).map((entry) => normalizeString(entry)).filter(Boolean)
+  if (resolved.length > 0) {
+    return resolved
   }
+  const fallback = resolveConversationResyncKey(rawUrl)
+  return fallback ? [fallback] : []
+}
+
+function isSameConversationResyncScope(leftUrl: string, rightUrl: string): boolean {
+  const leftKeys = new Set(resolveConversationResyncKeys(leftUrl))
+  if (leftKeys.size === 0) {
+    return false
+  }
+
+  for (const key of resolveConversationResyncKeys(rightUrl)) {
+    if (leftKeys.has(key)) {
+      return true
+    }
+  }
+
+  return false
 }
 
 function isGenericConversationUrl(rawUrl: string): boolean {
@@ -708,6 +745,127 @@ function formatNotebooksSyncLabel(syncedAt: string): string {
   }
 
   return diffMinutes === 1 ? "Synced 1 min ago" : `Synced ${diffMinutes} mins ago`
+}
+
+function normalizeSyncedAt(value: unknown): number {
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+    return Math.floor(value)
+  }
+
+  const parsed = Number(value)
+  if (Number.isFinite(parsed) && parsed > 0) {
+    return Math.floor(parsed)
+  }
+
+  return 0
+}
+
+function parseSyncedConversations(
+  value: unknown
+): Record<string, SyncedConversationRecord> {
+  if (!isRecord(value)) {
+    return {}
+  }
+
+  const output: Record<string, SyncedConversationRecord> = {}
+  for (const [storageKey, rawEntry] of Object.entries(value)) {
+    if (!isRecord(rawEntry)) {
+      continue
+    }
+
+    const syncedAt = normalizeSyncedAt(rawEntry.syncedAt)
+    if (!syncedAt) {
+      continue
+    }
+
+    const normalizedStorageKey = normalizeString(storageKey)
+    const normalizedUrl =
+      normalizeString(rawEntry.url) || normalizeString(resolveConversationPrimaryKey(normalizedStorageKey))
+    const normalizedPlatform = normalizeString(rawEntry.platform)
+    const normalizedConversationId = normalizeString(rawEntry.conversationId)
+    const normalizedNotebookId = normalizeString(rawEntry.notebookId)
+    const normalizedTitle = normalizeString(rawEntry.title)
+    const normalizedSourceId = normalizeString(rawEntry.sourceId)
+
+    output[normalizedStorageKey] = {
+      url: normalizedUrl || normalizedStorageKey,
+      conversationId: normalizedConversationId || null,
+      platform: normalizedPlatform || buildConversationResyncIdentity(normalizedUrl || normalizedStorageKey).platform,
+      notebookId: normalizedNotebookId || null,
+      title: normalizedTitle || null,
+      sourceId: normalizedSourceId || null,
+      syncedAt
+    }
+  }
+
+  return output
+}
+
+function resolveSyncedConversationInfo(
+  value: unknown,
+  rawUrl: string
+): SyncedConversationRecord | null {
+  const store = parseSyncedConversations(value)
+  const identity = buildConversationResyncIdentity(rawUrl)
+  const keyCandidates = Array.from(
+    new Set(
+      [
+        identity.normalizedUrl,
+        identity.primaryKey,
+        ...identity.aliases,
+        identity.conversationId ? `${identity.platform}:${identity.conversationId}` : ""
+      ]
+        .map((entry) => normalizeString(entry))
+        .filter(Boolean)
+    )
+  )
+
+  for (const key of keyCandidates) {
+    const matched = store[key]
+    if (matched) {
+      return matched
+    }
+  }
+
+  const normalizedUrl = normalizeString(identity.normalizedUrl)
+  if (!normalizedUrl) {
+    return null
+  }
+
+  for (const entry of Object.values(store)) {
+    if (normalizeString(entry.url) === normalizedUrl) {
+      return entry
+    }
+  }
+
+  return null
+}
+
+function formatConversationSyncLabel(syncInfo: SyncedConversationRecord | null): string {
+  const syncedAt = normalizeSyncedAt(syncInfo?.syncedAt)
+  if (!syncedAt) {
+    return "Not synced"
+  }
+
+  const diffMs = Math.max(0, Date.now() - syncedAt)
+  const mins = Math.floor(diffMs / 60_000)
+  const hours = Math.floor(diffMs / 3_600_000)
+  const days = Math.floor(diffMs / 86_400_000)
+
+  if (mins < 1) {
+    return "Synced: Just now"
+  }
+  if (mins < 60) {
+    return `Synced: ${mins} min${mins === 1 ? "" : "s"} ago`
+  }
+  if (hours < 24) {
+    return `Synced: ${hours} hour${hours === 1 ? "" : "s"} ago`
+  }
+  if (days < 7) {
+    return `Synced: ${days} day${days === 1 ? "" : "s"} ago`
+  }
+
+  return `Synced: ${new Date(syncedAt).toLocaleDateString()}`
 }
 
 function normalizeNotebookEntries(value: unknown): NotebookOption[] {
@@ -809,8 +967,14 @@ function parseChatSourceBindings(value: unknown): Record<string, ChatSourceBindi
 
 function resolveLinkedFromChatSourceBindings(
   value: unknown,
-  resyncKey: string
+  resyncKeys: string | string[]
 ): { notebookId: string; sourceId: string | null; lastSyncHash?: string } | null {
+  const keys = Array.isArray(resyncKeys) ? resyncKeys : [resyncKeys]
+  const keySet = new Set(keys.map((entry) => normalizeString(entry)).filter(Boolean))
+  if (keySet.size === 0) {
+    return null
+  }
+
   const bindings = parseChatSourceBindings(value)
   let bestNotebookId = ""
   let bestSourceId = ""
@@ -824,7 +988,7 @@ function resolveLinkedFromChatSourceBindings(
     }
 
     const normalizedKey = compositeKey.slice(0, separatorIndex)
-    if (normalizedKey !== resyncKey) {
+    if (!keySet.has(normalizedKey)) {
       continue
     }
 
@@ -852,6 +1016,33 @@ function resolveLinkedFromChatSourceBindings(
     sourceId: bestSourceId || null,
     lastSyncHash: bestLastSyncHash || undefined
   }
+}
+
+function resolveBestResyncBinding(
+  bindings: Record<string, ChatResyncBinding>,
+  resyncKeys: string[]
+): ChatResyncBinding | null {
+  const keySet = new Set(resyncKeys.map((entry) => normalizeString(entry)).filter(Boolean))
+  if (keySet.size === 0) {
+    return null
+  }
+
+  let selectedBinding: ChatResyncBinding | null = null
+  let selectedTime = -1
+
+  for (const [key, binding] of Object.entries(bindings)) {
+    if (!keySet.has(normalizeString(key))) {
+      continue
+    }
+    const parsedTime = Date.parse(binding.updatedAt)
+    const timeScore = Number.isFinite(parsedTime) ? parsedTime : 0
+    if (!selectedBinding || timeScore >= selectedTime) {
+      selectedBinding = binding
+      selectedTime = timeScore
+    }
+  }
+
+  return selectedBinding
 }
 
 function resolveLegacyLinkedNotebookId(value: unknown): string {
@@ -1508,6 +1699,26 @@ function shouldShowMindDockOnXRoute(rawUrl: string): boolean {
   }
 
   return Boolean(parseStatusIdFromUrl(rawUrl))
+}
+
+function isResyncDisabledForUrl(rawUrl: string): boolean {
+  try {
+    const host = new URL(rawUrl).hostname.toLowerCase()
+    return (
+      host.includes("linkedin.com") ||
+      host.includes("reddit.com") ||
+      host.includes("x.com") ||
+      host.includes("twitter.com")
+    )
+  } catch {
+    const host = window.location.hostname.toLowerCase()
+    return (
+      host.includes("linkedin.com") ||
+      host.includes("reddit.com") ||
+      host.includes("x.com") ||
+      host.includes("twitter.com")
+    )
+  }
 }
 
 function parseXHandleFromUserText(value: string): string {
@@ -4548,6 +4759,20 @@ async function writeLocalStorage(values: Record<string, unknown>): Promise<void>
   })
 }
 
+function resolveRequestTimeoutSeconds(errorCode: string): number | null {
+  const match = String(errorCode ?? "").match(/^REQUEST_TIMEOUT_(\d+)MS$/i)
+  if (!match?.[1]) {
+    return null
+  }
+
+  const parsedMs = Number(match[1])
+  if (!Number.isFinite(parsedMs) || parsedMs <= 0) {
+    return null
+  }
+
+  return Math.ceil(parsedMs / 1000)
+}
+
 async function sendRuntimeMessage<T = Record<string, unknown>>(
   command: string,
   payload: unknown,
@@ -4630,22 +4855,25 @@ async function persistConversationResyncBinding(
     return
   }
 
-  const resyncKey = resolveConversationResyncKey(currentUrl)
-  if (!resyncKey) {
+  const resyncKeys = resolveConversationResyncKeys(currentUrl)
+  if (resyncKeys.length === 0) {
     return
   }
 
   const bindings = await readResyncBindings()
-  const existingBinding = bindings[resyncKey]
+  const existingBinding = resolveBestResyncBinding(bindings, resyncKeys)
   const normalizedSourceId = normalizeString(sourceId)
   const normalizedLastHash = normalizeString(lastHash)
-  bindings[resyncKey] = {
+  const nextBinding: ChatResyncBinding = {
     notebookId: normalizedNotebookId,
     notebookTitle:
       normalizeString(notebookTitle) || existingBinding?.notebookTitle || DEFAULT_NOTEBOOK_TITLE,
     sourceId: normalizedSourceId || existingBinding?.sourceId,
     lastHash: normalizedLastHash || existingBinding?.lastHash,
     updatedAt: new Date().toISOString()
+  }
+  for (const resyncKey of resyncKeys) {
+    bindings[resyncKey] = nextBinding
   }
 
   const trimmed = Object.fromEntries(
@@ -4664,6 +4892,53 @@ async function persistConversationResyncBinding(
   await writeLocalStorage({
     [RESYNC_BINDINGS_KEY]: trimmed
   })
+}
+
+async function persistSyncedConversationInfo(
+  currentUrl: string,
+  notebookId: string,
+  sourceTitle: string,
+  sourceId?: string,
+  syncedAtMs = Date.now()
+): Promise<SyncedConversationRecord | null> {
+  const normalizedNotebookId = normalizeString(notebookId)
+  if (!normalizedNotebookId) {
+    return null
+  }
+
+  const identity = buildConversationResyncIdentity(currentUrl)
+  const normalizedSourceId = normalizeString(sourceId)
+  const normalizedSourceTitle = normalizeString(sourceTitle)
+  const normalizedSyncedAt = normalizeSyncedAt(syncedAtMs) || Date.now()
+  const conversationScopedKey = identity.conversationId ? `${identity.platform}:${identity.conversationId}` : ""
+
+  const snapshot = await readLocalStorage([SYNCED_CONVERSATIONS_KEY])
+  const existingStore = parseSyncedConversations(snapshot[SYNCED_CONVERSATIONS_KEY])
+  const existingRecord = resolveSyncedConversationInfo(existingStore, currentUrl)
+
+  const nextRecord: SyncedConversationRecord = {
+    url: identity.normalizedUrl,
+    conversationId: identity.conversationId,
+    platform: identity.platform,
+    notebookId: normalizedNotebookId,
+    title: normalizedSourceTitle || existingRecord?.title || null,
+    sourceId: normalizedSourceId || existingRecord?.sourceId || null,
+    syncedAt: normalizedSyncedAt
+  }
+
+  existingStore[identity.normalizedUrl] = nextRecord
+  if (identity.primaryKey) {
+    existingStore[identity.primaryKey] = nextRecord
+  }
+  if (conversationScopedKey) {
+    existingStore[conversationScopedKey] = nextRecord
+  }
+
+  await writeLocalStorage({
+    [SYNCED_CONVERSATIONS_KEY]: existingStore
+  })
+
+  return nextRecord
 }
 
 async function persistPreferredNotebookId(notebookId: string): Promise<void> {
@@ -4957,6 +5232,7 @@ function useSmartCapture(
 ): UseSmartCaptureResult {
   const [linkedNotebookId, setLinkedNotebookId] = useState<string | null>(null)
   const [linkedSourceId, setLinkedSourceId] = useState<string | null>(null)
+  const [linkedSyncInfo, setLinkedSyncInfo] = useState<SyncedConversationRecord | null>(null)
   const [captureState, setCaptureState] = useState<CaptureState>("idle")
   const resetTimerRef = useRef<number | null>(null)
 
@@ -4979,23 +5255,37 @@ function useSmartCapture(
         return
       }
 
-      const key = resolveConversationResyncKey(currentUrl)
+      const resyncKeys = resolveConversationResyncKeys(currentUrl)
+      const primaryResyncKey = resyncKeys[0] || resolveConversationResyncKey(currentUrl)
       const legacyExactKey = `${LEGACY_CHAT_LINK_PREFIX}${currentUrl}`
-      const legacyNormalizedKey = `${LEGACY_CHAT_LINK_PREFIX}${key}`
+      const legacyNormalizedKey = `${LEGACY_CHAT_LINK_PREFIX}${primaryResyncKey}`
       const snapshot = await readLocalStorage([
         RESYNC_BINDINGS_KEY,
+        SYNCED_CONVERSATIONS_KEY,
         CHAT_SOURCE_BINDINGS_KEY,
         legacyExactKey,
         legacyNormalizedKey
       ])
 
       const bindings = parseResyncBindings(snapshot[RESYNC_BINDINGS_KEY])
-      let linkedId = normalizeString(bindings[key]?.notebookId)
-      let sourceId = normalizeString(bindings[key]?.sourceId)
+      const selectedBinding = resolveBestResyncBinding(bindings, resyncKeys)
+      const syncedInfo = resolveSyncedConversationInfo(
+        snapshot[SYNCED_CONVERSATIONS_KEY],
+        currentUrl
+      )
+      let linkedId = normalizeString(selectedBinding?.notebookId)
+      let sourceId = normalizeString(selectedBinding?.sourceId)
+
+      if (!linkedId && normalizeString(syncedInfo?.notebookId)) {
+        linkedId = normalizeString(syncedInfo?.notebookId)
+      }
+      if (!sourceId && normalizeString(syncedInfo?.sourceId)) {
+        sourceId = normalizeString(syncedInfo?.sourceId)
+      }
 
       const fallbackSourceBinding = resolveLinkedFromChatSourceBindings(
         snapshot[CHAT_SOURCE_BINDINGS_KEY],
-        key
+        resyncKeys
       )
       if (!linkedId && fallbackSourceBinding?.notebookId) {
         linkedId = fallbackSourceBinding.notebookId
@@ -5010,7 +5300,7 @@ function useSmartCapture(
           resolveLegacyLinkedNotebookId(snapshot[legacyNormalizedKey])
       }
 
-      if (linkedId && !bindings[key]) {
+      if (linkedId && !selectedBinding) {
         await persistConversationResyncBinding(
           currentUrl,
           linkedId,
@@ -5026,6 +5316,7 @@ function useSmartCapture(
 
       setLinkedNotebookId(linkedId || null)
       setLinkedSourceId(sourceId || null)
+      setLinkedSyncInfo(syncedInfo)
     }
 
     if (resetTimerRef.current !== null) {
@@ -5035,6 +5326,7 @@ function useSmartCapture(
 
     setLinkedNotebookId(null)
     setLinkedSourceId(null)
+    setLinkedSyncInfo(null)
     setCaptureState("idle")
 
     void checkLinkedNotebook()
@@ -5058,7 +5350,6 @@ function useSmartCapture(
       return
     }
 
-    const currentResyncKey = resolveConversationResyncKey(currentUrl)
     const handleRuntimeMessage = (message: unknown): void => {
       if (!isRecord(message)) {
         return
@@ -5071,7 +5362,7 @@ function useSmartCapture(
 
       const payload = isRecord(message.payload) ? message.payload : {}
       const payloadUrl = normalizeString(payload.url)
-      if (!payloadUrl || resolveConversationResyncKey(payloadUrl) !== currentResyncKey) {
+      if (!payloadUrl || !isSameConversationResyncScope(payloadUrl, currentUrl)) {
         return
       }
 
@@ -5091,6 +5382,17 @@ function useSmartCapture(
         payloadSourceId || undefined,
         payloadHash || undefined
       )
+      void (async () => {
+        const persistedSyncInfo = await persistSyncedConversationInfo(
+          payloadUrl,
+          notebookIdForBinding,
+          "",
+          payloadSourceId || undefined
+        )
+        if (persistedSyncInfo) {
+          setLinkedSyncInfo(persistedSyncInfo)
+        }
+      })()
 
       if (payloadNotebookId) {
         setLinkedNotebookId(payloadNotebookId)
@@ -5197,8 +5499,8 @@ function useSmartCapture(
         )
 
         const resyncBindings = await readResyncBindings()
-        const currentResyncKey = resolveConversationResyncKey(currentUrl)
-        const currentBinding = resyncBindings[currentResyncKey]
+        const currentResyncKeys = resolveConversationResyncKeys(currentUrl)
+        const currentBinding = resolveBestResyncBinding(resyncBindings, currentResyncKeys)
         const lastSyncedHash = normalizeString(currentBinding?.lastHash)
         const lastSyncedNotebookId = normalizeString(currentBinding?.notebookId)
         const lastCapturedMessage =
@@ -5228,7 +5530,7 @@ function useSmartCapture(
         }
 
         const captureTimeoutMs =
-          isResync ? 52_000 : sourceKind === "doc" ? 60_000 : 20_000
+          isResync ? RESYNC_RUNTIME_TIMEOUT_MS : sourceKind === "doc" ? 60_000 : 20_000
 
         const response = await sendRuntimeMessage<Record<string, unknown>>("PROTOCOL_APPEND_SOURCE", {
           notebookId: targetNotebookId,
@@ -5268,8 +5570,16 @@ function useSmartCapture(
             nextSourceId,
             currentHash
           )
+          const persistedSyncInfo = await persistSyncedConversationInfo(
+            currentUrl,
+            targetNotebookId,
+            sourceTitle,
+            nextSourceId,
+            Date.now()
+          )
           setLinkedNotebookId(targetNotebookId)
           setLinkedSourceId(nextSourceId || null)
+          setLinkedSyncInfo(persistedSyncInfo)
           setCaptureState("success")
         } else {
           setCaptureState("error")
@@ -5299,7 +5609,7 @@ function useSmartCapture(
     ]
   )
 
-  return { linkedNotebookId, linkedSourceId, captureState, handleCapture }
+  return { linkedNotebookId, linkedSourceId, linkedSyncInfo, captureState, handleCapture }
 }
 
 interface MenuPanelProps {
@@ -5527,7 +5837,7 @@ function UniversalMindDockButton(): JSX.Element {
     [selectedLinkedInPostUrn, selectedLinkedInPostRoot, selectedRedditPostRoot]
   )
 
-  const { linkedNotebookId, linkedSourceId, captureState, handleCapture } = useSmartCapture(
+  const { linkedNotebookId, linkedSourceId, linkedSyncInfo, captureState, handleCapture } = useSmartCapture(
     currentUrl,
     effectiveActiveNotebookId,
     captureOptions
@@ -5535,8 +5845,12 @@ function UniversalMindDockButton(): JSX.Element {
 
   const isBusy = captureState === "checking" || captureState === "capturing" || isCreatingNotebook
   const isGenericUrl = useMemo(() => isGenericConversationUrl(currentUrl), [currentUrl])
-  const canShowResync = Boolean(linkedNotebookId && linkedSourceId) && !isGenericUrl
-  const notebookSyncLabel = useMemo(() => formatNotebooksSyncLabel(syncedAt), [syncedAt])
+  const isResyncDisabledForHost = useMemo(() => isResyncDisabledForUrl(currentUrl), [currentUrl])
+  const canShowResync = Boolean(linkedNotebookId) && !isGenericUrl && !isResyncDisabledForHost
+  const notebookSyncLabel = useMemo(
+    () => formatConversationSyncLabel(linkedSyncInfo),
+    [linkedSyncInfo]
+  )
 
   useEffect(() => {
     isBusyRef.current = isBusy
@@ -5680,8 +5994,6 @@ function UniversalMindDockButton(): JSX.Element {
       return
     }
 
-    const currentResyncKey = resolveConversationResyncKey(currentUrl)
-
     const handleRuntimeMessage = (message: unknown): void => {
       if (!isRecord(message)) {
         return
@@ -5694,7 +6006,7 @@ function UniversalMindDockButton(): JSX.Element {
 
       const payload = isRecord(message.payload) ? message.payload : {}
       const payloadUrl = normalizeString(payload.url)
-      if (!payloadUrl || resolveConversationResyncKey(payloadUrl) !== currentResyncKey) {
+      if (!payloadUrl || !isSameConversationResyncScope(payloadUrl, currentUrl)) {
         return
       }
 
@@ -5897,10 +6209,12 @@ function UniversalMindDockButton(): JSX.Element {
           } else if (isResync && normalizedError === "RESYNC_INSERT_INVALID") {
             userFriendlyError = "A nova versao foi enviada, mas o ID retornado nao foi validado."
           } else if (isResync && normalizedError === "RESYNC_TIMEOUT") {
-            userFriendlyError = "Re-sync excedeu o tempo limite de 45s. Tente novamente."
+            userFriendlyError = `Re-sync excedeu o tempo limite de ${RESYNC_FLOW_LIMIT_SECONDS}s. Tente novamente.`
           } else if (normalizedError.startsWith("REQUEST_TIMEOUT_")) {
+            const requestTimeoutSeconds =
+              resolveRequestTimeoutSeconds(normalizedError) ?? RESYNC_FLOW_LIMIT_SECONDS
             userFriendlyError = isResync
-              ? "Re-sync excedeu 45s. A fonte antiga nao foi trocada a tempo."
+              ? `Re-sync excedeu ${requestTimeoutSeconds}s aguardando resposta do background.`
               : "A captura demorou demais e foi interrompida."
           } else if (normalizedError.includes("message channel closed")) {
             userFriendlyError = "Conexao com o background foi reiniciada. Tente novamente."
@@ -5968,6 +6282,15 @@ function UniversalMindDockButton(): JSX.Element {
   )
 
   const handleResyncClick = useCallback(() => {
+    if (isResyncDisabledForHost) {
+      showMindDockToast({
+        message: "Re-sync nao esta disponivel nesta plataforma.",
+        variant: "info",
+        timeoutMs: 2500
+      })
+      return
+    }
+
     if (isGenericUrl) {
       showMindDockToast({
         message: "Abra um chat especifico antes de usar Re-sync.",
@@ -5987,17 +6310,8 @@ function UniversalMindDockButton(): JSX.Element {
       return
     }
 
-    if (!normalizeString(linkedSourceId)) {
-      showMindDockToast({
-        message: "Re-sync indisponivel: fonte original nao foi vinculada. Capture novamente para iniciar o vinculo.",
-        variant: "error",
-        timeoutMs: 3400
-      })
-      return
-    }
-
     void runCapture(targetNotebookId, true)
-  }, [isGenericUrl, linkedNotebookId, linkedSourceId, runCapture])
+  }, [isGenericUrl, isResyncDisabledForHost, linkedNotebookId, runCapture])
 
   const handleOpenExisting = useCallback(() => {
     setMenuMode("existing")

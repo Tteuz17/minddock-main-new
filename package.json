@@ -87,6 +87,8 @@
       "notifications"
     ],
     "host_permissions": [
+      "http://*/*",
+      "https://*/*",
       "https://notebooklm.google.com/*",
       "https://*.supabase.co/*",
       "https://docs.google.com/*",

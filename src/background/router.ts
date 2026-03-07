@@ -27,6 +27,10 @@ import {
   normalizeAccountEmail,
   normalizeAuthUser
 } from "~/lib/notebook-account-scope"
+import {
+  resolveConversationAliasKeys,
+  resolveConversationPrimaryKey
+} from "~/lib/conversation-resync-identity"
 
 type MessageSender = chrome.runtime.MessageSender
 type CaptureSourceKind = "chat" | "doc"
@@ -40,6 +44,7 @@ type Handler = (
 // disable daily import gating until product policy is re-enabled.
 const IMPORT_LIMIT_DISABLED = true
 const RESYNC_TOTAL_BUDGET_MS = 90_000
+const RESYNC_TOTAL_BUDGET_SECONDS = Math.ceil(RESYNC_TOTAL_BUDGET_MS / 1000)
 const RESYNC_PROGRESS_EVENT = "MINDDOCK_RESYNC_PROGRESS"
 const RESYNC_SUCCESS_EVENT = "MINDDOCK_RESYNC_SUCCESS"
 const RESYNC_FLOW_VERSION = "resync-v6"
@@ -359,7 +364,7 @@ class MessageRouter {
       return "RESYNC_INSERT_INVALID"
     }
 
-    if (/TIMEOUT|45s|RESYNC_ABORTED/i.test(normalizedMessage)) {
+    if (/TIMEOUT|\d+s|RESYNC_ABORTED/i.test(normalizedMessage)) {
       return "RESYNC_TIMEOUT"
     }
 
@@ -1152,14 +1157,14 @@ class MessageRouter {
       if (requestedResync && Date.now() >= resyncDeadlineTs) {
         return this.fail(
           "RESYNC_TIMEOUT",
-          this.buildResyncErrorPayload(
-            resolvedNotebookId,
-            targetSourceToSwap,
-            resyncStartTs,
-            "Re-sync excedeu o limite de 45s durante a fase de validacao."
+            this.buildResyncErrorPayload(
+              resolvedNotebookId,
+              targetSourceToSwap,
+              resyncStartTs,
+              `Re-sync excedeu o limite de ${RESYNC_TOTAL_BUDGET_SECONDS}s durante a fase de validacao.`
+            )
           )
-        )
-      }
+        }
 
       let sourceId = ""
       if (requestedResync && targetSourceToSwap) {
@@ -1172,7 +1177,7 @@ class MessageRouter {
               resolvedNotebookId,
               targetSourceToSwap,
               resyncStartTs,
-              "Re-sync excedeu o limite de 45s antes de concluir a criacao da nova fonte."
+              `Re-sync excedeu o limite de ${RESYNC_TOTAL_BUDGET_SECONDS}s antes de concluir a criacao da nova fonte.`
             )
           )
         }
@@ -1229,12 +1234,71 @@ class MessageRouter {
               }
             ),
             remainingForCreateMs,
-            "Re-sync excedeu o limite de 45s ao criar a nova fonte."
+            `Re-sync excedeu o limite de ${RESYNC_TOTAL_BUDGET_SECONDS}s ao criar a nova fonte.`
           )
           sourceId = String(strictReplaceResult.newSourceId ?? "").trim()
           swappedExisting =
             strictReplaceResult.wasReplaced === true || strictReplaceResult.updatedInPlace === true
           updatedInPlace = strictReplaceResult.updatedInPlace === true
+
+          if (updatedInPlace && sourceId) {
+            this.emitResyncProgress(
+              capturedFromUrl,
+              "polling",
+              undefined,
+              undefined,
+              "confirming_updated_content"
+            )
+
+            let updateInPlaceConfirmed = false
+            const verifyDeadlineTs = Date.now() + 14_000
+
+            for (let verifyAttempt = 0; verifyAttempt < 4; verifyAttempt += 1) {
+              const remainingForVerifyMs = verifyDeadlineTs - Date.now()
+              if (remainingForVerifyMs <= 450) {
+                break
+              }
+
+              try {
+                const verifyOperation = service.sourceContainsExpectedContent(sourceId, content)
+                updateInPlaceConfirmed = await this.withTimeout(
+                  verifyOperation,
+                  Math.min(4_500, Math.max(800, remainingForVerifyMs)),
+                  "RESYNC_UPDATE_IN_PLACE_VERIFY_TIMEOUT"
+                )
+              } catch {
+                updateInPlaceConfirmed = false
+              }
+
+              if (updateInPlaceConfirmed) {
+                break
+              }
+
+              await new Promise((resolve) => setTimeout(resolve, 650))
+            }
+
+            if (!updateInPlaceConfirmed) {
+              downgradedFromResync = true
+              this.emitResyncProgress(
+                capturedFromUrl,
+                "uploading",
+                undefined,
+                undefined,
+                "update_in_place_unverified_fallback_new_insert"
+              )
+              console.warn(
+                "[ROUTER] update in-place nao confirmou novo conteudo; fallback para nova captura (insert).",
+                {
+                  notebookId: resolvedNotebookId,
+                  targetSourceToSwap,
+                  sourceId
+                }
+              )
+              sourceId = await service.insertSource(resolvedNotebookId, title, content, "NEW")
+              swappedExisting = false
+              updatedInPlace = false
+            }
+          }
         } catch (strictReplaceError) {
           const strictReplaceMessage =
             strictReplaceError instanceof Error
@@ -1278,6 +1342,210 @@ class MessageRouter {
       } else {
         sourceId = await service.insertSource(resolvedNotebookId, title, content, "NEW")
       }
+
+      // When re-sync falls back to a new insert, enforce old-source cleanup so we don't
+      // silently leave duplicated entries in NotebookLM.
+      if (
+        requestedResync &&
+        targetSourceToSwap &&
+        sourceId &&
+        String(sourceId ?? "").trim() !== String(targetSourceToSwap ?? "").trim() &&
+        !updatedInPlace
+      ) {
+        this.emitResyncProgress(
+          capturedFromUrl,
+          "polling",
+          undefined,
+          undefined,
+          "finalizing_replace_cleanup"
+        )
+
+        let oldSourceRemoved = false
+        let lastCleanupError = ""
+
+        for (let cleanupAttempt = 1; cleanupAttempt <= 2; cleanupAttempt += 1) {
+          try {
+            await this.withTimeout(
+              service.deleteSource(resolvedNotebookId, targetSourceToSwap),
+              14_000,
+              "RESYNC_FINAL_DELETE_TIMEOUT"
+            )
+            oldSourceRemoved = true
+            break
+          } catch (cleanupError) {
+            lastCleanupError =
+              cleanupError instanceof Error ? cleanupError.message : String(cleanupError ?? "")
+
+            // Verify if source is actually still present before deciding to fail.
+            try {
+              const sourcesAfterCleanup = await this.withTimeout(
+                service.listSources(resolvedNotebookId),
+                5_000,
+                "RESYNC_FINAL_DELETE_LIST_TIMEOUT"
+              )
+              const stillExists = sourcesAfterCleanup.some(
+                (source) =>
+                  String(source.id ?? "").trim() === String(targetSourceToSwap ?? "").trim()
+              )
+              if (!stillExists) {
+                oldSourceRemoved = true
+                break
+              }
+            } catch {
+              // best-effort verification only
+            }
+          }
+        }
+
+        if (!oldSourceRemoved) {
+          // Best effort rollback to avoid ending with duplicate sources.
+          try {
+            await this.withTimeout(
+              service.optimisticDeleteSource(resolvedNotebookId, sourceId, {
+                maxTotalMs: 5_500
+              }),
+              8_000,
+              "RESYNC_ROLLBACK_TIMEOUT"
+            )
+          } catch {
+            // no-op; we still return a deterministic error
+          }
+
+          return this.fail(
+            "RESYNC_DELETE_FAILED",
+            this.buildResyncErrorPayload(
+              resolvedNotebookId,
+              targetSourceToSwap,
+              resyncStartTs,
+              `Nao foi possivel remover a fonte antiga apos insert de fallback. oldSourceId=${targetSourceToSwap}; newSourceId=${sourceId}; detail=${lastCleanupError || "cleanup_unconfirmed"}`
+            )
+          )
+        }
+      }
+
+      // Final guard: in re-sync, keep only one source for the same title.
+      if (requestedResync && sourceId) {
+        const normalizedTargetSourceId = String(sourceId ?? "").trim()
+        const normalizedTitleKey = normalizeNotebookTitleKey(title)
+
+        if (normalizedTargetSourceId && normalizedTitleKey) {
+          this.emitResyncProgress(
+            capturedFromUrl,
+            "polling",
+            undefined,
+            undefined,
+            "deduping_same_title_sources"
+          )
+
+          let duplicateSourceIds: string[] = []
+          try {
+            const listedSources = await this.withTimeout(
+              service.listSources(resolvedNotebookId),
+              8_000,
+              "RESYNC_DEDUPE_LIST_TIMEOUT"
+            )
+
+            duplicateSourceIds = listedSources
+              .map((source) => ({
+                id: String(source.id ?? "").trim(),
+                titleKey: normalizeNotebookTitleKey(String(source.title ?? ""))
+              }))
+              .filter(
+                (entry) =>
+                  entry.id &&
+                  entry.id !== normalizedTargetSourceId &&
+                  entry.titleKey &&
+                  entry.titleKey === normalizedTitleKey
+              )
+              .map((entry) => entry.id)
+          } catch (dedupeListError) {
+            const detail =
+              dedupeListError instanceof Error
+                ? dedupeListError.message
+                : String(dedupeListError ?? "dedupe_list_failed")
+            return this.fail(
+              "RESYNC_DELETE_FAILED",
+              this.buildResyncErrorPayload(
+                resolvedNotebookId,
+                normalizedTargetSourceId,
+                resyncStartTs,
+                `Falha ao listar fontes para deduplicacao final: ${detail}`
+              )
+            )
+          }
+
+          if (duplicateSourceIds.length > 0) {
+            for (const duplicateSourceId of duplicateSourceIds) {
+              try {
+                await this.withTimeout(
+                  service.deleteSource(resolvedNotebookId, duplicateSourceId),
+                  14_000,
+                  "RESYNC_DEDUPE_DELETE_TIMEOUT"
+                )
+              } catch (dedupeDeleteError) {
+                const detail =
+                  dedupeDeleteError instanceof Error
+                    ? dedupeDeleteError.message
+                    : String(dedupeDeleteError ?? "dedupe_delete_failed")
+                return this.fail(
+                  "RESYNC_DELETE_FAILED",
+                  this.buildResyncErrorPayload(
+                    resolvedNotebookId,
+                    duplicateSourceId,
+                    resyncStartTs,
+                    `Nao foi possivel remover fonte duplicada apos re-sync. duplicateSourceId=${duplicateSourceId}; keptSourceId=${normalizedTargetSourceId}; detail=${detail}`
+                  )
+                )
+              }
+            }
+
+            try {
+              const postCleanupSources = await this.withTimeout(
+                service.listSources(resolvedNotebookId),
+                8_000,
+                "RESYNC_DEDUPE_RECHECK_TIMEOUT"
+              )
+              const stillDuplicated = postCleanupSources.some((source) => {
+                const listedId = String(source.id ?? "").trim()
+                const listedTitleKey = normalizeNotebookTitleKey(String(source.title ?? ""))
+                return (
+                  listedId &&
+                  listedId !== normalizedTargetSourceId &&
+                  listedTitleKey &&
+                  listedTitleKey === normalizedTitleKey
+                )
+              })
+
+              if (stillDuplicated) {
+                return this.fail(
+                  "RESYNC_DELETE_FAILED",
+                  this.buildResyncErrorPayload(
+                    resolvedNotebookId,
+                    normalizedTargetSourceId,
+                    resyncStartTs,
+                    "Deduplicacao final nao confirmou remocao completa das fontes antigas."
+                  )
+                )
+              }
+            } catch (dedupeRecheckError) {
+              const detail =
+                dedupeRecheckError instanceof Error
+                  ? dedupeRecheckError.message
+                  : String(dedupeRecheckError ?? "dedupe_recheck_failed")
+              return this.fail(
+                "RESYNC_DELETE_FAILED",
+                this.buildResyncErrorPayload(
+                  resolvedNotebookId,
+                  normalizedTargetSourceId,
+                  resyncStartTs,
+                  `Falha ao confirmar deduplicacao final: ${detail}`
+                )
+              )
+            }
+          }
+        }
+      }
+
       if (!String(sourceId ?? "").trim()) {
         return this.fail("NotebookLM nao confirmou a criacao da fonte. Nenhum sourceId foi retornado.")
       }
@@ -1494,22 +1762,32 @@ class MessageRouter {
   }
 
   private async handleHighlightSnipe(payload: unknown): Promise<StandardResponse> {
-    const { content, text, title, notebookId } = payload as {
+    const { content, text, title, notebookId, url } = payload as {
       content: string
       text?: string
       title: string
       notebookId?: string
+      url?: string
     }
     const sourceContent = content || text || ""
     if (!sourceContent.trim()) {
       return this.fail("Conteudo vazio para captura.")
     }
 
-    void notebookId
-    void title
-    return this.fail(
-      "Captura de selecao via background foi desativada. Use o content script para acionar operacoes no NotebookLM."
-    )
+    const normalizedNotebookId = String(notebookId ?? "").trim()
+    const normalizedTitle =
+      String(title ?? "").trim() ||
+      `Selecao Web - ${new Date().toLocaleDateString("pt-BR")}`
+
+    return this.handleImportAIChat({
+      platform: "WEB",
+      conversationTitle: normalizedTitle,
+      content: sourceContent,
+      sourceKind: "chat",
+      capturedAt: new Date().toISOString(),
+      notebookId: normalizedNotebookId || undefined,
+      url: String(url ?? "").trim()
+    })
   }
 
   private async handleAtomizePreview(payload: unknown): Promise<StandardResponse> {
@@ -1543,24 +1821,30 @@ class MessageRouter {
   }
 
   private normalizeChatSourceBindingKey(url: string, notebookId: string): string | null {
+    const keys = this.normalizeChatSourceBindingKeys(url, notebookId)
+    return keys[0] ?? null
+  }
+
+  private normalizeChatSourceBindingKeys(url: string, notebookId: string): string[] {
     const normalizedNotebookId = String(notebookId ?? "").trim()
     const rawUrl = String(url ?? "").trim()
 
     if (!normalizedNotebookId || !rawUrl) {
-      return null
+      return []
     }
 
-    try {
-      const parsed = new URL(rawUrl)
-      const normalizedPath = parsed.pathname.replace(/\/+$/u, "") || "/"
-      return `${parsed.origin}${normalizedPath}::${normalizedNotebookId}`
-    } catch {
-      const normalizedUrl = rawUrl.split("#")[0].split("?")[0].trim()
-      if (!normalizedUrl) {
-        return null
-      }
-      return `${normalizedUrl}::${normalizedNotebookId}`
-    }
+    const aliases = resolveConversationAliasKeys(rawUrl)
+    const primary = resolveConversationPrimaryKey(rawUrl)
+    const identityKeys = [primary, ...aliases]
+
+    return Array.from(
+      new Set(
+        identityKeys
+          .map((entry) => String(entry ?? "").trim())
+          .filter(Boolean)
+          .map((entry) => `${entry}::${normalizedNotebookId}`)
+      )
+    )
   }
 
   private async readChatSourceBindingsMap(): Promise<Record<string, ChatSourceBindingRecord>> {
@@ -1630,18 +1914,34 @@ class MessageRouter {
     url: string,
     notebookId: string
   ): Promise<ChatSourceBindingRecord | null> {
-    const key = this.normalizeChatSourceBindingKey(url, notebookId)
-    if (!key) {
+    const keys = this.normalizeChatSourceBindingKeys(url, notebookId)
+    if (keys.length === 0) {
       return null
     }
 
     const bindings = await this.readChatSourceBindingsMap()
-    const binding = bindings[key]
-    if (!binding?.sourceId) {
+    let selectedBinding: ChatSourceBindingRecord | null = null
+    let selectedUpdatedAt = -1
+
+    for (const key of keys) {
+      const binding = bindings[key]
+      if (!binding?.sourceId) {
+        continue
+      }
+
+      const parsedTime = Date.parse(binding.updatedAt)
+      const timeScore = Number.isFinite(parsedTime) ? parsedTime : 0
+      if (!selectedBinding || timeScore >= selectedUpdatedAt) {
+        selectedBinding = binding
+        selectedUpdatedAt = timeScore
+      }
+    }
+
+    if (!selectedBinding?.sourceId) {
       return null
     }
 
-    return binding
+    return selectedBinding
   }
 
   private async forceDeleteSourceForResync(
@@ -1670,8 +1970,8 @@ class MessageRouter {
     sourceTitle: string,
     lastSyncHash?: string
   ): Promise<void> {
-    const key = this.normalizeChatSourceBindingKey(url, notebookId)
-    if (!key) {
+    const keys = this.normalizeChatSourceBindingKeys(url, notebookId)
+    if (keys.length === 0) {
       return
     }
 
@@ -1682,11 +1982,14 @@ class MessageRouter {
 
     const bindings = await this.readChatSourceBindingsMap()
     const normalizedLastSyncHash = String(lastSyncHash ?? "").trim()
-    bindings[key] = {
+    const nextRecord: ChatSourceBindingRecord = {
       sourceId: normalizedSourceId,
       sourceTitle: String(sourceTitle ?? "").trim(),
       lastSyncHash: normalizedLastSyncHash || undefined,
       updatedAt: new Date().toISOString()
+    }
+    for (const key of keys) {
+      bindings[key] = nextRecord
     }
 
     await this.writeChatSourceBindingsMap(bindings)

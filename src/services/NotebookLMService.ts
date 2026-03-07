@@ -309,9 +309,15 @@ export class NotebookLMService {
     normalizedNotebookId: string,
     normalizedSourceId: string
   ): unknown[][] {
+    const sourceEntry = [[normalizedSourceId]]
     const sourceIds = [normalizedSourceId]
 
     return [
+      [sourceEntry, [2]],
+      [sourceEntry],
+      [[normalizedSourceId], [2]],
+      [[normalizedSourceId]],
+      [normalizedNotebookId, [[normalizedSourceId]], [2]],
       [sourceIds, [2]],
       [sourceIds],
       [normalizedNotebookId, sourceIds, [2]],
@@ -1033,6 +1039,7 @@ export class NotebookLMService {
     upstreamUrl.searchParams.set("bl", blToken)
     upstreamUrl.searchParams.set("_reqid", this.nextRequestId())
     upstreamUrl.searchParams.set("rt", "c")
+    upstreamUrl.searchParams.set("authuser", "0")
 
     const normalizedAuthUser = normalizeAuthUser(authUser)
     if (normalizedAuthUser) {
@@ -2683,10 +2690,25 @@ export class NotebookLMService {
   }
 
   private logResyncDiagnostics(diag: ResyncDiagnostics): void {
+    const hasRecoverableFallback =
+      diag.updateInPlaceAttempted === true &&
+      diag.updateInPlaceSucceeded === true &&
+      String(diag.rpcError ?? "").toLowerCase().includes("delete")
+
+    const hasFailure =
+      diag.updateInPlaceSucceeded === false ||
+      (diag.existsInListAfterDelete === true && diag.updateInPlaceSucceeded !== true)
+
+    const logger: (...args: unknown[]) => void = hasFailure
+      ? console.error
+      : hasRecoverableFallback
+      ? console.warn
+      : console.log
+
     try {
-      console.error("[RESYNC_DIAGNOSTICS]", JSON.stringify(diag))
+      logger("[RESYNC_DIAGNOSTICS]", JSON.stringify(diag))
     } catch {
-      console.error("[RESYNC_DIAGNOSTICS]", diag)
+      logger("[RESYNC_DIAGNOSTICS]", diag)
     }
   }
 
@@ -2845,9 +2867,7 @@ export class NotebookLMService {
             diag.updateInPlaceSucceeded = true
             diag.updateInPlaceError = null
             diag.existsInListAfterDelete = true
-            diag.rpcError =
-              diag.rpcError ??
-              "DELETE_FAILED_BUT_UPDATED_IN_PLACE: delete nao confirmado, update in-place aplicado."
+            diag.rpcError = "DELETE_NOT_CONFIRMED_UPDATED_IN_PLACE"
             flushDiagnostics()
             return {
               newSourceId: targetSourceId,
@@ -3282,7 +3302,7 @@ export class NotebookLMService {
 
     if (sawAcceptedRpc) {
       if (allowUnverifiedSuccess) {
-        console.warn(
+        console.log(
           "[MindDock] NotebookLM aceitou RPC de update, mas a leitura de confirmacao ainda nao refletiu mudanca."
         )
         return normalizedSourceId
