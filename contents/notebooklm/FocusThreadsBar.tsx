@@ -676,50 +676,55 @@ export function FocusThreadsBar() {
     const name = newDockName.trim()
     if (!name || !user || !notebookId.current) return
 
-    setIsCreating(true)
-    setCreateError(null)
+    try {
+      setIsCreating(true)
+      setCreateError(null)
 
-    if (DOCKS_DEMO_MODE) {
-      const thread = buildDemoThread(user.id, notebookId.current, name, threads.length)
-      const nextThreads = [thread, ...threads]
-      const starterMessages = buildLightCopyStarterMessages(thread.id)
-      const currentStore = readDemoStore(user.id, notebookId.current)
+      if (DOCKS_DEMO_MODE) {
+        const thread = buildDemoThread(user.id, notebookId.current, name, threads.length)
+        const nextThreads = [thread, ...threads]
+        const starterMessages = buildLightCopyStarterMessages(thread.id)
+        const currentStore = readDemoStore(user.id, notebookId.current)
 
-      writeDemoStore(user.id, notebookId.current, {
-        threads: nextThreads,
-        messagesById: {
-          ...currentStore.messagesById,
-          [thread.id]: starterMessages
-        }
+        writeDemoStore(user.id, notebookId.current, {
+          threads: nextThreads,
+          messagesById: {
+            ...currentStore.messagesById,
+            [thread.id]: starterMessages
+          }
+        })
+
+        setThreads(nextThreads)
+        setActiveId(thread.id)
+        setMessages(starterMessages)
+        setHistoryOpen(false)
+        closeCreateModal()
+        openNativeNewConversation()
+        return
+      }
+
+      const res = await chrome.runtime.sendMessage({
+        command: "MINDDOCK_THREAD_CREATE",
+        payload: { userId: user.id, notebookId: notebookId.current, name }
       })
 
-      setThreads(nextThreads)
-      setActiveId(thread.id)
-      setMessages(starterMessages)
-      setHistoryOpen(false)
+      if (res?.success) {
+        const thread: Thread = res.payload?.thread ?? res.data?.thread
+        setThreads((prev) => [thread, ...prev])
+        setActiveId(thread.id)
+        setMessages([])
+        setHistoryOpen(false)
+        closeCreateModal()
+        openNativeNewConversation()
+      } else {
+        setCreateError(res?.error ?? "Failed to create dock.")
+      }
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : "Failed to create dock."
+      setCreateError(errorMessage)
+      pushActionFeedback(errorMessage, "error")
+    } finally {
       setIsCreating(false)
-      closeCreateModal()
-      openNativeNewConversation()
-      return
-    }
-
-    const res = await chrome.runtime.sendMessage({
-      command: "MINDDOCK_THREAD_CREATE",
-      payload: { userId: user.id, notebookId: notebookId.current, name }
-    })
-
-    setIsCreating(false)
-
-    if (res?.success) {
-      const thread: Thread = res.payload?.thread ?? res.data?.thread
-      setThreads((prev) => [thread, ...prev])
-      setActiveId(thread.id)
-      setMessages([])
-      setHistoryOpen(false)
-      closeCreateModal()
-      openNativeNewConversation()
-    } else {
-      setCreateError(res?.error ?? "Failed to create dock.")
     }
   }
 

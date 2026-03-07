@@ -21,13 +21,15 @@ const DEV_TEST_USER = {
 }
 
 export function AuthScreen({ compact }: AuthScreenProps) {
-  const { signIn, refresh } = useAuth()
+  const { signIn, refresh, error } = useAuth()
   const [isLoading, setIsLoading] = useState(false)
 
   async function handleSignIn() {
     setIsLoading(true)
     try {
       await signIn()
+    } catch {
+      // O erro ja e exposto pelo hook.
     } finally {
       setIsLoading(false)
     }
@@ -81,7 +83,7 @@ export function AuthScreen({ compact }: AuthScreenProps) {
         {/* Features */}
         <div className="space-y-2 text-left w-full">
           {[
-            "Importar conversas do ChatGPT, Claude e Gemini",
+            "Importar conteúdos com botão universal em sites suportados",
             "Organizar notebooks com pastas e tags",
             "Zettelkasten com links bidirecionais",
             "Prompts Ágeis com 1 clique"
@@ -107,6 +109,12 @@ export function AuthScreen({ compact }: AuthScreenProps) {
           )}
           {isLoading ? "Entrando..." : "Continuar com Google"}
         </Button>
+
+        {error ? (
+          <div className="w-full rounded-xl border border-red-400/30 bg-red-500/10 px-3 py-2 text-left">
+            <p className="text-xs leading-relaxed text-red-200">{error}</p>
+          </div>
+        ) : null}
 
         <p
           className="text-xs text-text-tertiary cursor-default select-none"

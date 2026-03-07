@@ -25,6 +25,7 @@ export interface Source {
 export interface RPCTokens {
   at: string
   bl: string
+  accountEmail?: string | null
   sessionId?: string | null
   authUser?: string | null
 }
@@ -179,6 +180,7 @@ export type MessageCommand =
   | "MINDDOCK_CMD_AUTH_SIGN_OUT"
   | "MINDDOCK_CMD_AUTH_GET_STATUS"
   | "MINDDOCK_CMD_GET_NOTEBOOKS"
+  | "MINDDOCK_CMD_CREATE_NOTEBOOK"
   | "MINDDOCK_CMD_GET_NOTEBOOK_SOURCES"
   | "MINDDOCK_CMD_GET_SOURCE_CONTENTS"
   | "MINDDOCK_CMD_REFRESH_GDOC_SOURCES"

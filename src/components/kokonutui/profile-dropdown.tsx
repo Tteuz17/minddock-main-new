@@ -3,8 +3,6 @@
 import * as React from "react";
 import { cn } from "~/lib/utils";
 import { Settings, CreditCard, FileText, LogOut, User } from "lucide-react";
-import Image from "next/image";
-import Link from "next/link";
 import {
     DropdownMenu,
     DropdownMenuContent,
@@ -12,7 +10,7 @@ import {
     DropdownMenuSeparator,
     DropdownMenuTrigger,
 } from "~/components/ui/dropdown-menu";
-import Gemini from "../icons/gemini";
+import Gemini from "./gemini";
 
 interface Profile {
     name: string;
@@ -100,7 +98,7 @@ export default function ProfileDropdown({
                             <div className="relative">
                                 <div className="w-10 h-10 rounded-full bg-gradient-to-br from-purple-500 via-pink-500 to-orange-400 p-0.5">
                                     <div className="w-full h-full rounded-full overflow-hidden bg-white dark:bg-zinc-900">
-                                        <Image
+                                        <img
                                             src={data.avatar}
                                             alt={data.name}
                                             width={36}
@@ -154,8 +152,10 @@ export default function ProfileDropdown({
                         <div className="space-y-1">
                             {menuItems.map((item) => (
                                 <DropdownMenuItem key={item.label} asChild>
-                                    <Link
+                                    <a
                                         href={item.href}
+                                        rel={item.external ? "noreferrer noopener" : undefined}
+                                        target={item.external ? "_blank" : undefined}
                                         className="flex items-center p-3 hover:bg-zinc-100/80 dark:hover:bg-zinc-800/60 rounded-xl transition-all duration-200 cursor-pointer group hover:shadow-sm border border-transparent hover:border-zinc-200/50 dark:hover:border-zinc-700/50"
                                     >
                                         <div className="flex items-center gap-2 flex-1">
@@ -178,7 +178,7 @@ export default function ProfileDropdown({
                                                 </span>
                                             )}
                                         </div>
-                                    </Link>
+                                    </a>
                                 </DropdownMenuItem>
                             ))}
                         </div>

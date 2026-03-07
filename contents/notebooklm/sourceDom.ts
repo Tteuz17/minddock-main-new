@@ -398,6 +398,20 @@ function clickElement(element: HTMLElement): boolean {
   return true
 }
 
+function activateElementForInlineEdit(element: HTMLElement): boolean {
+  clickElement(element)
+
+  element.dispatchEvent(
+    new MouseEvent("dblclick", {
+      bubbles: true,
+      cancelable: true,
+      view: window
+    })
+  )
+
+  return true
+}
+
 function isMindDockInjectedElement(element: HTMLElement): boolean {
   return !!element.closest(
     "#minddock-focus-threads-root, #minddock-agile-bar-root, #minddock-source-actions-root, #minddock-source-filters-root"
@@ -491,4 +505,708 @@ export function triggerNotebookNewConversation(): boolean {
   }
 
   return false
+}
+
+const NOTEBOOK_CREATE_ACTION_SELECTORS = [
+  "button",
+  "[role='button']",
+  "a",
+  "span[role='button']",
+  "div[role='button']"
+] as const
+
+const NOTEBOOK_CREATE_INPUT_SELECTORS = [
+  "[role='dialog'] input[type='text']",
+  "[role='dialog'] input:not([type])",
+  "[role='dialog'] textarea",
+  "[role='dialog'] [contenteditable='true']",
+  "dialog input[type='text']",
+  "dialog input:not([type])",
+  "dialog textarea",
+  "dialog [contenteditable='true']",
+  "input[placeholder*='name' i]",
+  "input[placeholder*='nome' i]",
+  "input[aria-label*='name' i]",
+  "input[aria-label*='nome' i]",
+  "textarea[aria-label*='name' i]",
+  "textarea[aria-label*='nome' i]"
+] as const
+
+const NOTEBOOK_TITLE_EDITABLE_SELECTORS = [
+  "input[aria-label='Notebook title']",
+  "textarea[aria-label='Notebook title']",
+  "input[aria-label*='title' i]",
+  "input[placeholder*='title' i]",
+  "input[aria-label*='titulo' i]",
+  "input[placeholder*='titulo' i]",
+  "input[aria-label*='notebook' i]",
+  "input[aria-label*='caderno' i]",
+  "textarea[aria-label*='title' i]",
+  "textarea[placeholder*='title' i]",
+  "textarea[aria-label*='titulo' i]",
+  "textarea[placeholder*='titulo' i]",
+  "[contenteditable='true'][aria-label*='title' i]",
+  "[contenteditable='true'][aria-label*='titulo' i]",
+  "[contenteditable='true'][aria-label*='notebook' i]",
+  "[contenteditable='true'][aria-label*='caderno' i]",
+  "[contenteditable='true'][role='textbox']"
+] as const
+
+const NOTEBOOK_TITLE_DISPLAY_SELECTORS = [
+  "[role='heading']",
+  "[data-testid*='title']",
+  "h1",
+  "h2",
+  "h3",
+  "button",
+  "[role='button']",
+  "span"
+] as const
+
+const UNTITLED_NOTEBOOK_LABELS = [
+  "untitled notebook",
+  "untitled",
+  "caderno sem titulo",
+  "sem titulo"
+] as const
+
+function wait(delayMs: number): Promise<void> {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, delayMs)
+  })
+}
+
+async function waitForValue<T>(
+  resolveValue: () => T | null,
+  timeoutMs: number,
+  pollIntervalMs = 150
+): Promise<T | null> {
+  const timeoutAt = Date.now() + timeoutMs
+
+  while (Date.now() < timeoutAt) {
+    const currentValue = resolveValue()
+    if (currentValue !== null) {
+      return currentValue
+    }
+
+    await wait(pollIntervalMs)
+  }
+
+  return null
+}
+
+function resolveActionCandidates(root?: ParentNode): HTMLElement[] {
+  if (root && "querySelectorAll" in root) {
+    const localResults: HTMLElement[] = []
+    const seen = new Set<HTMLElement>()
+
+    for (const selector of NOTEBOOK_CREATE_ACTION_SELECTORS) {
+      for (const element of Array.from(root.querySelectorAll<HTMLElement>(selector))) {
+        if (!(element instanceof HTMLElement) || seen.has(element) || !isVisible(element)) {
+          continue
+        }
+
+        seen.add(element)
+        localResults.push(element)
+      }
+    }
+
+    return localResults
+  }
+
+  return queryDeepAll<HTMLElement>(NOTEBOOK_CREATE_ACTION_SELECTORS).filter((candidate) =>
+    isVisible(candidate)
+  )
+}
+
+function getNotebookActionLabel(candidate: HTMLElement): string {
+  const textParts = [
+    candidate.innerText,
+    candidate.textContent,
+    candidate.getAttribute("aria-label"),
+    candidate.getAttribute("title"),
+    candidate.getAttribute("placeholder"),
+    candidate.getAttribute("data-testid")
+  ]
+
+  return normalize(
+    textParts
+      .map((value) => String(value ?? "").trim())
+      .filter(Boolean)
+      .join(" ")
+  )
+}
+
+function scoreCreateTriggerCandidate(candidate: HTMLElement): number {
+  const label = getNotebookActionLabel(candidate)
+  if (!label) {
+    return -1
+  }
+
+  const rect = candidate.getBoundingClientRect()
+  let score = -1
+
+  const strongLabels = [
+    "create new notebook",
+    "new notebook",
+    "create notebook",
+    "novo caderno",
+    "novo notebook",
+    "criar caderno",
+    "criar notebook"
+  ]
+
+  for (const candidateLabel of strongLabels) {
+    if (label.includes(candidateLabel)) {
+      score = Math.max(score, 220 - candidateLabel.length)
+    }
+  }
+
+  if (label.includes("create new")) {
+    score = Math.max(score, 180)
+  }
+
+  if (label === "create" || label === "criar") {
+    score = Math.max(score, 120)
+  }
+
+  if (label.includes("create") || label.includes("criar")) {
+    score = Math.max(score, 90)
+  }
+
+  if (
+    label.includes("cancel") ||
+    label.includes("cancelar") ||
+    label.includes("delete") ||
+    label.includes("apagar")
+  ) {
+    score -= 200
+  }
+
+  if (score < 0) {
+    return -1
+  }
+
+  if (candidate.tagName === "BUTTON") {
+    score += 8
+  }
+
+  if (rect.top <= window.innerHeight * 0.8) {
+    score += 6
+  }
+
+  if (rect.width >= 72) {
+    score += 4
+  }
+
+  if (candidate.closest("[role='dialog'], dialog, [aria-modal='true']")) {
+    score -= 12
+  }
+
+  return score
+}
+
+function scoreCreateConfirmCandidate(candidate: HTMLElement): number {
+  const label = getNotebookActionLabel(candidate)
+  if (!label) {
+    return -1
+  }
+
+  let score = -1
+
+  const confirmLabels = ["create", "criar", "confirm", "confirmar", "continue", "continuar", "ok"]
+  for (const confirmLabel of confirmLabels) {
+    if (label === confirmLabel) {
+      score = Math.max(score, 220 - confirmLabel.length)
+    } else if (label.includes(confirmLabel)) {
+      score = Math.max(score, 180 - confirmLabel.length)
+    }
+  }
+
+  if (
+    label.includes("cancel") ||
+    label.includes("cancelar") ||
+    label.includes("back") ||
+    label.includes("voltar")
+  ) {
+    score -= 200
+  }
+
+  if (score < 0) {
+    return -1
+  }
+
+  if (candidate.closest("[role='dialog'], dialog, [aria-modal='true']")) {
+    score += 14
+  }
+
+  if (candidate.tagName === "BUTTON") {
+    score += 6
+  }
+
+  return score
+}
+
+function resolveCreateTrigger(): HTMLElement | null {
+  let bestCandidate: HTMLElement | null = null
+  let bestScore = -1
+
+  for (const candidate of resolveActionCandidates()) {
+    const score = scoreCreateTriggerCandidate(candidate)
+    if (score > bestScore) {
+      bestScore = score
+      bestCandidate = candidate
+    }
+  }
+
+  return bestCandidate
+}
+
+function resolveNotebookTitleHeader(): HTMLElement | null {
+  let bestCandidate: HTMLElement | null = null
+  let bestScore = -1
+
+  for (const candidate of queryDeepAll<HTMLElement>(NOTEBOOK_TITLE_DISPLAY_SELECTORS)) {
+    if (!isVisible(candidate) || isMindDockInjectedElement(candidate)) {
+      continue
+    }
+
+    const label = String(candidate.textContent ?? "").trim()
+    if (!label) {
+      continue
+    }
+
+    const rect = candidate.getBoundingClientRect()
+    if (rect.top > 220 || rect.height > 120 || rect.width < 80) {
+      continue
+    }
+
+    let score = 0
+
+    if (candidate.tagName === "H1") {
+      score += 72
+    } else if (candidate.tagName === "H2") {
+      score += 58
+    } else if (candidate.getAttribute("role") === "heading") {
+      score += 46
+    } else if (candidate.tagName === "H3") {
+      score += 34
+    } else {
+      score += 12
+    }
+
+    if (rect.top <= 120) {
+      score += 24
+    } else {
+      score += Math.max(0, 220 - Math.round(rect.top))
+    }
+
+    if (UNTITLED_NOTEBOOK_LABELS.includes(normalize(label) as (typeof UNTITLED_NOTEBOOK_LABELS)[number])) {
+      score += 18
+    }
+
+    if (score > bestScore) {
+      bestScore = score
+      bestCandidate = candidate
+    }
+  }
+
+  return bestCandidate
+}
+
+function resolveNotebookTitleEditor(): HTMLElement | null {
+  const exactEditor = queryDeepFirstVisible<HTMLElement>([
+    "input[aria-label='Notebook title']",
+    "textarea[aria-label='Notebook title']"
+  ])
+
+  if (exactEditor) {
+    return exactEditor
+  }
+
+  return resolveNotebookTitleEditableField()
+}
+
+function readVisibleNotebookTitleText(): string {
+  const header = resolveNotebookTitleHeader()
+  if (header) {
+    return String(header.textContent ?? "").trim()
+  }
+
+  const editor = resolveNotebookTitleEditor()
+  if (editor) {
+    return readNotebookTitleValue(editor)
+  }
+
+  return ""
+}
+
+function applyNotebookTitleValue(candidate: HTMLElement, notebookName: string): void {
+  if (candidate instanceof HTMLInputElement) {
+    candidate.focus()
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set
+    if (setter) {
+      setter.call(candidate, notebookName)
+    } else {
+      candidate.value = notebookName
+    }
+
+    candidate.dispatchEvent(new Event("input", { bubbles: true, cancelable: true }))
+    candidate.dispatchEvent(new Event("change", { bubbles: true, cancelable: true }))
+    return
+  }
+
+  if (candidate instanceof HTMLTextAreaElement) {
+    candidate.focus()
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")?.set
+    if (setter) {
+      setter.call(candidate, notebookName)
+    } else {
+      candidate.value = notebookName
+    }
+
+    candidate.dispatchEvent(new Event("input", { bubbles: true, cancelable: true }))
+    candidate.dispatchEvent(new Event("change", { bubbles: true, cancelable: true }))
+    return
+  }
+
+  if (candidate.isContentEditable) {
+    candidate.focus()
+    candidate.textContent = notebookName
+    candidate.dispatchEvent(
+      new InputEvent("input", {
+        bubbles: true,
+        cancelable: true,
+        data: notebookName,
+        inputType: "insertText"
+      })
+    )
+    candidate.dispatchEvent(new Event("change", { bubbles: true, cancelable: true }))
+  }
+}
+
+function resolveCreateConfirmTrigger(root?: ParentNode): HTMLElement | null {
+  let bestCandidate: HTMLElement | null = null
+  let bestScore = -1
+
+  for (const candidate of resolveActionCandidates(root)) {
+    const score = scoreCreateConfirmCandidate(candidate)
+    if (score > bestScore) {
+      bestScore = score
+      bestCandidate = candidate
+    }
+  }
+
+  return bestCandidate
+}
+
+function resolveDialogRoot(candidate: HTMLElement): ParentNode | null {
+  return candidate.closest("[role='dialog'], dialog, [aria-modal='true']")
+}
+
+function resolveNotebookNameInput(): HTMLElement | null {
+  const candidates = queryDeepAll<HTMLElement>(NOTEBOOK_CREATE_INPUT_SELECTORS).filter((candidate) =>
+    isVisible(candidate)
+  )
+
+  let bestCandidate: HTMLElement | null = null
+  let bestScore = -1
+
+  for (const candidate of candidates) {
+    const label = getNotebookActionLabel(candidate)
+    const rect = candidate.getBoundingClientRect()
+    let score = 0
+
+    if (resolveDialogRoot(candidate)) {
+      score += 28
+    }
+
+    if (label.includes("name") || label.includes("nome")) {
+      score += 22
+    }
+
+    if (candidate instanceof HTMLInputElement || candidate instanceof HTMLTextAreaElement) {
+      score += 8
+    }
+
+    if (candidate.isContentEditable) {
+      score += 4
+    }
+
+    if (rect.top <= window.innerHeight * 0.75) {
+      score += 6
+    }
+
+    if (rect.height <= 72) {
+      score += 4
+    }
+
+    if (score > bestScore) {
+      bestScore = score
+      bestCandidate = candidate
+    }
+  }
+
+  return bestCandidate
+}
+
+function describeEditableField(candidate: HTMLElement): string {
+  if (candidate instanceof HTMLInputElement || candidate instanceof HTMLTextAreaElement) {
+    return [
+      candidate.value,
+      candidate.getAttribute("aria-label"),
+      candidate.getAttribute("placeholder"),
+      candidate.getAttribute("title")
+    ]
+      .map((value) => String(value ?? "").trim())
+      .filter(Boolean)
+      .join(" ")
+  }
+
+  return [
+    candidate.textContent,
+    candidate.getAttribute("aria-label"),
+    candidate.getAttribute("placeholder"),
+    candidate.getAttribute("title")
+  ]
+    .map((value) => String(value ?? "").trim())
+    .filter(Boolean)
+    .join(" ")
+}
+
+function readNotebookTitleValue(candidate: HTMLElement): string {
+  if (candidate instanceof HTMLInputElement || candidate instanceof HTMLTextAreaElement) {
+    return String(candidate.value ?? "").trim()
+  }
+
+  return String(candidate.textContent ?? "").trim()
+}
+
+function scoreNotebookTitleEditableCandidate(candidate: HTMLElement): number {
+  if (!isVisible(candidate)) {
+    return -1
+  }
+
+  const rect = candidate.getBoundingClientRect()
+  if (rect.top > Math.max(240, window.innerHeight * 0.45)) {
+    return -1
+  }
+
+  let score = 0
+  const label = normalize(describeEditableField(candidate))
+
+  if (label.includes("title") || label.includes("titulo")) {
+    score += 28
+  }
+
+  if (label.includes("notebook") || label.includes("caderno")) {
+    score += 18
+  }
+
+  if (UNTITLED_NOTEBOOK_LABELS.some((untitledLabel) => label.includes(untitledLabel))) {
+    score += 36
+  }
+
+  if (candidate instanceof HTMLInputElement || candidate instanceof HTMLTextAreaElement) {
+    score += 10
+  }
+
+  if (candidate.isContentEditable) {
+    score += 6
+  }
+
+  if (rect.top <= 180) {
+    score += 18
+  } else if (rect.top <= 240) {
+    score += 8
+  }
+
+  if (rect.width >= 160) {
+    score += 6
+  }
+
+  if (rect.height <= 88) {
+    score += 4
+  }
+
+  return score
+}
+
+function resolveNotebookTitleEditableField(): HTMLElement | null {
+  let bestCandidate: HTMLElement | null = null
+  let bestScore = -1
+
+  for (const candidate of queryDeepAll<HTMLElement>(NOTEBOOK_TITLE_EDITABLE_SELECTORS)) {
+    const score = scoreNotebookTitleEditableCandidate(candidate)
+    if (score > bestScore) {
+      bestScore = score
+      bestCandidate = candidate
+    }
+  }
+
+  return bestCandidate
+}
+
+function scoreNotebookTitleDisplayCandidate(candidate: HTMLElement): number {
+  if (!isVisible(candidate)) {
+    return -1
+  }
+
+  const rect = candidate.getBoundingClientRect()
+  if (rect.top > 220 || rect.height > 96) {
+    return -1
+  }
+
+  const label = normalize(
+    [
+      candidate.textContent,
+      candidate.getAttribute("aria-label"),
+      candidate.getAttribute("title")
+    ]
+      .map((value) => String(value ?? "").trim())
+      .filter(Boolean)
+      .join(" ")
+  )
+
+  if (!label) {
+    return -1
+  }
+
+  let score = -1
+  if (UNTITLED_NOTEBOOK_LABELS.some((untitledLabel) => label.includes(untitledLabel))) {
+    score = 40
+  }
+
+  if (label.includes("title") || label.includes("titulo")) {
+    score = Math.max(score, 18)
+  }
+
+  if (label.includes("notebook") || label.includes("caderno")) {
+    score = Math.max(score, 12)
+  }
+
+  if (score < 0) {
+    return -1
+  }
+
+  if (candidate.tagName === "H1" || candidate.tagName === "H2") {
+    score += 10
+  }
+
+  if (rect.top <= 140) {
+    score += 8
+  }
+
+  return score
+}
+
+function resolveNotebookTitleDisplayCandidate(): HTMLElement | null {
+  let bestCandidate: HTMLElement | null = null
+  let bestScore = -1
+
+  for (const candidate of queryDeepAll<HTMLElement>(NOTEBOOK_TITLE_DISPLAY_SELECTORS)) {
+    const score = scoreNotebookTitleDisplayCandidate(candidate)
+    if (score > bestScore) {
+      bestScore = score
+      bestCandidate = candidate
+    }
+  }
+
+  return bestCandidate
+}
+
+function setFieldValue(input: HTMLInputElement | HTMLTextAreaElement, nextValue: string): void {
+  const prototype =
+    input instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype
+  const descriptor = Object.getOwnPropertyDescriptor(prototype, "value")
+
+  if (descriptor?.set) {
+    descriptor.set.call(input, nextValue)
+  } else {
+    input.value = nextValue
+  }
+
+  input.dispatchEvent(new Event("input", { bubbles: true, cancelable: true }))
+  input.dispatchEvent(new Event("change", { bubbles: true, cancelable: true }))
+}
+
+function fillNotebookNameInput(candidate: HTMLElement, notebookName: string): void {
+  if (candidate instanceof HTMLInputElement || candidate instanceof HTMLTextAreaElement) {
+    candidate.focus()
+    setFieldValue(candidate, notebookName)
+    return
+  }
+
+  if (candidate.isContentEditable) {
+    candidate.focus()
+    candidate.textContent = notebookName
+    candidate.dispatchEvent(
+      new InputEvent("input", {
+        bubbles: true,
+        cancelable: true,
+        data: notebookName,
+        inputType: "insertText"
+      })
+    )
+    candidate.dispatchEvent(new Event("change", { bubbles: true, cancelable: true }))
+  }
+}
+
+function submitNotebookNameInput(candidate: HTMLElement): void {
+  if (candidate instanceof HTMLInputElement && candidate.form) {
+    candidate.form.requestSubmit()
+    return
+  }
+
+  for (const eventName of ["keydown", "keypress", "keyup"] as const) {
+    candidate.dispatchEvent(
+      new KeyboardEvent(eventName, {
+        bubbles: true,
+        cancelable: true,
+        key: "Enter",
+        code: "Enter"
+      })
+    )
+  }
+}
+
+export async function startNotebookCreationViaDom(notebookName: string): Promise<void> {
+  void notebookName
+  throw new Error("O fluxo legado de criacao via DOM foi desativado.")
+}
+
+export async function ensureNotebookTitleViaDom(notebookName: string): Promise<boolean> {
+  void notebookName
+  return false
+}
+
+export async function readCurrentNotebookTitleViaDom(
+  fallbackTitle = "Untitled notebook"
+): Promise<string> {
+  const visibleTitle = await waitForValue(() => {
+    const title = String(readVisibleNotebookTitleText() ?? "").trim()
+    return title || null
+  }, 1200, 120)
+
+  return String(visibleTitle ?? "").trim() || String(fallbackTitle ?? "").trim() || "Untitled notebook"
+}
+
+export async function waitForCreatedNotebookId(
+  previousNotebookId: string | null,
+  timeoutMs = 15000
+): Promise<string | null> {
+  const baselineNotebookId = String(previousNotebookId ?? "").trim()
+
+  return waitForValue(() => {
+    const nextNotebookId = resolveNotebookIdFromRoute()
+    if (!nextNotebookId) {
+      return null
+    }
+
+    if (baselineNotebookId && nextNotebookId === baselineNotebookId) {
+      return null
+    }
+
+    return nextNotebookId
+  }, timeoutMs, 200)
 }

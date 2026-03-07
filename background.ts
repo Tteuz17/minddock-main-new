@@ -3,22 +3,18 @@
  * Inicializa router, auth, context menu e listeners globais.
  */
 
+import "~/background"
 import { authManager } from "~/background/auth-manager"
 import { router } from "~/background/router"
 import { storageManager } from "~/background/storage-manager"
-import { MESSAGE_ACTIONS } from "~/lib/contracts"
 import type { ChromeMessage, ChromeMessageResponse } from "~/lib/types"
 
 const MINDDOCK_SELECTION_CAPTURE_MENU_ID = "MINDDOCK_SELECT_CAPTURE"
 const LEGACY_SNIPE_MENU_ID = "minddock_snipe"
 
-let lastNetworkTokenFingerprint = ""
-
 void authManager.initializeSession().catch((error) => {
   console.warn("[MindDock] Falha ao inicializar sessao:", error)
 })
-
-setupNotebookLmNetworkTokenCapture()
 
 function removeContextMenu(menuId: string): Promise<void> {
   return new Promise((resolve) => {
@@ -181,111 +177,6 @@ function buildCaptureTimestampLabel(): string {
     .replace("T", "")
 }
 
-function pickFirst(values: unknown): string {
-  if (!Array.isArray(values)) {
-    return ""
-  }
-
-  for (const value of values) {
-    const normalized = String(value ?? "").trim()
-    if (normalized) {
-      return normalized
-    }
-  }
-
-  return ""
-}
-
-function parseFormEncodedRawBody(rawEntries: chrome.webRequest.UploadData[] | undefined): {
-  at: string
-  bl: string
-} {
-  if (!Array.isArray(rawEntries)) {
-    return { at: "", bl: "" }
-  }
-
-  const decoder = new TextDecoder()
-  for (const entry of rawEntries) {
-    if (!entry?.bytes) {
-      continue
-    }
-
-    try {
-      const bodyText = decoder.decode(new Uint8Array(entry.bytes))
-      const params = new URLSearchParams(bodyText)
-      const at = params.get("at")?.trim() ?? ""
-      const bl = params.get("bl")?.trim() ?? ""
-      if (at || bl) {
-        return { at, bl }
-      }
-    } catch {
-      continue
-    }
-  }
-
-  return { at: "", bl: "" }
-}
-
-function setupNotebookLmNetworkTokenCapture() {
-  if (!chrome.webRequest?.onBeforeRequest) {
-    return
-  }
-
-  chrome.webRequest.onBeforeRequest.addListener(
-    (details) => {
-      try {
-        if (String(details.method ?? "").toUpperCase() !== "POST") {
-          return
-        }
-        if (!String(details.url ?? "").includes("batchexecute")) {
-          return
-        }
-
-        const requestUrl = new URL(details.url)
-        const urlBl = new URL(details.url).searchParams.get("bl")?.trim() ?? ""
-        const authUser = requestUrl.searchParams.get("authuser")?.trim() ?? ""
-        const sessionId = requestUrl.searchParams.get("f.sid")?.trim() ?? ""
-        const formData = details.requestBody?.formData ?? {}
-        let at = pickFirst(formData.at)
-        let bl = pickFirst(formData.bl) || urlBl
-
-        if (!at || !bl) {
-          const rawParsed = parseFormEncodedRawBody(details.requestBody?.raw)
-          at = at || rawParsed.at
-          bl = bl || rawParsed.bl || urlBl
-        }
-
-        if (!at || !bl) {
-          return
-        }
-
-        const fingerprint = `${at}__${bl}__${authUser}__${sessionId}`
-        if (fingerprint === lastNetworkTokenFingerprint) {
-          return
-        }
-        lastNetworkTokenFingerprint = fingerprint
-
-        void runRouterCommand(
-          {
-            command: MESSAGE_ACTIONS.STORE_SESSION_TOKENS,
-            payload: {
-              at,
-              bl,
-              authUser: authUser || undefined,
-              sessionId: sessionId || undefined
-            }
-          },
-          {}
-        ).then(() => flushPendingSelection())
-      } catch {
-        // silent
-      }
-    },
-    { urls: ["https://notebooklm.google.com/_/LabsTailwindUi/data/batchexecute*"] },
-    ["requestBody"]
-  )
-}
-
 async function captureSelectionFromContextMenu(
   contextMenuInfo: chrome.contextMenus.OnClickData,
   sourceTabRecord?: chrome.tabs.Tab
@@ -343,11 +234,6 @@ chrome.runtime.onInstalled.addListener(async ({ reason }) => {
 
 chrome.runtime.onStartup?.addListener(() => {
   void ensureMindDockSelectionContextMenu()
-})
-
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  void router.handle(message, sender, sendResponse)
-  return true
 })
 
 chrome.contextMenus.onClicked.addListener((contextMenuInfo, sourceTabRecord) => {
