@@ -8,8 +8,15 @@ import { authManager } from "~/background/auth-manager"
 import { router } from "~/background/router"
 import { storageManager } from "~/background/storage-manager"
 import type { ChromeMessage, ChromeMessageResponse } from "~/lib/types"
+import {
+  getFolders,
+  saveSnippet,
+  DEFAULT_FOLDERS,
+} from "~/services/highlight-storage"
 
 const MINDDOCK_SELECTION_CAPTURE_MENU_ID = "MINDDOCK_SELECT_CAPTURE"
+const MINDDOCK_HIGHLIGHT_PARENT_ID = "MINDDOCK_HIGHLIGHT_PARENT"
+const MINDDOCK_FOLDER_PREFIX = "MINDDOCK_FOLDER_"
 const LEGACY_SNIPE_MENU_ID = "minddock_snipe"
 
 void authManager.initializeSession().catch((error) => {
@@ -38,14 +45,41 @@ function createContextMenu(options: chrome.contextMenus.CreateProperties): Promi
 }
 
 async function ensureMindDockSelectionContextMenu() {
+  // Remove legacy items
   await removeContextMenu(MINDDOCK_SELECTION_CAPTURE_MENU_ID)
   await removeContextMenu(LEGACY_SNIPE_MENU_ID)
+  await removeContextMenu(MINDDOCK_HIGHLIGHT_PARENT_ID)
 
+  const folders = await getFolders().catch(() => DEFAULT_FOLDERS)
+
+  // Parent item
   await createContextMenu({
-    id: MINDDOCK_SELECTION_CAPTURE_MENU_ID,
-    title: "Send to NotebookLM (MindDock)",
-    contexts: ["selection"]
+    id: MINDDOCK_HIGHLIGHT_PARENT_ID,
+    title: "Save highlight — MindDock",
+    contexts: ["selection"],
   })
+
+  // One submenu item per folder
+  for (const folder of folders) {
+    await createContextMenu({
+      id: `${MINDDOCK_FOLDER_PREFIX}${folder.id}`,
+      parentId: MINDDOCK_HIGHLIGHT_PARENT_ID,
+      title: folder.name,
+      contexts: ["selection"],
+    }).catch(() => {})
+  }
+
+  // Separator + "Send to NotebookLM" fallback
+  await createContextMenu({
+    id: `${MINDDOCK_FOLDER_PREFIX}notebooklm`,
+    parentId: MINDDOCK_HIGHLIGHT_PARENT_ID,
+    title: "Send to NotebookLM directly",
+    contexts: ["selection"],
+  }).catch(() => {})
+}
+
+async function rebuildHighlightContextMenu() {
+  await ensureMindDockSelectionContextMenu()
 }
 
 function notifySelectionNeedsNotebook() {
@@ -181,39 +215,47 @@ async function captureSelectionFromContextMenu(
   contextMenuInfo: chrome.contextMenus.OnClickData,
   sourceTabRecord?: chrome.tabs.Tab
 ) {
-  if (contextMenuInfo.menuItemId !== MINDDOCK_SELECTION_CAPTURE_MENU_ID) {
-    return
-  }
-
+  const menuId = String(contextMenuInfo.menuItemId)
   const selectedTextContent = String(contextMenuInfo.selectionText ?? "").trim()
-  if (!selectedTextContent) {
-    return
-  }
+  if (!selectedTextContent) return
 
   const tabTitle = String(sourceTabRecord?.title ?? "").trim()
   const sourceUrl = String(sourceTabRecord?.url ?? "").trim()
-  const timestampLabel = buildCaptureTimestampLabel()
-  const sourceTitle = tabTitle
-    ? `Selection - ${tabTitle} - ${timestampLabel}`
-    : `Selection - MindDock - ${timestampLabel}`
-  const sourceBody = [
-    `Fonte: ${tabTitle || "Selection"}`,
-    `URL: ${sourceUrl || "N/A"}`,
-    "",
-    selectedTextContent
-  ].join("\n")
 
-  await chrome.storage.local.set({
-    minddock_pending_selection: {
-      text: sourceBody,
-      sourceUrl,
-      sourceTitle,
-      savedAt: Date.now()
+  // Save to a highlight folder
+  if (menuId.startsWith(MINDDOCK_FOLDER_PREFIX)) {
+    const folderId = menuId.slice(MINDDOCK_FOLDER_PREFIX.length)
+
+    if (folderId === "notebooklm") {
+      // "Send to NotebookLM directly" option — original behavior
+      const timestampLabel = buildCaptureTimestampLabel()
+      const sourceTitle = tabTitle
+        ? `Selection - ${tabTitle} - ${timestampLabel}`
+        : `Selection - MindDock - ${timestampLabel}`
+      const sourceBody = [`Source: ${tabTitle || "Selection"}`, `URL: ${sourceUrl || "N/A"}`, "", selectedTextContent].join("\n")
+      await chrome.storage.local.set({
+        minddock_pending_selection: { text: sourceBody, sourceUrl, sourceTitle, savedAt: Date.now() },
+      })
+      await flushPendingSelection()
+      return
     }
-  })
-  const sentNow = await flushPendingSelection()
-  if (!sentNow) {
-    void sourceTabRecord
+
+    // Save snippet to local folder
+    await saveSnippet(folderId, selectedTextContent, tabTitle || "Untitled", sourceUrl)
+    return
+  }
+
+  // Legacy fallback: direct send
+  if (menuId === MINDDOCK_SELECTION_CAPTURE_MENU_ID) {
+    const timestampLabel = buildCaptureTimestampLabel()
+    const sourceTitle = tabTitle
+      ? `Selection - ${tabTitle} - ${timestampLabel}`
+      : `Selection - MindDock - ${timestampLabel}`
+    const sourceBody = [`Source: ${tabTitle || "Selection"}`, `URL: ${sourceUrl || "N/A"}`, "", selectedTextContent].join("\n")
+    await chrome.storage.local.set({
+      minddock_pending_selection: { text: sourceBody, sourceUrl, sourceTitle, savedAt: Date.now() },
+    })
+    await flushPendingSelection()
   }
 }
 
@@ -238,6 +280,16 @@ chrome.runtime.onStartup?.addListener(() => {
 
 chrome.contextMenus.onClicked.addListener((contextMenuInfo, sourceTabRecord) => {
   void captureSelectionFromContextMenu(contextMenuInfo, sourceTabRecord)
+})
+
+// Register context menus every time the service worker starts (MV3 lifecycle)
+void ensureMindDockSelectionContextMenu().catch(() => {})
+
+// Rebuild context menu whenever highlight folders change
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === "local" && changes["minddock_highlight_folders"]) {
+    void rebuildHighlightContextMenu()
+  }
 })
 
 authManager.onAuthStateChange((user) => {

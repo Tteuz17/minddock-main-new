@@ -2,6 +2,7 @@ import Image from "next/image"
 import { InfiniteRibbon } from "@/components/ui/infinite-ribbon"
 import FeaturesScrollSection from "@/components/ui/FeaturesScrollSection"
 import PricingSection from "@/components/ui/PricingSection"
+import FAQSection from "@/components/ui/FAQSection"
 import CTASection from "@/components/ui/CTASection"
 import LandingFooter from "@/components/ui/LandingFooter"
 import heroBackground from "../../public/lp/backgroundhero.png"
@@ -96,26 +97,25 @@ export default function HomePage() {
           </header>
 
           <section className="relative flex flex-1 flex-col justify-center py-10 lg:py-12">
-            <div className="relative z-[1] mx-auto flex w-full max-w-4xl flex-col items-center space-y-9 text-center">
+            <div className="relative z-[1] mx-auto flex w-full max-w-5xl flex-col items-center space-y-9 text-center">
               <div className="space-y-5">
-                <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-black/[0.12] px-4 py-2 text-[10px] uppercase tracking-[0.24em] text-white/60 backdrop-blur-sm">
-                  <span className="h-2 w-2 rounded-full bg-[var(--accent)]" />
-                  Free trial
+                <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-black/[0.12] px-4 py-2 text-[10px] uppercase tracking-[0.18em] sm:tracking-[0.24em] text-white/60 backdrop-blur-sm">
+                  <span className="h-2 w-2 shrink-0 rounded-full bg-[var(--accent)]" />
+                  The same NotebookLM. but now with superpowers
                 </div>
 
                 <div className="space-y-4">
-                  <h1 className="mx-auto max-w-4xl text-[clamp(2.3rem,5.8vw,4.9rem)] font-normal leading-[0.94] tracking-[-0.06em] text-white [text-shadow:0_10px_28px_rgba(0,0,0,0.22)]">
-                    <span className="block whitespace-nowrap text-[0.64em] font-normal tracking-[-0.045em]">
-                      <span className="hero-serif text-[1.18em]">Knowledge work</span> is now
+                  <h1 className="mx-auto text-[clamp(1.6rem,5vw,3.2rem)] font-normal leading-[1.08] tracking-[-0.05em] text-white [text-shadow:0_10px_28px_rgba(0,0,0,0.22)] sm:text-[clamp(1.8rem,3.8vw,3.2rem)] sm:leading-[1.05] sm:tracking-[-0.06em]">
+                    <span className="block text-[0.8em] font-normal tracking-[-0.035em] text-white/65 sm:tracking-[-0.045em]">
+                      NotebookLM was just the beginning.
                     </span>
-                    <span className="mt-2 block whitespace-nowrap text-[0.98em] font-normal tracking-[-0.06em]">
-                      structured for NotebookLM.
+                    <span className="mt-2 block font-normal tracking-[-0.045em] sm:whitespace-nowrap sm:tracking-[-0.055em]">
+                      This is where your <span className="hero-serif">superpowers</span> begin.
                     </span>
                   </h1>
-                  <p className="mx-auto max-w-3xl text-base leading-8 text-white/72 [text-shadow:0_6px_20px_rgba(0,0,0,0.18)] sm:text-lg">
-                    MindDock gives NotebookLM the structure it is missing: durable notes, cleaner
-                    threads, connected ideas, and a workflow that actually holds up during serious
-                    study.
+                  <p className="mx-auto max-w-3xl text-sm leading-7 text-white/72 [text-shadow:0_6px_20px_rgba(0,0,0,0.18)] sm:text-base sm:leading-8 lg:text-lg">
+                    More topics. Smarter prompts. A single notebook and several subjects.
+                    A brilliant and connected mind.
                   </p>
                 </div>
               </div>
@@ -162,7 +162,7 @@ export default function HomePage() {
           </div>
 
           <div className="grid gap-6">
-            <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
               {overviewMiniCards.map((card) => (
                 <article key={card.title} className="panel-flat space-y-3">
                   <div className="text-white/40">{card.icon}</div>
@@ -198,7 +198,7 @@ export default function HomePage() {
               </article>
 
               <article className="panel-flat">
-                <div className="flex h-full flex-col gap-5">
+                <div className="flex h-full flex-col-reverse gap-5 sm:flex-col">
                   <div className="overflow-hidden rounded-[1.25rem]">
                     <video
                       autoPlay muted loop playsInline preload="auto"
@@ -373,8 +373,8 @@ export default function HomePage() {
 
           </div>
 
-          {/* Benefit carousel cards */}
-          <div className="mt-8 flex gap-4 overflow-x-auto pb-2 lg:grid lg:grid-cols-3 lg:overflow-visible" style={{ scrollSnapType: "x mandatory" }}>
+          {/* Benefit cards */}
+          <div className="mt-8 grid grid-cols-1 gap-4 sm:grid-cols-3">
             {[
               {
                 eyebrow: "Productivity",
@@ -420,8 +420,7 @@ export default function HomePage() {
             ].map((card) => (
               <div
                 key={card.title}
-                className="relative flex min-w-[280px] shrink-0 flex-col justify-between overflow-hidden rounded-2xl border border-white/8 bg-white/3 p-6 lg:min-w-0"
-                style={{ scrollSnapAlign: "start" }}
+                className="relative flex flex-col justify-between overflow-hidden rounded-2xl border border-white/8 bg-white/3 p-6"
               >
                 {/* Top row */}
                 <div>
@@ -456,6 +455,8 @@ export default function HomePage() {
       <FeaturesScrollSection />
 
       <PricingSection />
+
+      <FAQSection />
 
       <CTASection />
 

@@ -1,10 +1,34 @@
 import type { CSSProperties } from "react"
 
-import type { ContentStrategy, StrategyMenuAlign, StrategyPlacement } from "./types"
-import { clampNumber, queryFirstVisibleElement, resolveFallbackPlacement } from "./dom-utils"
+import type { ContentStrategy, StrategyMenuAlign } from "./types"
+import { INLINE_CONTAINER_STYLE, resolveFallbackPlacement, tryMountAfterElement } from "./dom-utils"
+
+// Try to find the Ferramentas/Tools button in Gemini's input toolbar
+const GEMINI_TOOLS_ANCHOR_SELECTORS = [
+  "button.toolbox-drawer-button-with-label",
+  "button[class*='toolbox-drawer-button']",
+  "ms-tool-access-button",
+  "ms-chat-input button[aria-label*='Ferramentas']",
+  "ms-chat-input button[aria-label*='Tools']",
+] as const
+
+// Fallback: append to the left-side leading-actions container (where + and Ferramentas live)
+const GEMINI_FALLBACK_SELECTORS = [
+  "ms-chat-input [class*='leading-actions']",
+  "ms-chat-input [class*='footer-leading']",
+  "ms-chat-input [class*='left-actions']",
+  "[class*='leading-actions']",
+  "[class*='footer-leading']",
+  "div.trailing-actions",
+  "div[class*='trailing-actions']",
+  "div.input-footer-buttons",
+  "ms-chat-input div[class*='actions']",
+] as const
 
 export class GeminiStrategy implements ContentStrategy {
   readonly id = "gemini"
+
+  private mountedInline = false
 
   matches(url: string): boolean {
     try {
@@ -19,33 +43,16 @@ export class GeminiStrategy implements ContentStrategy {
     return document.body
   }
 
+  mountHost(host: HTMLElement): boolean {
+    this.mountedInline = tryMountAfterElement(host, GEMINI_TOOLS_ANCHOR_SELECTORS, GEMINI_FALLBACK_SELECTORS)
+    return this.mountedInline
+  }
+
   getStyles(): CSSProperties {
-    return this.resolvePlacement().style
+    return this.mountedInline ? INLINE_CONTAINER_STYLE : resolveFallbackPlacement().style
   }
 
   getMenuAlign(): StrategyMenuAlign {
-    return this.resolvePlacement().menuAlign
-  }
-
-  private resolvePlacement(): StrategyPlacement {
-    const anchor = queryFirstVisibleElement([
-      "div.right-section > div.buttons-container",
-      "div.buttons-container"
-    ])
-    if (!anchor) {
-      return resolveFallbackPlacement()
-    }
-
-    const rect = anchor.getBoundingClientRect()
-    const top = clampNumber(Math.round(rect.top), 8, Math.max(8, window.innerHeight - 52))
-    const left = clampNumber(Math.round(rect.left), 8, Math.max(8, window.innerWidth - 220))
-
-    return {
-      style: {
-        top: `${top}px`,
-        left: `${left}px`
-      },
-      menuAlign: "left"
-    }
+    return "right"
   }
 }

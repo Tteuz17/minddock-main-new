@@ -231,44 +231,30 @@ function createTriggerButton(attributeName: string, referenceControl: HTMLElemen
   button.setAttribute("aria-label", "NotebookLM")
   button.title = "NotebookLM"
 
-  if (referenceControl instanceof HTMLButtonElement && clean(referenceControl.className)) {
-    button.className = referenceControl.className
-  }
-
   button.style.cssText = [
     "margin-left: 6px",
-    "padding: 0 12px",
+    "padding: 6px",
     "border-radius: 999px",
-    "border: 1px solid rgba(120,120,120,.45)",
-    "background: transparent",
-    "color: inherit",
-    "height: 32px",
+    "border: 1px solid #facc15",
+    "background: #000000",
     "display: inline-flex",
     "align-items: center",
-    "gap: 6px",
+    "justify-content: center",
     "flex: 0 0 auto",
     "position: relative",
     "z-index: 2",
     "pointer-events: auto",
-    "cursor: pointer",
-    "font-weight: 600",
-    "font-size: 12px",
-    "line-height: 1",
-    "white-space: nowrap"
+    "cursor: pointer"
   ].join(";")
 
   const icon = document.createElement("img")
   icon.src = MINDDOCK_ICON_SRC
-  icon.alt = ""
-  icon.width = 14
-  icon.height = 14
-  icon.style.cssText = "width:14px;height:14px;object-fit:contain;flex:0 0 auto;pointer-events:none"
+  icon.alt = "MindDock"
+  icon.width = 18
+  icon.height = 18
+  icon.style.cssText = "width:18px;height:18px;object-fit:contain;display:block;pointer-events:none"
 
-  const text = document.createElement("span")
-  text.textContent = "NotebookLM"
-  text.style.pointerEvents = "none"
-
-  button.append(icon, text)
+  button.append(icon)
   return button
 }
 

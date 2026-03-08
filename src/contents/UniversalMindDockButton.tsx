@@ -2,7 +2,7 @@ import type { PlasmoCSConfig } from "plasmo"
 import shadowCssText from "data-text:~/styles/globals.css"
 import clsx from "clsx"
 import { AnimatePresence, motion } from "framer-motion"
-import { ArrowLeft, Book, Check, ChevronDown, Loader2, Plus, RefreshCw, Search } from "lucide-react"
+import { ArrowLeft, Book, BookOpen, Check, FolderOpen, Loader2, Plus, RefreshCw, Search } from "lucide-react"
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react"
 import { createRoot, type Root } from "react-dom/client"
 
@@ -198,22 +198,12 @@ const MINDDOCK_BUTTON_LOGO_SRC = new URL(
   "../../public/images/logo/logotipo minddock.png",
   import.meta.url
 ).href
-const MINDDOCK_MENU_LOGO_SRC = new URL(
-  "../../public/images/logo/logo minddock sem fundo.png",
-  import.meta.url
-).href
 const BLOCKED_NOTEBOOK_TITLE_KEYS = new Set([
   "conversa",
   "conversas",
   "conversation",
   "conversations"
 ])
-const RESYNC_PROGRESS_LABELS = [
-  "Sincronizando...",
-  "Removendo versao antiga...",
-  "Enviando nova versao...",
-  "Finalizando sync..."
-] as const
 
 let mountedRoot: Root | null = null
 let mountedHost: HTMLElement | null = null
@@ -5338,72 +5328,96 @@ function MenuPanel(props: MenuPanelProps): JSX.Element {
           exit={{ opacity: 0, y: 10, scale: 0.98 }}
           initial={{ opacity: 0, y: 10, scale: 0.98 }}
           transition={{ duration: 0.16, ease: "easeOut" }}>
-          <div className="border-b border-white/10 px-4 py-3.5">
-            <div className="flex items-center justify-center">
+          {/* Header */}
+          <div className="flex items-center justify-between border-b border-white/8 px-4 py-3">
+            <div className="flex items-center gap-2">
               <img
                 alt="MindDock"
-                className="h-6 w-auto max-w-[150px] object-contain opacity-95"
-                src={MINDDOCK_MENU_LOGO_SRC}
+                className="h-5 w-auto object-contain"
+                src={MINDDOCK_BUTTON_LOGO_SRC}
               />
+              <span className="text-sm font-semibold text-white">MindDock</span>
             </div>
+            <span className="rounded-full border border-[#facc15]/30 bg-[#facc15]/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-[#facc15]">
+              NotebookLM
+            </span>
           </div>
 
           <div className="max-h-[32rem] overflow-y-auto px-3 pb-3 pt-3 [scrollbar-color:rgba(148,163,184,0.35)_transparent] [scrollbar-width:thin] [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-white/15 [&::-webkit-scrollbar]:w-2 hover:[&::-webkit-scrollbar-thumb]:bg-white/25">
             {props.menuMode === "root" ? (
-              <div className="rounded-xl border border-white/10 bg-black/30 px-4 py-3">
-                <div className="mb-2 flex items-center justify-between border-b border-white/10 pb-2">
-                  <span className="text-sm text-zinc-400">{props.notebookSyncLabel}</span>
-                  {props.canShowResync ? (
+              <div className="flex flex-col gap-2">
+                {/* Status row */}
+                <div className="flex items-center justify-between rounded-lg border border-white/8 bg-white/4 px-3 py-2">
+                  <div className="flex items-center gap-2">
+                    <BookOpen className="size-3.5 text-zinc-400" />
+                    <span className="text-xs text-zinc-400">{props.notebookSyncLabel}</span>
+                  </div>
+                  {props.canShowResync && (
                     <button
-                      className="text-sm text-[#facc15] transition hover:text-[#fbbf24] disabled:opacity-60"
+                      className="flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium text-[#facc15] transition hover:bg-[#facc15]/10 disabled:opacity-50"
                       disabled={props.isBusy}
                       onClick={props.onResync}
                       type="button">
+                      <RefreshCw className="size-3" />
                       Re-sync
                     </button>
-                  ) : (
-                    <span className="text-sm text-transparent">Re-sync</span>
                   )}
                 </div>
 
+                {/* New Notebook */}
                 <button
-                  className="flex w-full items-center gap-2.5 rounded-lg px-2 py-2.5 text-left text-base text-zinc-100 transition hover:bg-white/5 disabled:opacity-60"
+                  className="flex w-full items-center gap-3 rounded-xl border border-[#facc15]/25 bg-[#facc15]/8 px-4 py-3.5 text-left transition hover:border-[#facc15]/50 hover:bg-[#facc15]/15 disabled:opacity-60"
                   disabled={props.isBusy}
                   onClick={props.onCreateNotebook}
                   type="button">
-                  {props.isCreatingNotebook ? (
-                    <Loader2 className="size-4 animate-spin text-zinc-200" />
-                  ) : (
-                    <span className="w-4 text-center text-zinc-300">+</span>
-                  )}
-                  <span>Create Notebook</span>
+                  <div className="flex size-8 flex-shrink-0 items-center justify-center rounded-lg bg-[#facc15]/15">
+                    {props.isCreatingNotebook ? (
+                      <Loader2 className="size-4 animate-spin text-[#facc15]" />
+                    ) : (
+                      <Plus className="size-4 text-white" />
+                    )}
+                  </div>
+                  <div>
+                    <p className="text-sm font-semibold text-white">New Notebook</p>
+                    <p className="text-xs text-zinc-400">Create and save this content</p>
+                  </div>
                 </button>
 
+                {/* Save to existing */}
                 <button
-                  className="flex w-full items-center gap-2.5 rounded-lg px-2 py-2.5 text-left text-base text-zinc-100 transition hover:bg-white/5 disabled:opacity-60"
+                  className="flex w-full items-center gap-3 rounded-xl border border-white/10 bg-white/4 px-4 py-3.5 text-left transition hover:border-white/20 hover:bg-white/8 disabled:opacity-60"
                   disabled={props.isBusy}
                   onClick={props.onOpenExisting}
                   type="button">
-                  <span className="w-4 text-center text-zinc-300">o</span>
-                  <span>Use Existing Notebook</span>
+                  <div className="flex size-8 flex-shrink-0 items-center justify-center rounded-lg bg-white/8">
+                    <FolderOpen className="size-4 text-white" />
+                  </div>
+                  <div>
+                    <p className="text-sm font-semibold text-white">Save to Notebook</p>
+                    <p className="text-xs text-zinc-400">Pick an existing notebook</p>
+                  </div>
                 </button>
               </div>
             ) : (
               <>
-                <div className="mb-2 flex items-center justify-between px-1">
+                {/* Back + title */}
+                <div className="mb-3 flex items-center gap-2 px-1">
                   <button
-                    className="inline-flex items-center gap-1.5 text-sm text-zinc-300 transition hover:text-zinc-100"
+                    className="inline-flex items-center gap-1.5 text-xs text-zinc-400 transition hover:text-white"
                     onClick={props.onBackToMain}
                     type="button">
-                    <ArrowLeft className="size-4" />
-                    Voltar
+                    <ArrowLeft className="size-3.5" />
+                    Back
                   </button>
+                  <span className="text-xs text-zinc-600">/</span>
+                  <span className="text-xs font-medium text-zinc-300">Choose a notebook</span>
                 </div>
 
+                {/* Search */}
                 <div className="relative mb-3">
-                  <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-zinc-400" />
+                  <Search className="pointer-events-none absolute left-3 top-1/2 size-3.5 -translate-y-1/2 text-zinc-500" />
                   <input
-                    className="h-11 w-full rounded-xl border border-white/10 bg-zinc-900/80 pl-10 pr-3 text-base text-zinc-100 outline-none placeholder:text-zinc-500 focus:border-[#facc15]/60"
+                    className="h-9 w-full rounded-lg border border-white/10 bg-white/5 pl-9 pr-3 text-sm text-zinc-100 outline-none placeholder:text-zinc-600 focus:border-[#facc15]/50 focus:bg-white/8"
                     onChange={(event) => props.onSearchChange(event.currentTarget.value)}
                     placeholder="Search notebooks..."
                     type="text"
@@ -5411,18 +5425,19 @@ function MenuPanel(props: MenuPanelProps): JSX.Element {
                   />
                 </div>
 
+                {/* Notebook list */}
                 {props.isLoadingNotebooks ? (
-                  <div className="flex items-center gap-2 px-2 py-5 text-base text-zinc-400">
+                  <div className="flex items-center gap-2.5 px-2 py-6 text-sm text-zinc-500">
                     <Loader2 className="size-4 animate-spin" />
                     <span>Loading notebooks...</span>
                   </div>
                 ) : props.isLoadError ? (
-                  <div className="px-2 py-5 text-base text-zinc-400">
-                    Erro ao carregar. Verifique se está logado no NotebookLM.
+                  <div className="rounded-lg border border-red-500/20 bg-red-500/8 px-3 py-4 text-sm text-zinc-400">
+                    Failed to load. Make sure you're logged in to NotebookLM.
                   </div>
                 ) : props.filteredNotebooks.length === 0 ? (
-                  <div className="px-2 py-5 text-base text-zinc-400">
-                    Nenhum caderno encontrado. Crie um novo.
+                  <div className="px-2 py-6 text-center text-sm text-zinc-500">
+                    No notebooks found. Create one first.
                   </div>
                 ) : (
                   props.filteredNotebooks.map((notebook) => {
@@ -5431,32 +5446,39 @@ function MenuPanel(props: MenuPanelProps): JSX.Element {
                     return (
                       <button
                         className={clsx(
-                          "mb-1.5 flex w-full items-start gap-3.5 rounded-xl border px-3 py-3 text-left transition disabled:cursor-wait disabled:opacity-70",
+                          "mb-1.5 flex w-full items-center gap-3 rounded-xl border px-3 py-3 text-left transition disabled:cursor-wait disabled:opacity-70",
                           isActive
                             ? "border-[#facc15]/40 bg-[#facc15]/10"
-                            : "border-white/10 bg-white/5 hover:bg-white/10"
+                            : "border-white/8 bg-white/4 hover:border-white/15 hover:bg-white/8"
                         )}
                         disabled={props.isBusy}
                         key={notebook.id}
                         onClick={() => props.onNotebookSelect(notebook)}
                         type="button">
-                        {isActive ? (
-                          <Book className="mt-0.5 size-4 text-[#facc15]" />
-                        ) : (
-                          <Plus className="mt-0.5 size-4 text-zinc-300" />
-                        )}
-                        <div className="min-w-0">
-                          <p
-                            className={clsx(
-                              "truncate text-base font-medium",
-                              isActive ? "text-[#fff1a6]" : "text-zinc-100"
-                            )}>
+                        <div className={clsx(
+                          "flex size-7 flex-shrink-0 items-center justify-center rounded-lg",
+                          isActive ? "bg-[#facc15]/20" : "bg-white/8"
+                        )}>
+                          {isActive ? (
+                            <Book className="size-3.5 text-[#facc15]" />
+                          ) : (
+                            <Book className="size-3.5 text-white" />
+                          )}
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <p className={clsx(
+                            "truncate text-sm font-medium",
+                            isActive ? "text-[#facc15]" : "text-white"
+                          )}>
                             {truncateLabel(notebook.title)}
                           </p>
-                          <p className="text-sm text-zinc-400">
-                            {isActive ? "Notebook padrao atual" : "Selecionar e capturar"}
+                          <p className="text-xs text-zinc-500">
+                            {isActive ? "Current notebook" : "Save content here"}
                           </p>
                         </div>
+                        {isActive && (
+                          <Check className="size-3.5 flex-shrink-0 text-[#facc15]" />
+                        )}
                       </button>
                     )
                   })
@@ -5502,7 +5524,6 @@ function UniversalMindDockButton(): JSX.Element {
   const [menuMode, setMenuMode] = useState<"existing" | "root">("root")
   const [search, setSearch] = useState("")
   const [activeCaptureAction, setActiveCaptureAction] = useState<"capture" | "resync" | null>(null)
-  const [resyncProgressStep, setResyncProgressStep] = useState(0)
   const [resyncLiveLabel, setResyncLiveLabel] = useState("")
   const [selectedLinkedInPostUrn, setSelectedLinkedInPostUrn] = useState<string | null>(null)
   const [selectedLinkedInPostRoot, setSelectedLinkedInPostRoot] = useState<HTMLElement | null>(null)
@@ -5566,7 +5587,8 @@ function UniversalMindDockButton(): JSX.Element {
         void injectionManager.ensureMountPoint(currentUrl)
         mountedHost = injectionManager.getHost()
       }
-      setFloatingPlacement(resolvePlacementFromStrategy(activeStrategy))
+      const base = resolvePlacementFromStrategy(activeStrategy)
+      setFloatingPlacement((prev) => ({ ...base, menuVertical: prev.menuVertical }))
     }
 
     const scheduleUpdate = (): void => {
@@ -5653,7 +5675,6 @@ function UniversalMindDockButton(): JSX.Element {
 
   useEffect(() => {
     if (!(captureState === "capturing" && activeCaptureAction === "resync")) {
-      setResyncProgressStep(0)
       setResyncLiveLabel("")
       return
     }
@@ -5662,16 +5683,7 @@ function UniversalMindDockButton(): JSX.Element {
       return
     }
 
-    setResyncProgressStep(0)
-    const intervalId = window.setInterval(() => {
-      setResyncProgressStep((current) =>
-        Math.min(current + 1, RESYNC_PROGRESS_LABELS.length - 1)
-      )
-    }, 1300)
-
-    return () => {
-      window.clearInterval(intervalId)
-    }
+    return undefined
   }, [captureState, activeCaptureAction, resyncLiveLabel])
 
   useEffect(() => {
@@ -5858,7 +5870,6 @@ function UniversalMindDockButton(): JSX.Element {
       setActiveNotebookOverride(normalizedNotebookId)
       setActiveCaptureAction(isResync ? "resync" : "capture")
       if (isResync) {
-        setResyncProgressStep(0)
         // Keep label empty so the staged progress fallback remains visible
         // even when runtime progress events are delayed or missing.
         setResyncLiveLabel("")
@@ -5953,7 +5964,6 @@ function UniversalMindDockButton(): JSX.Element {
         setIsMenuOpen(false)
       } finally {
         setActiveCaptureAction(null)
-        setResyncProgressStep(0)
         setResyncLiveLabel("")
       }
     },
@@ -6100,18 +6110,6 @@ function UniversalMindDockButton(): JSX.Element {
     runCapture
   ])
 
-  const triggerLabel =
-    captureState === "capturing"
-      ? activeCaptureAction === "resync"
-        ? resyncLiveLabel || RESYNC_PROGRESS_LABELS[resyncProgressStep] || "Sincronizando..."
-        : "Capturando..."
-      : captureState === "checking"
-      ? "Validando..."
-      : captureState === "success"
-      ? "Sincronizado"
-      : captureState === "error"
-      ? "Tentar de novo"
-      : "Create Notebook"
   const isIdleTrigger = captureState === "idle"
   const shouldRenderFloatingButton = !isInlineTriggerRuntime && shouldShowForCurrentRoute
   const shouldRenderMenuPanel = (shouldRenderFloatingButton || isInlineTriggerRuntime) && shouldShowForCurrentRoute
@@ -6125,47 +6123,48 @@ function UniversalMindDockButton(): JSX.Element {
       ) : (
         <motion.button
           className={clsx(
-            "group inline-flex items-center gap-2 rounded-2xl border bg-zinc-950/80 px-4 py-2.5 text-sm font-semibold text-zinc-100 shadow-[0_16px_40px_rgba(0,0,0,0.45)] backdrop-blur-xl transition",
-            canShowResync ? "border-emerald-400/45" : "border-white/10",
-            isBusy ? "cursor-wait" : "hover:bg-zinc-900/90"
+            "inline-flex items-center justify-center rounded-full border border-white/60 bg-black p-1.5 transition",
+            isBusy ? "cursor-wait opacity-70" : "hover:border-white hover:bg-white/10"
           )}
           disabled={isBusy}
           onClick={() => {
             setMenuMode("root")
             setSearch("")
+            const rect = containerRef.current?.getBoundingClientRect()
+            if (rect) {
+              const spaceBelow = window.innerHeight - rect.bottom
+              setFloatingPlacement((prev) => ({
+                ...prev,
+                menuVertical: spaceBelow < 460 ? "above" : "below"
+              }))
+            }
             setIsMenuOpen((current) => !current)
           }}
+          title="MindDock — NotebookLM"
           type="button"
-          whileTap={{ scale: 0.98 }}>
+          whileTap={{ scale: 0.97 }}>
           <motion.span
             animate={{ opacity: 1, scale: 1, y: 0 }}
-            className="inline-flex items-center"
+            className="inline-flex items-center justify-center"
             initial={{ opacity: 0, scale: 0.8, y: 2 }}
             key={`${captureState}-${currentUrl}`}
             transition={{ duration: 0.14 }}>
             {isIdleTrigger ? (
               <img
-                alt="MindDock Icon"
+                alt="MindDock"
                 className="size-4 object-contain"
                 src={MINDDOCK_BUTTON_LOGO_SRC}
               />
             ) : captureState === "capturing" || captureState === "checking" ? (
-              <Loader2 className="size-4 animate-spin text-zinc-200" />
+              <Loader2 className="size-4 animate-spin text-white" />
             ) : captureState === "success" ? (
               <Check className="size-4 text-emerald-400" />
             ) : captureState === "error" ? (
-              <RefreshCw className="size-4 text-rose-400" />
+              <RefreshCw className="size-5 text-rose-400" />
             ) : (
-              <Book className="size-4 text-zinc-200" />
+              <Book className="size-5 text-white" />
             )}
           </motion.span>
-
-          <span>{isIdleTrigger ? "NotebookLM" : triggerLabel}</span>
-
-          <ChevronDown
-            className={clsx("size-4 text-zinc-400 transition-transform", isMenuOpen && "rotate-180")}
-          />
-
         </motion.button>
       )}
 

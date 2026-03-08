@@ -10,10 +10,10 @@ const Yb = 'rgba(250,204,21,0.15)';
 const features = [
   {
     eyebrow: 'Agile Prompts',
-    title: '8 structured prompts, launched with one click',
-    body: 'A floating bar injected directly into NotebookLM. Pick the right prompt for the moment — analysis, comparison, synthesis — and get much richer answers.',
-    stat: '8×',
-    statLabel: 'faster responses',
+    title: 'AI that reads your prompt and makes it sharper',
+    body: "MindDock's AI analyzes your request, identifies what's vague or missing, and rewrites it to extract deeper, more precise answers from NotebookLM — automatically, before you even hit send.",
+    stat: 'AI',
+    statLabel: 'powered refinement',
     icon: (
       <svg width="28" height="28" viewBox="0 0 28 28" fill="none">
         <path d="M14 3L17.5 11H26L19.5 16L22 24L14 19L6 24L8.5 16L2 11H10.5L14 3Z"
@@ -21,13 +21,20 @@ const features = [
       </svg>
     ),
     visual: (
-      <div className="flex flex-col gap-2">
-        {['Deep analysis', 'Compare sources', 'Synthesize ideas', 'Generate questions'].map((p, i) => (
-          <div key={i} className="flex items-center gap-2 rounded-xl border border-white/8 bg-white/4 px-3 py-2">
-            <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-yellow-400/70" />
-            <span className="text-sm text-white/60">{p}</span>
-          </div>
-        ))}
+      <div className="flex flex-col gap-3">
+        <div className="rounded-xl border border-white/8 bg-white/4 px-3 py-2.5">
+          <p className="mb-1 text-[9px] uppercase tracking-widest text-white/25">Your prompt</p>
+          <p className="text-xs leading-5 text-white/45">Summarize this topic</p>
+        </div>
+        <div className="flex justify-center">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+            <path d="M7 2v10M7 12l-3-3M7 12l3-3" stroke={Y} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </div>
+        <div className="rounded-xl px-3 py-2.5" style={{ border: `1px solid ${Yb}`, background: Yi }}>
+          <p className="mb-1 text-[9px] uppercase tracking-widest text-yellow-400/50">Improved</p>
+          <p className="text-xs leading-5 text-white/70">Analyze the key arguments, identify gaps, and structure a synthesis with contrasting viewpoints</p>
+        </div>
       </div>
     ),
   },
@@ -218,7 +225,7 @@ export default function FeaturesScrollSection() {
       className="relative"
       style={{ height: `calc(100vh * ${numCards + 1})` }}
     >
-      <div className="sticky top-0 flex h-auto flex-col items-center justify-center overflow-hidden gap-6 py-14 border-t border-b border-white/60">
+      <div className="sticky top-0 flex h-auto flex-col items-center justify-center overflow-hidden gap-4 py-8 sm:gap-6 sm:py-14 border-t border-b border-white/60">
 
         {/* Beams background */}
         <div className="absolute inset-0 pointer-events-none" style={{ zIndex: 0 }}>
@@ -237,7 +244,7 @@ export default function FeaturesScrollSection() {
         {/* Heading */}
         <div className="relative w-full shrink-0 text-center" style={{ zIndex: 1 }}>
           <p className="text-[11px] uppercase tracking-[0.24em] text-white/35">Features</p>
-          <h2 className="mx-auto mt-3 max-w-3xl text-4xl font-semibold tracking-[-0.05em] text-white sm:text-5xl">
+          <h2 className="mx-auto mt-3 max-w-3xl text-2xl font-semibold tracking-[-0.05em] text-white sm:text-4xl lg:text-5xl">
             Everything NotebookLM is missing,
             <br className="hidden sm:block" /> MindDock adds.
           </h2>
@@ -250,7 +257,7 @@ export default function FeaturesScrollSection() {
         <div
           ref={cardsAreaRef}
           className="relative mx-auto w-full max-w-5xl shrink-0 overflow-hidden px-6"
-          style={{ height: 'clamp(300px, 42vh, 400px)', zIndex: 1 }}
+          style={{ height: 'clamp(320px, 52vh, 420px)', zIndex: 1 }}
         >
           {features.map((feature, i) => (
             <div
@@ -270,22 +277,22 @@ export default function FeaturesScrollSection() {
                   style={{ background: `radial-gradient(ellipse at top right, rgba(250,204,21,0.12), transparent 55%)` }}
                 />
 
-                <div className="relative flex flex-col justify-between gap-5 p-7 lg:flex-row lg:items-center">
+                <div className="relative flex flex-col justify-between gap-4 p-5 sm:gap-5 sm:p-7 lg:flex-row lg:items-center">
                   {/* Left: text */}
-                  <div className="flex-1 space-y-5">
+                  <div className="flex-1 space-y-3 sm:space-y-5">
                     <div className="flex items-center gap-3">
                       {feature.icon}
                       <span className="text-[10px] uppercase tracking-[0.22em] text-white/35">
                         {feature.eyebrow}
                       </span>
                     </div>
-                    <h3 className="text-2xl font-semibold leading-snug tracking-[-0.04em] text-white sm:text-3xl">
+                    <h3 className="text-xl font-semibold leading-snug tracking-[-0.04em] text-white sm:text-2xl lg:text-3xl">
                       {feature.title}
                     </h3>
-                    <p className="max-w-md text-sm leading-7 text-white/50">{feature.body}</p>
+                    <p className="max-w-md text-xs leading-6 text-white/50 sm:text-sm sm:leading-7">{feature.body}</p>
                     <div className="flex items-center gap-5 pt-1">
                       <div>
-                        <p className="text-3xl font-bold tracking-tight text-yellow-400">
+                        <p className="text-2xl font-bold tracking-tight text-yellow-400 sm:text-3xl">
                           {feature.stat}
                         </p>
                         <p className="mt-0.5 text-[11px] text-white/30">{feature.statLabel}</p>
@@ -296,8 +303,8 @@ export default function FeaturesScrollSection() {
                     </div>
                   </div>
 
-                  {/* Right: visual panel */}
-                  <div className="w-full shrink-0 rounded-2xl border border-white/6 bg-white/2 p-5 lg:w-64">
+                  {/* Right: visual panel — hidden on small mobile to save space */}
+                  <div className="hidden w-full shrink-0 rounded-2xl border border-white/6 bg-white/2 p-5 sm:block lg:w-64">
                     {feature.visual}
                   </div>
                 </div>
