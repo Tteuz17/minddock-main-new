@@ -1,4 +1,50 @@
+import type { CSSProperties } from "react"
+
 import type { StrategyPlacement } from "./types"
+
+/** Inline style for the host element when mounted inside a toolbar. */
+export const INLINE_HOST_STYLE = "display:inline-flex;align-items:center;vertical-align:middle;margin:0 4px"
+
+/** CSS returned by getStyles() when the button is mounted inline inside the page toolbar. */
+export const INLINE_CONTAINER_STYLE: CSSProperties = { position: "relative" }
+
+/**
+ * Tries to insert `host` as a child of the first visible toolbar element matching `selectors`.
+ * Sets host inline display and returns `true` on success.
+ */
+export function tryMountInToolbar(host: HTMLElement, selectors: readonly string[]): boolean {
+  const toolbar = queryFirstVisibleElement(selectors)
+  if (!toolbar) return false
+
+  host.style.cssText = INLINE_HOST_STYLE
+  if (host.parentElement !== toolbar) {
+    toolbar.appendChild(host)
+  }
+  return true
+}
+
+/**
+ * Tries to insert `host` immediately after the first visible element matching `anchorSelectors`.
+ * Falls back to `tryMountInToolbar` with `fallbackSelectors` if no anchor is found.
+ * Returns `true` on success.
+ */
+export function tryMountAfterElement(
+  host: HTMLElement,
+  anchorSelectors: readonly string[],
+  fallbackSelectors: readonly string[]
+): boolean {
+  const anchor = queryFirstVisibleElement(anchorSelectors)
+  if (anchor?.parentElement) {
+    host.style.cssText = INLINE_HOST_STYLE
+    const alreadyAfter =
+      host.parentElement === anchor.parentElement && host.previousElementSibling === anchor
+    if (!alreadyAfter) {
+      anchor.parentElement.insertBefore(host, anchor.nextSibling)
+    }
+    return true
+  }
+  return tryMountInToolbar(host, fallbackSelectors)
+}
 
 export function clampNumber(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value))

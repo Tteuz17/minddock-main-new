@@ -101,15 +101,7 @@ export default function LandingFooter() {
       >
 
         {/* ── Main body ─────────────────────────────── */}
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "1fr auto",
-            gap: "4rem",
-            padding: "4.5rem 0 4rem",
-            alignItems: "start",
-          }}
-        >
+        <div className="grid grid-cols-1 gap-10 py-12 sm:py-16 lg:grid-cols-[1fr_auto] lg:gap-16 lg:py-18" style={{ alignItems: "start" }}>
           {/* Left — brand statement */}
           <div>
             <Image
@@ -188,7 +180,7 @@ export default function LandingFooter() {
           </div>
 
           {/* Right — nav columns */}
-          <div style={{ display: "flex", gap: "3.5rem", paddingTop: "0.25rem" }}>
+          <div className="flex gap-10 sm:gap-14" style={{ paddingTop: "0.25rem" }}>
             {nav.map((col) => (
               <div key={col.heading}>
                 <p

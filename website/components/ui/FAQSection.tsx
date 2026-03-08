@@ -6,39 +6,39 @@ const INTRO_STYLE_ID = "faq1-animations";
 
 const faqs = [
   {
-    question: "O MindDock substitui o NotebookLM?",
+    question: "Does MindDock replace NotebookLM?",
     answer:
-      "Não. O MindDock é uma extensão que potencializa o NotebookLM. Ele adiciona camadas que o NotebookLM não tem — prompts estruturados, Zettelkasten, captura de IAs externas e exportação avançada — sem tirar nada do que você já usa.",
-    meta: "Produto",
+      "Not at all. MindDock is a Chrome extension that sits on top of NotebookLM and gives it the layers it's missing — structured prompts, Zettelkasten notes, AI capture, and advanced export. Everything you already do in NotebookLM stays exactly the same.",
+    meta: "Product",
   },
   {
-    question: "Funciona com qualquer conta do Google?",
+    question: "Does it work with any Google account?",
     answer:
-      "Sim. O MindDock é uma extensão do Chrome que funciona com qualquer conta Google que tenha acesso ao NotebookLM. Basta instalar, fazer login com sua conta MindDock e começar a usar.",
-    meta: "Instalação",
+      "Yes. As long as your Google account has access to NotebookLM, MindDock works with it. Just install the extension, sign into your MindDock account, and you're good to go.",
+    meta: "Setup",
   },
   {
-    question: "Como funciona a captura de outras IAs?",
+    question: "How does AI capture from other tools work?",
     answer:
-      "O AI Capture detecta automaticamente respostas do ChatGPT, Claude, Gemini, Perplexity e outras plataformas enquanto você navega. Com um clique, envia o conteúdo capturado como fonte direto para o notebook ativo no NotebookLM.",
+      "MindDock automatically detects responses from ChatGPT, Claude, Gemini, and Perplexity as you browse. One click sends the captured content as a source directly into your active NotebookLM notebook — no copy-pasting needed.",
     meta: "AI Capture",
   },
   {
-    question: "Meus dados ficam seguros?",
+    question: "Is my data safe?",
     answer:
-      "Sim. Nenhum conteúdo do seu NotebookLM é armazenado nos nossos servidores. O processamento de notas e prompts acontece localmente ou via chamadas diretas à API, sem intermediários que retenham seu conteúdo.",
-    meta: "Segurança",
+      "Yes. None of your NotebookLM content is stored on our servers. Notes and prompt processing happen locally or via direct API calls — there's no middleman holding onto your work.",
+    meta: "Privacy",
   },
   {
-    question: "Posso cancelar a assinatura a qualquer momento?",
+    question: "Can I cancel anytime?",
     answer:
-      "Sim, sem burocracia. Cancele pelo painel MindDock e seu plano continua ativo até o fim do período já pago. Nenhuma cobrança adicional após o cancelamento.",
-    meta: "Planos",
+      "Absolutely. Cancel from your MindDock dashboard and your plan stays active through the end of the billing period you already paid for. No extra charges, no friction.",
+    meta: "Billing",
   },
   {
-    question: "O que é o Zettelkasten e por que ele importa?",
+    question: "What's Zettelkasten and why does it matter?",
     answer:
-      "Zettelkasten é um método de notas atômicas linkadas entre si — cada ideia vira uma nota, cada nota pode se conectar a outras. No MindDock, você visualiza essas conexões em um grafo interativo, transformando o NotebookLM em uma segunda memória permanente e navegável.",
+      "Zettelkasten is a method of building atomic, linked notes — each idea gets its own note, and notes connect to each other. In MindDock, you can visualize those connections in an interactive graph, turning NotebookLM into a permanent, searchable second brain.",
     meta: "Zettelkasten",
   },
 ];
@@ -216,7 +216,7 @@ export default function FAQSection() {
       />
 
       <section
-        className={`relative z-10 mx-auto flex max-w-4xl flex-col gap-12 px-6 py-24 lg:max-w-5xl lg:px-12 ${
+        className={`relative z-10 mx-auto flex max-w-4xl flex-col gap-8 px-6 py-14 sm:gap-12 sm:py-24 lg:max-w-5xl lg:px-12 ${
           hasEntered ? "faq1-fade--ready" : "faq1-fade"
         }`}
       >
@@ -229,12 +229,12 @@ export default function FAQSection() {
         </div>
 
         <header className="space-y-4">
-          <p className={`text-xs uppercase tracking-[0.35em] ${palette.muted}`}>Perguntas frequentes</p>
-          <h2 className={`text-4xl font-semibold leading-tight md:text-5xl ${palette.heading}`}>
-            Tudo que você precisa saber<br className="hidden sm:block" /> antes de começar.
+          <p className={`text-xs uppercase tracking-[0.35em] ${palette.muted}`}>FAQ</p>
+          <h2 className={`text-3xl font-semibold leading-tight sm:text-4xl md:text-5xl ${palette.heading}`}>
+            Everything you want to know<br className="hidden sm:block" /> before you start.
           </h2>
           <p className={`max-w-xl text-base ${palette.muted}`}>
-            Respostas diretas sobre o MindDock, seus planos e como ele transforma o seu NotebookLM.
+            Straight answers about MindDock, how it works, and what it adds to your NotebookLM.
           </p>
         </header>
 

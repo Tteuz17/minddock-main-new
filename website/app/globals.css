@@ -107,6 +107,7 @@ a {
 .hero-serif {
   display: inline;
   font-family: var(--font-serif), Georgia, serif;
+  font-size: 1.05em;
   font-weight: 400;
   font-style: italic;
   letter-spacing: -0.02em;

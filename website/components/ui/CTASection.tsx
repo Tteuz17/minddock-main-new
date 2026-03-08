@@ -4,7 +4,7 @@ import { Sparkles } from "@/components/ui/sparkles"
 
 export default function CTASection() {
   return (
-    <section className="relative overflow-hidden bg-[#050608] py-32">
+    <section className="relative overflow-hidden bg-[#050608] py-20 sm:py-32">
       {/* Sparkles layer */}
       <div className="pointer-events-none absolute inset-0">
         <Sparkles

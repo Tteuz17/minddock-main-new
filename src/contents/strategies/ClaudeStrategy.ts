@@ -1,14 +1,21 @@
 import type { CSSProperties } from "react"
 
-import type { ContentStrategy, StrategyMenuAlign, StrategyPlacement } from "./types"
-import {
-  queryFirstVisibleElement,
-  resolveFallbackPlacement,
-  resolveLeftOfAnchorPlacement
-} from "./dom-utils"
+import type { ContentStrategy, StrategyMenuAlign } from "./types"
+import { INLINE_CONTAINER_STYLE, resolveFallbackPlacement, tryMountInToolbar } from "./dom-utils"
+
+const CLAUDE_TOOLBAR_SELECTORS = [
+  "div[data-testid='chat-footer']",
+  "fieldset footer",
+  "div[class*='composer'] div.flex.items-center",
+  "div[class*='input-footer']",
+  "div[class*='toolbar']",
+  "div[class*='action-bar']",
+] as const
 
 export class ClaudeStrategy implements ContentStrategy {
   readonly id = "claude"
+
+  private mountedInline = false
 
   matches(url: string): boolean {
     try {
@@ -23,20 +30,16 @@ export class ClaudeStrategy implements ContentStrategy {
     return document.body
   }
 
+  mountHost(host: HTMLElement): boolean {
+    this.mountedInline = tryMountInToolbar(host, CLAUDE_TOOLBAR_SELECTORS)
+    return this.mountedInline
+  }
+
   getStyles(): CSSProperties {
-    return this.resolvePlacement().style
+    return this.mountedInline ? INLINE_CONTAINER_STYLE : resolveFallbackPlacement().style
   }
 
   getMenuAlign(): StrategyMenuAlign {
-    return this.resolvePlacement().menuAlign
-  }
-
-  private resolvePlacement(): StrategyPlacement {
-    const anchor = queryFirstVisibleElement(["header .right-3", "header [class*='right']"])
-    if (anchor) {
-      return resolveLeftOfAnchorPlacement(anchor.getBoundingClientRect(), 8)
-    }
-
-    return resolveFallbackPlacement()
+    return "right"
   }
 }

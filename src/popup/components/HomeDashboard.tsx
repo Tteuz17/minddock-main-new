@@ -3,13 +3,13 @@ import { motion } from "framer-motion"
 import {
   ArrowUpRight,
   BookOpenText,
+  Download,
   Eye,
   EyeOff,
   GitBranchPlus,
-  Network,
-  NotebookPen,
+  Layers,
   Settings2,
-  Workflow
+  Sparkles
 } from "lucide-react"
 
 import { STORAGE_KEYS, URLS } from "~/lib/constants"
@@ -18,7 +18,10 @@ import type { SidePanelLaunchTarget } from "~/lib/types"
 
 interface HomeDashboardProps {
   onOpenSidePanel: (target: SidePanelLaunchTarget) => void | Promise<void>
-  onOpenZettelHub?: () => void
+  onOpenImports?: () => void
+  onOpenAgilePrompts?: () => void
+  onOpenDocks?: () => void
+  onOpenHighlights?: () => void
 }
 
 interface DailyUsageSnapshot {
@@ -37,7 +40,7 @@ const EMPTY_USAGE: DailyUsageSnapshot = {
   captures: 0
 }
 
-export function HomeDashboard({ onOpenSidePanel, onOpenZettelHub }: HomeDashboardProps) {
+export function HomeDashboard({ onOpenSidePanel, onOpenImports, onOpenAgilePrompts, onOpenDocks, onOpenHighlights }: HomeDashboardProps) {
   const { limits } = useSubscription()
   const [dailyUsage, setDailyUsage] = useState<DailyUsageSnapshot>(EMPTY_USAGE)
   const [componentsVisible, setComponentsVisible] = useState(true)
@@ -115,36 +118,36 @@ export function HomeDashboard({ onOpenSidePanel, onOpenZettelHub }: HomeDashboar
 
   const cards = [
     {
-      title: "Modo Zettel",
-      note: "Criar nota atomica",
-      icon: NotebookPen,
+      title: "Imports",
+      note: "Recent imports & sources",
+      icon: Download,
       accent: "rgba(250,204,21,0.18)",
       accentEdge: "rgba(250,204,21,0.24)",
-      onClick: () => onOpenZettelHub?.()
+      onClick: () => onOpenImports?.()
     },
     {
-      title: "Graph View",
-      note: "Abrir mapa de notas",
-      icon: Network,
-      accent: "rgba(59,130,246,0.16)",
-      accentEdge: "rgba(96,165,250,0.22)",
-      onClick: () => onOpenSidePanel("graph")
+      title: "Agile Prompts",
+      note: "Templates & settings",
+      icon: Sparkles,
+      accent: "rgba(139,92,246,0.16)",
+      accentEdge: "rgba(167,139,250,0.22)",
+      onClick: () => onOpenAgilePrompts?.()
     },
     {
-      title: "Conectar Notas",
-      note: "Criar nota-ponte",
+      title: "Connect Notes",
+      note: "Create bridge note",
       icon: GitBranchPlus,
       accent: "rgba(16,185,129,0.16)",
       accentEdge: "rgba(52,211,153,0.22)",
       onClick: () => onOpenSidePanel("link_note")
     },
     {
-      title: "Threads",
-      note: "Ver estrutura",
-      icon: Workflow,
+      title: "Docks",
+      note: "Notebooks & docks",
+      icon: Layers,
       accent: "rgba(244,114,182,0.14)",
       accentEdge: "rgba(244,114,182,0.18)",
-      onClick: () => chrome.tabs.create({ url: URLS.MINDDOCK_LANDING })
+      onClick: () => onOpenDocks?.()
     }
   ]
 
@@ -226,7 +229,7 @@ export function HomeDashboard({ onOpenSidePanel, onOpenZettelHub }: HomeDashboar
               <div className="flex items-start justify-between gap-3">
                 <div>
                   <p className="text-[10px] font-medium uppercase tracking-[0.16em] text-zinc-500">
-                    Importacao diaria
+                    Daily imports
                   </p>
                   <div className="mt-1 flex items-end gap-2">
                     <span className="text-[24px] font-semibold leading-none tracking-[-0.05em] text-white">
@@ -274,8 +277,8 @@ export function HomeDashboard({ onOpenSidePanel, onOpenZettelHub }: HomeDashboar
 
               <div className="mt-1.5 text-[10px] text-zinc-500">
                 {importLimit
-                  ? `${remainingImports} restante${remainingImports === 1 ? "" : "s"} hoje`
-                  : `${usedImports} ${usedImports === 1 ? "importacao" : "importacoes"} hoje`}
+                  ? `${remainingImports} remaining today`
+                  : `${usedImports} ${usedImports === 1 ? "import" : "imports"} today`}
               </div>
             </div>
           </motion.section>
@@ -287,9 +290,9 @@ export function HomeDashboard({ onOpenSidePanel, onOpenZettelHub }: HomeDashboar
             className="mt-2">
             <div className="mb-1 flex items-center justify-between">
               <span className="text-[10px] font-medium uppercase tracking-[0.16em] text-zinc-500">
-                Modo Caneta
+                Quick access
               </span>
-              <span className="text-[10px] text-zinc-600">4 modulos</span>
+              <span className="text-[10px] text-zinc-600">4 modules</span>
             </div>
 
             <div className="grid grid-cols-2 gap-1.5">
@@ -331,16 +334,16 @@ export function HomeDashboard({ onOpenSidePanel, onOpenZettelHub }: HomeDashboar
           <div className="liquid-glass-content flex w-full items-center justify-between gap-3">
             <div className="min-w-0">
               <p className="text-[10px] font-medium uppercase tracking-[0.16em] text-zinc-500">
-                Modo Marca Texto
+                Highlight mode
               </p>
-              <p className="mt-1 text-[10px] text-zinc-400">Suas citacoes ficam prontas para revisao.</p>
+              <p className="mt-1 text-[10px] text-zinc-400">Your highlights are ready to review.</p>
             </div>
 
             <button
               type="button"
-              onClick={() => onOpenSidePanel("notes")}
+              onClick={() => onOpenHighlights?.()}
               className="liquid-glass-soft inline-flex h-8 shrink-0 items-center rounded-[12px] px-3 text-[10px] font-medium text-zinc-100 hover:-translate-y-px hover:text-white">
-              Ver todas as citacoes salvas
+              View all saved highlights
             </button>
           </div>
         </motion.section>

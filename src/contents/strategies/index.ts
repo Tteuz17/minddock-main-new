@@ -2,6 +2,7 @@ import { ChatGPTStrategy } from "./ChatGPTStrategy"
 import { ClaudeStrategy } from "./ClaudeStrategy"
 import { DefaultStrategy } from "./DefaultStrategy"
 import { GeminiStrategy } from "./GeminiStrategy"
+import { GoogleDocsStrategy } from "./GoogleDocsStrategy"
 import { GrokStrategy } from "./GrokStrategy"
 import { KimiStrategy } from "./KimiStrategy"
 import { LinkedInStrategy } from "./LinkedInStrategy"
@@ -16,6 +17,7 @@ const CONTENT_STRATEGIES: ContentStrategy[] = [
   new ClaudeStrategy(),
   new GeminiStrategy(),
   new PerplexityStrategy(),
+  new GoogleDocsStrategy(),
   new RedditStrategy(),
   new GrokStrategy(),
   new XStrategy(),
