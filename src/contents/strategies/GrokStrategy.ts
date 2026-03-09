@@ -6,6 +6,12 @@ import { clampNumber, isVisibleElement, queryFirstVisibleElement } from "./dom-u
 const GROK_HOST_TOKENS = ["grok.com"] as const
 const GROK_X_HOST_TOKENS = ["x.com", "twitter.com"] as const
 
+// "Imagine" button in the Grok header nav
+const GROK_IMAGINE_SELECTORS = [
+  "a[aria-label='Imagine']",
+  "a[href='/imagine']",
+] as const
+
 export class GrokStrategy implements ContentStrategy {
   readonly id = "grok"
 
@@ -36,12 +42,32 @@ export class GrokStrategy implements ContentStrategy {
     return document.body
   }
 
+  // Do NOT inject into Grok's React tree — use fixed positioning instead.
+  mountHost(_host: HTMLElement): boolean {
+    return false
+  }
+
   getStyles(): CSSProperties {
+    for (const selector of GROK_IMAGINE_SELECTORS) {
+      const anchor = document.querySelector(selector)
+      if (anchor) {
+        const rect = anchor.getBoundingClientRect()
+        if (rect.width > 0 && rect.height > 0) {
+          return {
+            position: "fixed",
+            top: `${Math.round(rect.top + (rect.height - 32) / 2)}px`,
+            left: `${Math.round(rect.left - 38)}px`,
+            zIndex: 2147483646,
+            pointerEvents: "auto"
+          }
+        }
+      }
+    }
     return this.resolvePlacement().style
   }
 
   getMenuAlign(): StrategyMenuAlign {
-    return this.resolvePlacement().menuAlign
+    return "right"
   }
 
   private resolvePlacement(): StrategyPlacement {

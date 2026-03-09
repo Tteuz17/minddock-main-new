@@ -5,16 +5,21 @@ import { AnimatePresence, motion } from "framer-motion"
 
 import { UserMenu } from "~/popup/components/UserMenu"
 import { HomeDashboard } from "~/popup/components/HomeDashboard"
-import { ZettelHub } from "~/popup/components/ZettelHub"
+import { ImportsHub } from "~/popup/components/ImportsHub"
+import { AgilePromptsHub } from "~/popup/components/AgilePromptsHub"
+import { DocksHub } from "~/popup/components/DocksHub"
+import { HighlightHub } from "~/popup/components/HighlightHub"
 import { useAuth } from "~/hooks/useAuth"
 import { AuthScreen } from "~/popup/components/AuthScreen"
 import { LoadingSpinner } from "~/components/LoadingSpinner"
 import { STORAGE_KEYS } from "~/lib/constants"
 import type { SidePanelLaunchTarget } from "~/lib/types"
 
+type PopupView = "home" | "imports" | "agile" | "docks" | "highlights"
+
 export default function Popup() {
   const { isAuthenticated, isLoading } = useAuth()
-  const [isZettelHubOpen, setIsZettelHubOpen] = useState(false)
+  const [view, setView] = useState<PopupView>("home")
 
   const openSidePanel = async (target: SidePanelLaunchTarget) => {
     await chrome.storage.local.set({ [STORAGE_KEYS.SIDEPANEL_VIEW]: target })
@@ -36,15 +41,45 @@ export default function Popup() {
   return (
     <div className="popup-container relative bg-[#060606]">
       <AnimatePresence mode="wait">
-        {isZettelHubOpen ? (
+        {view === "imports" ? (
           <motion.div
-            key="zettel-hub"
+            key="imports"
             initial={{ opacity: 0, x: 20 }}
             animate={{ opacity: 1, x: 0 }}
             exit={{ opacity: 0, x: 20 }}
             transition={{ duration: 0.18 }}
             className="flex h-full flex-col">
-            <ZettelHub onBack={() => setIsZettelHubOpen(false)} />
+            <ImportsHub onBack={() => setView("home")} />
+          </motion.div>
+        ) : view === "agile" ? (
+          <motion.div
+            key="agile"
+            initial={{ opacity: 0, x: 20 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: 20 }}
+            transition={{ duration: 0.18 }}
+            className="flex h-full flex-col">
+            <AgilePromptsHub onBack={() => setView("home")} />
+          </motion.div>
+        ) : view === "docks" ? (
+          <motion.div
+            key="docks"
+            initial={{ opacity: 0, x: 20 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: 20 }}
+            transition={{ duration: 0.18 }}
+            className="flex h-full flex-col">
+            <DocksHub onBack={() => setView("home")} />
+          </motion.div>
+        ) : view === "highlights" ? (
+          <motion.div
+            key="highlights"
+            initial={{ opacity: 0, x: 20 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: 20 }}
+            transition={{ duration: 0.18 }}
+            className="flex h-full flex-col">
+            <HighlightHub onBack={() => setView("home")} />
           </motion.div>
         ) : (
           <motion.div
@@ -56,7 +91,10 @@ export default function Popup() {
             className="flex h-full flex-col">
             <HomeDashboard
               onOpenSidePanel={openSidePanel}
-              onOpenZettelHub={() => setIsZettelHubOpen(true)}
+              onOpenImports={() => setView("imports")}
+              onOpenAgilePrompts={() => setView("agile")}
+              onOpenDocks={() => setView("docks")}
+              onOpenHighlights={() => setView("highlights")}
             />
             <UserMenu />
           </motion.div>

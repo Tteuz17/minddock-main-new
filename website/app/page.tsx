@@ -1,67 +1,15 @@
 import Image from "next/image"
-import { CardDemo } from "@/components/ui/card-demo"
 import { InfiniteRibbon } from "@/components/ui/infinite-ribbon"
+import FeaturesScrollSection from "@/components/ui/FeaturesScrollSection"
+import PricingSection from "@/components/ui/PricingSection"
+import FAQSection from "@/components/ui/FAQSection"
+import CTASection from "@/components/ui/CTASection"
+import LandingFooter from "@/components/ui/LandingFooter"
 import heroBackground from "../../public/lp/backgroundhero.png"
 import minddockLogo from "../../public/lp/logo/logo minddock sem fundo.png"
 
 const agilePromptVideoSrc = "/api/lp/agile-prompts"
 const docksVideoSrc = "/api/lp/docks"
-
-const pillars = [
-  {
-    eyebrow: "Structure first",
-    title: "Turn NotebookLM into an actual research system.",
-    body:
-      "MindDock adds the layer NotebookLM is missing: persistent threads, atomic notes, linked ideas, and a graph that exposes how your thinking connects."
-  },
-  {
-    eyebrow: "Built for depth",
-    title: "Capture less noise. Keep only the signal.",
-    body:
-      "Instead of letting insight disappear inside long chats, MindDock helps convert useful responses into reusable knowledge that can be refined, linked, and revisited."
-  }
-]
-
-const features = [
-  {
-    title: "Daily import control",
-    text:
-      "Track how much you are sending into NotebookLM and keep the workflow predictable for free users."
-  },
-  {
-    title: "Threads",
-    text:
-      "Split one notebook into topic-specific conversations so each line of thought keeps its own context."
-  },
-  {
-    title: "Zettelkasten mode",
-    text:
-      "Turn ideas into atomic notes with links that keep growing as your research gets sharper."
-  },
-  {
-    title: "Graph view",
-    text:
-      "See the hidden structure of your notes and spot where new insight is emerging."
-  }
-]
-
-const workflow = [
-  {
-    step: "01",
-    title: "Capture",
-    text: "Move source material into NotebookLM faster, without losing control of what enters your workspace."
-  },
-  {
-    step: "02",
-    title: "Distill",
-    text: "Convert useful answers into durable notes, not disposable chat history."
-  },
-  {
-    step: "03",
-    title: "Connect",
-    text: "Link threads, notes, and themes into a system that compounds over time."
-  }
-]
 
 const overviewMiniCards = [
   {
@@ -142,36 +90,32 @@ export default function HomePage() {
               <a className="nav-chip" href="#features">
                 Features
               </a>
-              <a className="nav-chip" href="#workflow">
-                Workflow
-              </a>
-              <a className="nav-chip" href="#cta">
-                Launch
+              <a className="nav-chip" href="#pricing">
+                Pricing
               </a>
             </nav>
           </header>
 
           <section className="relative flex flex-1 flex-col justify-center py-10 lg:py-12">
-            <div className="relative z-[1] mx-auto flex w-full max-w-4xl flex-col items-center space-y-9 text-center">
+            <div className="relative z-[1] mx-auto flex w-full max-w-5xl flex-col items-center space-y-9 text-center">
               <div className="space-y-5">
-                <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-black/[0.12] px-4 py-2 text-[10px] uppercase tracking-[0.24em] text-white/60 backdrop-blur-sm">
-                  <span className="h-2 w-2 rounded-full bg-[var(--accent)]" />
-                  Free trial
+                <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-black/[0.12] px-4 py-2 text-[10px] uppercase tracking-[0.18em] sm:tracking-[0.24em] text-white/60 backdrop-blur-sm">
+                  <span className="h-2 w-2 shrink-0 rounded-full bg-[var(--accent)]" />
+                  The same NotebookLM. but now with superpowers
                 </div>
 
                 <div className="space-y-4">
-                  <h1 className="mx-auto max-w-4xl text-[clamp(2.3rem,5.8vw,4.9rem)] font-normal leading-[0.94] tracking-[-0.06em] text-white [text-shadow:0_10px_28px_rgba(0,0,0,0.22)]">
-                    <span className="block whitespace-nowrap text-[0.64em] font-normal tracking-[-0.045em]">
-                      <span className="hero-serif text-[1.18em]">Knowledge work</span> is now
+                  <h1 className="mx-auto text-[clamp(1.6rem,5vw,3.2rem)] font-normal leading-[1.08] tracking-[-0.05em] text-white [text-shadow:0_10px_28px_rgba(0,0,0,0.22)] sm:text-[clamp(1.8rem,3.8vw,3.2rem)] sm:leading-[1.05] sm:tracking-[-0.06em]">
+                    <span className="block text-[0.8em] font-normal tracking-[-0.035em] text-white/65 sm:tracking-[-0.045em]">
+                      NotebookLM was just the beginning.
                     </span>
-                    <span className="mt-2 block whitespace-nowrap text-[0.98em] font-normal tracking-[-0.06em]">
-                      structured for NotebookLM.
+                    <span className="mt-2 block font-normal tracking-[-0.045em] sm:whitespace-nowrap sm:tracking-[-0.055em]">
+                      This is where your <span className="hero-serif">superpowers</span> begin.
                     </span>
                   </h1>
-                  <p className="mx-auto max-w-3xl text-base leading-8 text-white/72 [text-shadow:0_6px_20px_rgba(0,0,0,0.18)] sm:text-lg">
-                    MindDock gives NotebookLM the structure it is missing: durable notes, cleaner
-                    threads, connected ideas, and a workflow that actually holds up during serious
-                    study.
+                  <p className="mx-auto max-w-3xl text-sm leading-7 text-white/72 [text-shadow:0_6px_20px_rgba(0,0,0,0.18)] sm:text-base sm:leading-8 lg:text-lg">
+                    More topics. Smarter prompts. A single notebook and several subjects.
+                    A brilliant and connected mind.
                   </p>
                 </div>
               </div>
@@ -218,7 +162,7 @@ export default function HomePage() {
           </div>
 
           <div className="grid gap-6">
-            <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
               {overviewMiniCards.map((card) => (
                 <article key={card.title} className="panel-flat space-y-3">
                   <div className="text-white/40">{card.icon}</div>
@@ -254,7 +198,7 @@ export default function HomePage() {
               </article>
 
               <article className="panel-flat">
-                <div className="flex h-full flex-col gap-5">
+                <div className="flex h-full flex-col-reverse gap-5 sm:flex-col">
                   <div className="overflow-hidden rounded-[1.25rem]">
                     <video
                       autoPlay muted loop playsInline preload="auto"
@@ -278,192 +222,246 @@ export default function HomePage() {
           </div>
         </section>
 
-        <section className="pt-8">
-          <div className="relative overflow-hidden rounded-4xl border border-white/8">
-            <div className="grid divide-y divide-white/8 lg:grid-cols-2 lg:divide-x lg:divide-y-0">
+        {/* Section title */}
+        <div className="pt-20 pb-10 text-center">
+          <p className="text-[11px] uppercase tracking-[0.24em] text-white/35">The difference</p>
+          <h2 className="mx-auto mt-3 max-w-3xl text-4xl font-semibold tracking-[-0.05em] text-white sm:text-5xl">
+            See what changes when research has a home.
+          </h2>
+          <p className="mx-auto mt-4 max-w-xl text-sm leading-7 text-white/45">
+            Without structure, every session starts from zero. With MindDock, every session builds on the last.
+          </p>
+        </div>
 
-              {/* Before */}
-              <div className="p-8 sm:p-10">
-                <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/4 px-3 py-1.5">
-                  <span className="h-1.5 w-1.5 rounded-full bg-white/25" />
-                  <span className="text-[10px] uppercase tracking-[0.2em] text-white/35">Without MindDock</span>
-                </div>
-                <p className="mt-6 text-[clamp(1.5rem,2.8vw,2.1rem)] font-semibold leading-tight tracking-[-0.04em] text-white/30 line-through decoration-white/15">
-                  Research gets trapped in temporary conversations.
-                </p>
-                <ul className="mt-8 space-y-5">
-                  {[
-                    "Insights buried in scrollback",
-                    "No structure survives a new chat",
-                    "Sources pile up, recall goes down",
-                    "Ideas vanish before they connect"
-                  ].map((item) => (
-                    <li key={item} className="flex items-center gap-3 text-sm text-white/30">
-                      <svg className="shrink-0" width="14" height="14" viewBox="0 0 14 14" fill="none">
-                        <path d="M2 2l10 10M12 2L2 12" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-                      </svg>
-                      {item}
-                    </li>
+        <section className="pb-2">
+          <div className="grid gap-6 lg:grid-cols-2">
+
+            {/* Before card — pure white, black text */}
+            <div className="relative overflow-hidden rounded-3xl bg-white p-7">
+              {/* Status bar */}
+              <div className="mb-5 flex items-center justify-between">
+                <span className="text-[10px] text-black/50">9:41</span>
+                <span className="flex gap-1.5">
+                  {[0, 1, 2].map((i) => (
+                    <span key={i} className="h-1 w-1 rounded-full bg-black/35" />
                   ))}
-                </ul>
-              </div>
-
-              {/* After */}
-              <div className="relative overflow-hidden p-8 sm:p-10">
-                <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_top_right,rgba(234,179,8,0.07),transparent_65%)]" />
-                <div className="relative">
-                  <div className="inline-flex items-center gap-2 rounded-full border border-(--accent)/25 bg-(--accent)/8 px-3 py-1.5">
-                    <span className="h-1.5 w-1.5 rounded-full bg-(--accent)" />
-                    <span className="text-[10px] uppercase tracking-[0.2em] text-(--accent)/80">With MindDock</span>
-                  </div>
-                  <p className="mt-6 text-[clamp(1.5rem,2.8vw,2.1rem)] font-semibold leading-tight tracking-[-0.04em] text-white">
-                    Your knowledge compounds session after session.
-                  </p>
-                  <ul className="mt-8 space-y-5">
-                    {[
-                      "Notes persist and stay linked",
-                      "Each dock keeps its own clean context",
-                      "Everything is searchable, always",
-                      "Ideas connect and build over time"
-                    ].map((item) => (
-                      <li key={item} className="flex items-center gap-3 text-sm text-white/70">
-                        <svg className="shrink-0 text-(--accent)" width="14" height="14" viewBox="0 0 14 14" fill="none">
-                          <path d="M2 7l3.5 3.5L12 3.5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-                        </svg>
-                        {item}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        <section className="pt-10">
-          <div className="mx-auto mb-8 grid w-full max-w-5xl gap-5 md:grid-cols-2">
-            {pillars.map((pillar) => (
-              <article key={pillar.title} className="panel-flat">
-                <p className="text-[11px] uppercase tracking-[0.22em] text-white/35">{pillar.eyebrow}</p>
-                <h2 className="mt-4 text-2xl font-semibold tracking-[-0.04em] text-white">{pillar.title}</h2>
-                <p className="mt-4 text-sm leading-7 text-white/58">{pillar.body}</p>
-              </article>
-            ))}
-          </div>
-
-          <div className="mx-auto w-full max-w-5xl">
-            <section className="hero-shell">
-              <div className="hero-dot-grid" aria-hidden="true" />
-
-              <div className="flex items-center justify-between rounded-3xl border border-white/6 bg-black/30 px-4 py-4">
-                <div>
-                  <p className="text-[11px] uppercase tracking-[0.22em] text-white/35">Control panel</p>
-                  <p className="mt-2 text-2xl font-semibold tracking-[-0.04em] text-white">
-                    Research, organized.
-                  </p>
-                </div>
-                <span className="rounded-full border border-white/8 bg-white/[0.04] px-4 py-2 text-xs text-white/70">
-                  Thinker Pro
                 </span>
               </div>
-
-              <div className="grid gap-4 sm:grid-cols-2">
-                {features.map((feature) => (
-                  <article key={feature.title} className="feature-card">
-                    <div className="flex items-center justify-between">
-                      <span className="grid h-11 w-11 place-items-center rounded-2xl border border-white/8 bg-white/[0.03] text-white/85">
-                        +
-                      </span>
-                      <span className="text-[10px] uppercase tracking-[0.24em] text-white/30">MindDock</span>
+              {/* Badge */}
+              <div className="inline-flex items-center gap-2 rounded-full border border-black/20 bg-black/8 px-3 py-1.5">
+                <span className="h-1.5 w-1.5 rounded-full bg-black/60" />
+                <span className="text-[10px] uppercase tracking-[0.2em] text-black/70">Without MindDock</span>
+              </div>
+              {/* Title */}
+              <h3 className="mt-5 text-xl font-semibold leading-snug tracking-[-0.03em] text-black/55 line-through decoration-black/30">
+                Research gets trapped in<br />temporary conversations.
+              </h3>
+              {/* Timeline */}
+              <div className="mt-7">
+                {[
+                  "Insights buried in scrollback",
+                  "No structure survives a new chat",
+                  "Sources pile up, recall goes down",
+                  "Ideas vanish before they connect",
+                ].map((text, i, arr) => (
+                  <div key={i} className="flex gap-4">
+                    <div className="flex flex-col items-center">
+                      <div className="mt-1 h-2.5 w-2.5 shrink-0 rounded-full border-2 border-black/30 bg-transparent" />
+                      {i < arr.length - 1 && (
+                        <div className="my-1.5 w-px flex-1 bg-black/20" style={{ minHeight: "26px" }} />
+                      )}
                     </div>
-                    <h3 className="mt-7 text-xl font-semibold tracking-[-0.04em] text-white">{feature.title}</h3>
-                    <p className="mt-3 text-sm leading-7 text-white/55">{feature.text}</p>
-                  </article>
+                    <div className="pb-5">
+                      <p className="text-[10px] font-semibold uppercase tracking-wider text-black/45">
+                        Step {i + 1}
+                      </p>
+                      <p className="mt-1 text-sm font-medium text-black/80">{text}</p>
+                    </div>
+                  </div>
                 ))}
               </div>
-            </section>
-          </div>
-        </section>
-
-        <section
-          id="features"
-          className="grid gap-6 border-t border-white/8 py-10 lg:grid-cols-[0.9fr_1.1fr] lg:py-16">
-          <div className="space-y-4">
-            <p className="text-[11px] uppercase tracking-[0.24em] text-white/35">Why MindDock</p>
-            <h2 className="max-w-xl text-4xl font-semibold tracking-[-0.05em] text-white">
-              The missing operating system for serious study and research.
-            </h2>
-            <p className="max-w-lg text-sm leading-8 text-white/58">
-              NotebookLM is powerful, but chat alone does not create a durable system. MindDock adds
-              the layer that keeps your work structured, connected, and reusable.
-            </p>
-          </div>
-
-          <div className="grid gap-4 md:grid-cols-2">
-            <div className="panel-flat">
-              <p className="text-sm text-white/45">Problem</p>
-              <p className="mt-3 text-2xl font-semibold tracking-[-0.04em] text-white">
-                Good insights vanish inside temporary conversations.
-              </p>
             </div>
-            <div className="panel-flat">
-              <p className="text-sm text-white/45">Answer</p>
-              <p className="mt-3 text-2xl font-semibold tracking-[-0.04em] text-white">
-                MindDock turns each useful answer into a persistent, navigable knowledge asset.
-              </p>
-            </div>
-          </div>
-        </section>
 
-        <section
-          id="workflow"
-          className="rounded-[2rem] border border-white/8 bg-white/[0.02] px-6 py-8 backdrop-blur-sm sm:px-8 sm:py-10">
-          <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
-            <div>
-              <p className="text-[11px] uppercase tracking-[0.24em] text-white/35">Workflow</p>
-              <h2 className="mt-3 text-4xl font-semibold tracking-[-0.05em] text-white">
-                A cleaner path from source to insight.
-              </h2>
+            {/* After card — yellow, black text */}
+            <div className="relative overflow-hidden rounded-3xl bg-[#facc15] p-7">
+              <div className="relative">
+                {/* Status bar with logo */}
+                <div className="mb-5 flex items-center justify-between">
+                  <Image
+                    src={minddockLogo}
+                    alt="MindDock"
+                    className="h-8 w-auto object-contain"
+                  />
+                  <button className="flex h-5 w-5 items-center justify-center rounded-full border border-black/20 text-[9px] text-black/50">
+                    ✕
+                  </button>
+                </div>
+                {/* Badge */}
+                <div className="inline-flex items-center gap-2 rounded-full border border-black/20 bg-black/10 px-3 py-1.5">
+                  <span className="h-1.5 w-1.5 rounded-full bg-black/70" />
+                  <span className="text-[10px] uppercase tracking-[0.2em] text-black/70">With MindDock</span>
+                </div>
+                {/* Title */}
+                <h3 className="mt-5 text-xl font-semibold leading-snug tracking-[-0.03em] text-black">
+                  Your knowledge compounds<br />session after session.
+                </h3>
+                {/* Timeline */}
+                <div className="mt-7">
+                  {[
+                    {
+                      text: "Notes persist and stay linked",
+                      icon: (
+                        <svg width="13" height="13" viewBox="0 0 14 14" fill="none">
+                          <path d="M5.5 8.5l-2 2A2 2 0 1 0 6.5 13.5L8.5 11.5M8.5 5.5l2-2A2 2 0 1 0 7.5.5L5.5 2.5M5.5 8.5l3-3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                        </svg>
+                      ),
+                    },
+                    {
+                      text: "Each dock keeps its own clean context",
+                      icon: (
+                        <svg width="13" height="13" viewBox="0 0 14 14" fill="none">
+                          <rect x="1" y="1" width="5" height="5" rx="1.5" stroke="currentColor" strokeWidth="1.4" />
+                          <rect x="8" y="1" width="5" height="5" rx="1.5" stroke="currentColor" strokeWidth="1.4" />
+                          <rect x="1" y="8" width="5" height="5" rx="1.5" stroke="currentColor" strokeWidth="1.4" />
+                          <rect x="8" y="8" width="5" height="5" rx="1.5" stroke="currentColor" strokeWidth="1.4" />
+                        </svg>
+                      ),
+                    },
+                    {
+                      text: "Everything is searchable, always",
+                      icon: (
+                        <svg width="13" height="13" viewBox="0 0 14 14" fill="none">
+                          <circle cx="6" cy="6" r="4" stroke="currentColor" strokeWidth="1.5" />
+                          <path d="M9.5 9.5L13 13" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                        </svg>
+                      ),
+                    },
+                    {
+                      text: "Ideas connect and build over time",
+                      icon: (
+                        <svg width="13" height="13" viewBox="0 0 14 14" fill="none">
+                          <circle cx="7" cy="7" r="1.8" fill="currentColor" />
+                          <circle cx="2" cy="2" r="1.3" stroke="currentColor" strokeWidth="1.2" />
+                          <circle cx="12" cy="2" r="1.3" stroke="currentColor" strokeWidth="1.2" />
+                          <circle cx="2" cy="12" r="1.3" stroke="currentColor" strokeWidth="1.2" />
+                          <circle cx="12" cy="12" r="1.3" stroke="currentColor" strokeWidth="1.2" />
+                          <path d="M3.2 3.2L5.5 5.5M8.5 5.5L10.8 3.2M3.2 10.8L5.5 8.5M8.5 8.5L10.8 10.8" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+                        </svg>
+                      ),
+                    },
+                  ].map((item, i, arr) => (
+                    <div key={i} className="flex gap-4">
+                      <div className="flex flex-col items-center">
+                        <div className="mt-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-black/20 bg-black/10 text-black">
+                          {item.icon}
+                        </div>
+                        {i < arr.length - 1 && (
+                          <div className="my-1.5 w-px flex-1 bg-black/25" style={{ minHeight: "20px" }} />
+                        )}
+                      </div>
+                      <div className="pb-5">
+                        <p className="text-[10px] font-semibold uppercase tracking-wider text-black/50">
+                          Step {i + 1}
+                        </p>
+                        <p className="mt-1 text-sm font-semibold text-black/85">{item.text}</p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
             </div>
-            <p className="max-w-xl text-sm leading-7 text-white/55">
-              Built for researchers, operators, creators, and anyone who needs more than scattered AI
-              chat logs.
-            </p>
+
           </div>
 
-          <div className="mt-8 grid gap-4 lg:grid-cols-3">
-            {workflow.map((item) => (
-              <article key={item.step} className="workflow-card">
-                <p className="text-sm text-[var(--accent)]">{item.step}</p>
-                <h3 className="mt-5 text-2xl font-semibold tracking-[-0.04em] text-white">{item.title}</h3>
-                <p className="mt-4 text-sm leading-7 text-white/55">{item.text}</p>
-              </article>
+          {/* Benefit cards */}
+          <div className="mt-8 grid grid-cols-1 gap-4 sm:grid-cols-3">
+            {[
+              {
+                eyebrow: "Productivity",
+                title: "8x faster every session",
+                body: "8 ready-made prompts injected directly into NotebookLM. One click to get structured answers without rewriting anything from scratch.",
+                stat: "8 prompts",
+                statLabel: "ready to use",
+                icon: (
+                  <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+                    <path d="M9 1.5L11.5 7H17L12.5 10.5L14.5 16L9 12.5L3.5 16L5.5 10.5L1 7H6.5L9 1.5Z" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
+                  </svg>
+                ),
+              },
+              {
+                eyebrow: "Precision",
+                title: "Richer, more organized results",
+                body: "Capture insights from any AI and save by notebook automatically. Never lose an important finding between sessions.",
+                stat: "100%",
+                statLabel: "of answers saved",
+                icon: (
+                  <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+                    <path d="M3 9.5l4 4L15 4" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                ),
+              },
+              {
+                eyebrow: "Learning",
+                title: "Knowledge that grows with you",
+                body: "Linked notes, idea graph, and native Zettelkasten. Each session builds on the last — NotebookLM becomes your second memory.",
+                stat: "∞",
+                statLabel: "note connections",
+                icon: (
+                  <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+                    <circle cx="9" cy="9" r="2.5" stroke="currentColor" strokeWidth="1.5" />
+                    <circle cx="3" cy="3" r="1.8" stroke="currentColor" strokeWidth="1.4" />
+                    <circle cx="15" cy="3" r="1.8" stroke="currentColor" strokeWidth="1.4" />
+                    <circle cx="3" cy="15" r="1.8" stroke="currentColor" strokeWidth="1.4" />
+                    <circle cx="15" cy="15" r="1.8" stroke="currentColor" strokeWidth="1.4" />
+                    <path d="M4.5 4.5L7 7M11 7l2.5-2.5M4.5 13.5L7 11M11 11l2.5 2.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+                  </svg>
+                ),
+              },
+            ].map((card) => (
+              <div
+                key={card.title}
+                className="relative flex flex-col justify-between overflow-hidden rounded-2xl border border-white/8 bg-white/3 p-6"
+              >
+                {/* Top row */}
+                <div>
+                  <div className="flex items-start justify-between">
+                    <span className="text-[10px] uppercase tracking-[0.22em] text-white/35">{card.eyebrow}</span>
+                    <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-(--accent)/25 bg-(--accent)/10 text-(--accent)">
+                      {card.icon}
+                    </div>
+                  </div>
+                  <h3 className="mt-4 text-lg font-semibold leading-snug tracking-[-0.03em] text-white">
+                    {card.title}
+                  </h3>
+                  <p className="mt-3 text-sm leading-6 text-white/50">{card.body}</p>
+                </div>
+                {/* Bottom stat */}
+                <div className="mt-6 flex items-end justify-between border-t border-white/6 pt-4">
+                  <div>
+                    <p className="text-2xl font-bold tracking-tight text-(--accent)">{card.stat}</p>
+                    <p className="mt-0.5 text-[11px] text-white/35">{card.statLabel}</p>
+                  </div>
+                  <span className="rounded-full border border-white/8 bg-white/4 px-2.5 py-1 text-[10px] text-white/30">
+                    + NotebookLM
+                  </span>
+                </div>
+              </div>
             ))}
           </div>
         </section>
 
-        <section
-          id="cta"
-          className="mt-10 rounded-[2.25rem] border border-white/8 bg-[linear-gradient(180deg,rgba(255,255,255,0.035),rgba(255,255,255,0.01))] px-6 py-10 sm:px-8">
-          <div className="flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
-            <div className="max-w-3xl">
-              <p className="text-[11px] uppercase tracking-[0.24em] text-white/35">Launch with structure</p>
-              <h2 className="mt-4 text-4xl font-semibold tracking-[-0.05em] text-white sm:text-5xl">
-                If NotebookLM is where you think, MindDock is how you keep that thinking alive.
-              </h2>
-            </div>
-
-            <div className="flex flex-col gap-3 sm:flex-row">
-              <a className="cta-primary" href="mailto:hello@minddock.ai">
-                Contact the team
-              </a>
-              <a className="cta-secondary" href="https://github.com/Tteuz17/minddock-main-new">
-                View the project
-              </a>
-            </div>
-          </div>
-        </section>
       </div>
+
+      <FeaturesScrollSection />
+
+      <PricingSection />
+
+      <FAQSection />
+
+      <CTASection />
+
+      <LandingFooter />
+
     </main>
   )
 }

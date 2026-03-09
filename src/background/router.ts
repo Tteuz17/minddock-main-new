@@ -40,9 +40,7 @@ type Handler = (
   sender: MessageSender
 ) => Promise<StandardResponse>
 
-// Temporary operational override requested by user:
-// disable daily import gating until product policy is re-enabled.
-const IMPORT_LIMIT_DISABLED = true
+const IMPORT_LIMIT_DISABLED = false
 const RESYNC_TOTAL_BUDGET_MS = 90_000
 const RESYNC_TOTAL_BUDGET_SECONDS = Math.ceil(RESYNC_TOTAL_BUDGET_MS / 1000)
 const RESYNC_PROGRESS_EVENT = "MINDDOCK_RESYNC_PROGRESS"

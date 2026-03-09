@@ -7,28 +7,30 @@ import "~/background"
 import { authManager } from "~/background/auth-manager"
 import { router } from "~/background/router"
 import { storageManager } from "~/background/storage-manager"
-import {
-  buildNotebookAccountKey,
-  buildScopedStorageKey,
-  isDefaultNotebookAccountKey,
-  normalizeAccountEmail,
-  normalizeAuthUser
-} from "~/lib/notebook-account-scope"
 import type { ChromeMessage, ChromeMessageResponse } from "~/lib/types"
+import {
+  getFolders,
+  saveSnippet,
+  DEFAULT_FOLDERS,
+} from "~/services/highlight-storage"
 
 const MINDDOCK_SELECTION_CAPTURE_MENU_ID = "MINDDOCK_SELECT_CAPTURE"
+const MINDDOCK_HIGHLIGHT_PARENT_ID = "MINDDOCK_HIGHLIGHT_PARENT"
+const MINDDOCK_FOLDER_PREFIX = "MINDDOCK_FOLDER_"
 const LEGACY_SNIPE_MENU_ID = "minddock_snipe"
-const SETTINGS_KEY = "minddock_settings"
-const AUTH_USER_KEY = "nexus_auth_user"
-const ACCOUNT_EMAIL_KEY = "nexus_notebook_account_email"
-const TOKEN_STORAGE_KEY = "notebooklm_session"
-const DEFAULT_NOTEBOOK_KEY = "nexus_default_notebook_id"
-const LEGACY_DEFAULT_NOTEBOOK_KEY = "minddock_default_notebook"
-let ensureSelectionMenuInFlight: Promise<void> | null = null
 
 void authManager.initializeSession().catch((error) => {
   console.warn("[MindDock] Falha ao inicializar sessao:", error)
 })
+
+function removeContextMenu(menuId: string): Promise<void> {
+  return new Promise((resolve) => {
+    chrome.contextMenus.remove(menuId, () => {
+      void chrome.runtime.lastError
+      resolve()
+    })
+  })
+}
 
 function createContextMenu(options: chrome.contextMenus.CreateProperties): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -43,36 +45,41 @@ function createContextMenu(options: chrome.contextMenus.CreateProperties): Promi
 }
 
 async function ensureMindDockSelectionContextMenu() {
-  if (ensureSelectionMenuInFlight) {
-    return ensureSelectionMenuInFlight
-  }
+  // Remove legacy items
+  await removeContextMenu(MINDDOCK_SELECTION_CAPTURE_MENU_ID)
+  await removeContextMenu(LEGACY_SNIPE_MENU_ID)
+  await removeContextMenu(MINDDOCK_HIGHLIGHT_PARENT_ID)
 
-  ensureSelectionMenuInFlight = (async () => {
-    await new Promise<void>((resolve) => {
-      chrome.contextMenus.remove(MINDDOCK_SELECTION_CAPTURE_MENU_ID, () => {
-        void chrome.runtime.lastError
-        resolve()
-      })
-    })
-    await new Promise<void>((resolve) => {
-      chrome.contextMenus.remove(LEGACY_SNIPE_MENU_ID, () => {
-        void chrome.runtime.lastError
-        resolve()
-      })
-    })
+  const folders = await getFolders().catch(() => DEFAULT_FOLDERS)
 
-    await createContextMenu({
-      id: MINDDOCK_SELECTION_CAPTURE_MENU_ID,
-      title: "MindDock: Enviar para NotebookLM",
-      contexts: ["selection"]
-    })
-
-    console.log("[MindDock] Context menu de selecao registrado.")
-  })().finally(() => {
-    ensureSelectionMenuInFlight = null
+  // Parent item
+  await createContextMenu({
+    id: MINDDOCK_HIGHLIGHT_PARENT_ID,
+    title: "Save highlight — MindDock",
+    contexts: ["selection"],
   })
 
-  return ensureSelectionMenuInFlight
+  // One submenu item per folder
+  for (const folder of folders) {
+    await createContextMenu({
+      id: `${MINDDOCK_FOLDER_PREFIX}${folder.id}`,
+      parentId: MINDDOCK_HIGHLIGHT_PARENT_ID,
+      title: folder.name,
+      contexts: ["selection"],
+    }).catch(() => {})
+  }
+
+  // Separator + "Send to NotebookLM" fallback
+  await createContextMenu({
+    id: `${MINDDOCK_FOLDER_PREFIX}notebooklm`,
+    parentId: MINDDOCK_HIGHLIGHT_PARENT_ID,
+    title: "Send to NotebookLM directly",
+    contexts: ["selection"],
+  }).catch(() => {})
+}
+
+async function rebuildHighlightContextMenu() {
+  await ensureMindDockSelectionContextMenu()
 }
 
 function notifySelectionNeedsNotebook() {
@@ -95,76 +102,25 @@ function notifySelectionNeedsNotebook() {
 }
 
 async function resolveDefaultNotebookIdForSelection(): Promise<string | null> {
-  const snapshot = (await chrome.storage.local.get([
-    SETTINGS_KEY,
-    AUTH_USER_KEY,
-    ACCOUNT_EMAIL_KEY,
-    TOKEN_STORAGE_KEY,
-    DEFAULT_NOTEBOOK_KEY,
-    LEGACY_DEFAULT_NOTEBOOK_KEY
-  ])) as Record<string, unknown>
-
-  const settings =
-    typeof snapshot[SETTINGS_KEY] === "object" && snapshot[SETTINGS_KEY] !== null
-      ? (snapshot[SETTINGS_KEY] as Record<string, unknown>)
-      : {}
-
-  const session =
-    typeof snapshot[TOKEN_STORAGE_KEY] === "object" && snapshot[TOKEN_STORAGE_KEY] !== null
-      ? (snapshot[TOKEN_STORAGE_KEY] as Record<string, unknown>)
-      : {}
-
-  const accountEmail = normalizeAccountEmail(
-    settings.notebookAccountEmail ?? snapshot[ACCOUNT_EMAIL_KEY] ?? session.accountEmail
-  )
-  const authUser = normalizeAuthUser(
-    settings.authUser ?? settings.notebookAuthUser ?? snapshot[AUTH_USER_KEY] ?? session.authUser
-  )
-  const accountKey = buildNotebookAccountKey({ accountEmail, authUser })
-
-  const defaultByAccount =
-    typeof settings.defaultNotebookByAccount === "object" && settings.defaultNotebookByAccount !== null
-      ? (settings.defaultNotebookByAccount as Record<string, unknown>)
-      : {}
-  const fromScopedSettings = String(defaultByAccount[accountKey] ?? "").trim()
-  if (fromScopedSettings) {
-    return fromScopedSettings
+  const settings = await storageManager.getSettings()
+  const fromSettings = String(settings.defaultNotebookId ?? "").trim()
+  if (fromSettings) {
+    return fromSettings
   }
 
-  const scopedDefaultKey = buildScopedStorageKey(DEFAULT_NOTEBOOK_KEY, accountKey)
-  const scopedLegacyDefaultKey = buildScopedStorageKey(LEGACY_DEFAULT_NOTEBOOK_KEY, accountKey)
-  const scopedSnapshot = await chrome.storage.local.get([scopedDefaultKey, scopedLegacyDefaultKey])
+  const snapshot = await chrome.storage.local.get([
+    "nexus_default_notebook_id",
+    "minddock_default_notebook"
+  ])
 
-  const fromScopedCanonical = String(scopedSnapshot[scopedDefaultKey] ?? "").trim()
-  if (fromScopedCanonical) {
-    return fromScopedCanonical
-  }
-
-  const fromScopedLegacy = String(scopedSnapshot[scopedLegacyDefaultKey] ?? "").trim()
-  if (fromScopedLegacy) {
-    return fromScopedLegacy
-  }
-
-  if (isDefaultNotebookAccountKey(accountKey)) {
-    const fromSettings = String(settings.defaultNotebookId ?? "").trim()
-    if (fromSettings) {
-      return fromSettings
-    }
-  }
-
-  const fromCanonical = String(snapshot[DEFAULT_NOTEBOOK_KEY] ?? "").trim()
+  const fromCanonical = String(snapshot.nexus_default_notebook_id ?? "").trim()
   if (fromCanonical) {
     return fromCanonical
   }
 
-  const fromLegacy = String(snapshot[LEGACY_DEFAULT_NOTEBOOK_KEY] ?? "").trim()
+  const fromLegacy = String(snapshot.minddock_default_notebook ?? "").trim()
   if (fromLegacy) {
     return fromLegacy
-  }
-
-  const fromSettings = String(settings.defaultNotebookId ?? "").trim()
-  if (fromSettings) {
-    return fromSettings
   }
 
   return null
@@ -259,53 +215,47 @@ async function captureSelectionFromContextMenu(
   contextMenuInfo: chrome.contextMenus.OnClickData,
   sourceTabRecord?: chrome.tabs.Tab
 ) {
-  const clickedMenuId = String(contextMenuInfo.menuItemId ?? "")
-  if (clickedMenuId !== MINDDOCK_SELECTION_CAPTURE_MENU_ID && clickedMenuId !== LEGACY_SNIPE_MENU_ID) {
-    return
-  }
-
+  const menuId = String(contextMenuInfo.menuItemId)
   const selectedTextContent = String(contextMenuInfo.selectionText ?? "").trim()
-  if (!selectedTextContent) {
-    console.info("[MindDock] Clique direito sem texto selecionado; capture ignorada.")
-    if (chrome.notifications?.create) {
-      const manifest = chrome.runtime.getManifest()
-      const iconUrl = manifest.icons?.["48"] ?? manifest.icons?.["32"] ?? manifest.icons?.["16"] ?? ""
-      if (iconUrl) {
-        chrome.notifications.create({
-          type: "basic",
-          iconUrl,
-          title: "MindDock",
-          message: "Selecione um texto antes de usar 'Enviar para NotebookLM'."
-        })
-      }
-    }
-    return
-  }
+  if (!selectedTextContent) return
 
   const tabTitle = String(sourceTabRecord?.title ?? "").trim()
   const sourceUrl = String(sourceTabRecord?.url ?? "").trim()
-  const timestampLabel = buildCaptureTimestampLabel()
-  const sourceTitle = tabTitle
-    ? `Selection - ${tabTitle} - ${timestampLabel}`
-    : `Selection - MindDock - ${timestampLabel}`
-  const sourceBody = [
-    `Fonte: ${tabTitle || "Selection"}`,
-    `URL: ${sourceUrl || "N/A"}`,
-    "",
-    selectedTextContent
-  ].join("\n")
 
-  await chrome.storage.local.set({
-    minddock_pending_selection: {
-      text: sourceBody,
-      sourceUrl,
-      sourceTitle,
-      savedAt: Date.now()
+  // Save to a highlight folder
+  if (menuId.startsWith(MINDDOCK_FOLDER_PREFIX)) {
+    const folderId = menuId.slice(MINDDOCK_FOLDER_PREFIX.length)
+
+    if (folderId === "notebooklm") {
+      // "Send to NotebookLM directly" option — original behavior
+      const timestampLabel = buildCaptureTimestampLabel()
+      const sourceTitle = tabTitle
+        ? `Selection - ${tabTitle} - ${timestampLabel}`
+        : `Selection - MindDock - ${timestampLabel}`
+      const sourceBody = [`Source: ${tabTitle || "Selection"}`, `URL: ${sourceUrl || "N/A"}`, "", selectedTextContent].join("\n")
+      await chrome.storage.local.set({
+        minddock_pending_selection: { text: sourceBody, sourceUrl, sourceTitle, savedAt: Date.now() },
+      })
+      await flushPendingSelection()
+      return
     }
-  })
-  const sentNow = await flushPendingSelection()
-  if (!sentNow) {
-    void sourceTabRecord
+
+    // Save snippet to local folder
+    await saveSnippet(folderId, selectedTextContent, tabTitle || "Untitled", sourceUrl)
+    return
+  }
+
+  // Legacy fallback: direct send
+  if (menuId === MINDDOCK_SELECTION_CAPTURE_MENU_ID) {
+    const timestampLabel = buildCaptureTimestampLabel()
+    const sourceTitle = tabTitle
+      ? `Selection - ${tabTitle} - ${timestampLabel}`
+      : `Selection - MindDock - ${timestampLabel}`
+    const sourceBody = [`Source: ${tabTitle || "Selection"}`, `URL: ${sourceUrl || "N/A"}`, "", selectedTextContent].join("\n")
+    await chrome.storage.local.set({
+      minddock_pending_selection: { text: sourceBody, sourceUrl, sourceTitle, savedAt: Date.now() },
+    })
+    await flushPendingSelection()
   }
 }
 
@@ -328,12 +278,18 @@ chrome.runtime.onStartup?.addListener(() => {
   void ensureMindDockSelectionContextMenu()
 })
 
-void ensureMindDockSelectionContextMenu().catch((error) => {
-  console.warn("[MindDock] Falha ao registrar menu de selecao:", error)
-})
-
 chrome.contextMenus.onClicked.addListener((contextMenuInfo, sourceTabRecord) => {
   void captureSelectionFromContextMenu(contextMenuInfo, sourceTabRecord)
+})
+
+// Register context menus every time the service worker starts (MV3 lifecycle)
+void ensureMindDockSelectionContextMenu().catch(() => {})
+
+// Rebuild context menu whenever highlight folders change
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === "local" && changes["minddock_highlight_folders"]) {
+    void rebuildHighlightContextMenu()
+  }
 })
 
 authManager.onAuthStateChange((user) => {

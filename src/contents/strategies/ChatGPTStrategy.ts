@@ -1,11 +1,13 @@
 import type { CSSProperties } from "react"
 
-import type { ContentStrategy, StrategyMenuAlign, StrategyPlacement } from "./types"
-import {
-  queryFirstVisibleElement,
-  resolveFallbackPlacement,
-  resolveLeftOfAnchorPlacement
-} from "./dom-utils"
+import type { ContentStrategy, StrategyMenuAlign } from "./types"
+import { resolveFallbackPlacement } from "./dom-utils"
+
+const CHATGPT_MODEL_SWITCHER_SELECTORS = [
+  "button[data-testid='model-switcher-dropdown-button']",
+  "button[aria-label*='Model selector']",
+  "button[data-testid*='model-switcher']",
+] as const
 
 export class ChatGPTStrategy implements ContentStrategy {
   readonly id = "chatgpt"
@@ -23,20 +25,32 @@ export class ChatGPTStrategy implements ContentStrategy {
     return document.body
   }
 
+  // Do NOT inject into ChatGPT's React tree — use fixed positioning instead.
+  mountHost(_host: HTMLElement): boolean {
+    return false
+  }
+
   getStyles(): CSSProperties {
-    return this.resolvePlacement().style
+    // Dynamically track the model-switcher position on every placement update.
+    for (const selector of CHATGPT_MODEL_SWITCHER_SELECTORS) {
+      const anchor = document.querySelector(selector)
+      if (anchor) {
+        const rect = anchor.getBoundingClientRect()
+        if (rect.width > 0 && rect.height > 0) {
+          return {
+            position: "fixed",
+            top: `${Math.round(rect.top + (rect.height - 32) / 2)}px`,
+            left: `${Math.round(rect.right + 6)}px`,
+            zIndex: 2147483646,
+            pointerEvents: "auto"
+          }
+        }
+      }
+    }
+    return resolveFallbackPlacement().style
   }
 
   getMenuAlign(): StrategyMenuAlign {
-    return this.resolvePlacement().menuAlign
-  }
-
-  private resolvePlacement(): StrategyPlacement {
-    const anchor = queryFirstVisibleElement(["#conversation-header-actions"])
-    if (anchor) {
-      return resolveLeftOfAnchorPlacement(anchor.getBoundingClientRect(), 8)
-    }
-
-    return resolveFallbackPlacement()
+    return "left"
   }
 }
