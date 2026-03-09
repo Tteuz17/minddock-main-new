@@ -2,8 +2,37 @@ export const SOURCE_PANEL_TOGGLE_EVENT = "minddock:source-panel:toggle"
 export const SOURCE_PANEL_RESET_EVENT = "minddock:source-panel:reset"
 export const SOURCE_PANEL_EXPORT_EVENT = "minddock:source-panel:export"
 export const SOURCE_PANEL_REFRESH_EVENT = "minddock:source-panel:refresh"
+export const SOURCE_FILTER_APPLY_START_EVENT = "minddock:source-filters:apply-start"
+export const SOURCE_FILTER_APPLY_END_EVENT = "minddock:source-filters:apply-end"
 
 export type SourceFilterType = "All" | "PDFs" | "GDocs" | "Web" | "Text" | "YouTube"
+
+declare global {
+  interface Window {
+    __minddockSourceDebug?: {
+      timestamp: string
+      panelRootsCount: number
+      rootsCount: number
+      checkboxCandidates: number
+      selectorCandidates: number
+      linkCandidates: number
+      resolvedFromCheckbox: number
+      resolvedFromSelectors: number
+      resolvedFromLinks: number
+      finalRows: number
+      droppedReasons: Record<string, number>
+      sampleRows: Array<{
+        title: string
+        url: string
+        type: SourceFilterType
+        width: number
+        height: number
+        checkboxCount: number
+        textPreview: string
+      }>
+    }
+  }
+}
 
 const SOURCE_ROW_SELECTORS = [
   "[data-testid='source-list-item']",
@@ -17,6 +46,13 @@ const SOURCE_ROW_SELECTORS = [
 
 const TITLE_SELECTORS = ["[data-testid*='title']", "[title]", "a", "h3", "h4", "span", "p"] as const
 const CHECKBOX_SELECTORS = ["input[type='checkbox']", "[role='checkbox']", "[aria-checked]"] as const
+const ROW_BY_CHECKBOX_SELECTORS = [
+  "[data-testid='source-list-item']",
+  "[data-testid*='source-item']",
+  "[role='listitem']",
+  "li",
+  "[class*='source'][class*='item']"
+] as const
 
 export function getDeepRoots(): ParentNode[] {
   const roots: ParentNode[] = []
@@ -106,6 +142,61 @@ function normalize(text: string): string {
     .trim()
 }
 
+function bumpReason(debug: { droppedReasons: Record<string, number> }, key: string): void {
+  debug.droppedReasons[key] = (debug.droppedReasons[key] ?? 0) + 1
+}
+
+function extractFirstUrlFromText(input: string): string {
+  const match = String(input ?? "").match(/https?:\/\/[^\s)\]}>"']+/i)
+  return String(match?.[0] ?? "").trim()
+}
+
+function collectSourceSignals(row: HTMLElement): string {
+  const parts = new Set<string>()
+  const push = (value: unknown) => {
+    const normalized = normalize(String(value ?? ""))
+    if (normalized) {
+      parts.add(normalized)
+    }
+  }
+
+  push(extractSourceTitle(row))
+  push(extractSourceUrl(row))
+  push(row.innerText)
+  push(row.textContent)
+  push(row.getAttribute("aria-label"))
+  push(row.getAttribute("title"))
+  push(row.getAttribute("data-testid"))
+
+  const selector =
+    "img,svg,use,mat-icon,a[href],[src],[aria-label],[title],[alt],[data-testid],[data-icon],[icon-name]"
+  const nodes = Array.from(row.querySelectorAll(selector)).slice(0, 64)
+
+  for (const node of nodes) {
+    push(node.textContent)
+    push(node.getAttribute("aria-label"))
+    push(node.getAttribute("title"))
+    push(node.getAttribute("alt"))
+    push(node.getAttribute("data-testid"))
+    push(node.getAttribute("data-icon"))
+    push(node.getAttribute("icon-name"))
+
+    if (node instanceof HTMLAnchorElement) {
+      push(node.href)
+    } else {
+      push(node.getAttribute("href"))
+    }
+
+    if (node instanceof HTMLImageElement) {
+      push(node.src)
+    } else {
+      push(node.getAttribute("src"))
+    }
+  }
+
+  return Array.from(parts).join(" ")
+}
+
 export function extractSourceTitle(row: HTMLElement): string {
   for (const selector of TITLE_SELECTORS) {
     const candidate = row.querySelector(selector)
@@ -143,46 +234,512 @@ export function extractSourceUrl(row: HTMLElement): string {
 
 export function inferSourceType(row: HTMLElement): SourceFilterType {
   const title = normalize(extractSourceTitle(row))
-  const url = normalize(extractSourceUrl(row))
-  const snapshot = `${title} ${url}`
+  const directUrl = extractSourceUrl(row)
+  const localText = normalize(
+    [row.getAttribute("aria-label"), row.getAttribute("title"), row.getAttribute("data-testid")]
+      .filter(Boolean)
+      .join(" ")
+  )
+  const rawUrl = directUrl || extractFirstUrlFromText(`${title} ${localText}`)
+  const url = normalize(rawUrl)
+  
+  // Coleta contexto completo da linha + ancestrais (até 3 níveis)
+  const fullSnapshot = collectRowContextSnapshot(row)
+  const snapshot = normalize(fullSnapshot)
 
-  if (/youtube|youtu\.be|youtube\.com/.test(snapshot)) {
-    return "YouTube"
+  // Log detalhado para debug
+  const rowText = (row.textContent || "").trim().substring(0, 50)
+  console.log(`[inferSourceType] Row Text: "${rowText}" | Title: "${title}" | URL: "${directUrl}" | Snapshot length: ${snapshot.length}`)
+
+  // PRIORIDADE 1: GDOC (detecção expandida)
+  const gdocIndicators = {
+    hasDocsUrl: /docs\.google\.com\/(document|spreadsheets|presentation|forms)/.test(snapshot),
+    hasDriveUrl: /drive\.google\.com/.test(snapshot),
+    hasVndGoogleApps: /vnd\.google-apps/.test(snapshot),
+    hasGDocAttr: /\bgdoc\b|isgdoc|gdocid|data-gdoc-id/.test(snapshot),
+    hasGoogleDocText: /google doc|google document|google sheet|google slide|documento google/i.test(snapshot),
+    hasDocsInUrl: /docs\.google\.com/.test(directUrl),
+    hasDriveInUrl: /drive\.google\.com/.test(directUrl),
+    hasDocIcon: row.querySelector('[aria-label*="Google Doc" i], [title*="Google Doc" i], mat-icon[fonticon*="doc" i]') !== null,
+    // NOVO: Busca mais agressiva por "docs.google" em qualquer lugar
+    hasDocsAnywhere: snapshot.includes("docs.google") || snapshot.includes("drive.google")
   }
-
-  if (/\.pdf(\b|$)|\bpdf\b/.test(snapshot)) {
-    return "PDFs"
+  
+  // Log dos indicadores para debug
+  if (rowText.length > 0 && rowText !== "description") {
+    console.log(`[inferSourceType] GDoc Indicators:`, gdocIndicators)
   }
-
-  if (/docs\.google\.com\/document|\bgdoc\b|google doc/.test(snapshot)) {
+  
+  const isGDoc = Object.values(gdocIndicators).some(v => v === true)
+  
+  if (isGDoc) {
+    console.log(`✅ GDOC | Indicators:`, gdocIndicators)
     return "GDocs"
   }
 
-  if (/^https?:\/\//.test(url) || /https?:\/\//.test(snapshot)) {
+  // PRIORIDADE 2: YouTube
+  if (/youtube|youtu\.be|youtube\.com/.test(snapshot)) {
+    console.log(`✅ YouTube`)
+    return "YouTube"
+  }
+
+  // PRIORIDADE 3: PDF
+  if (/\.pdf(\b|$)|\bpdf\b|application\/pdf|adobe acrobat/.test(snapshot)) {
+    console.log(`✅ PDF`)
+    return "PDFs"
+  }
+
+  // PRIORIDADE 4: Web
+  if (
+    /^https?:\/\//.test(url) ||
+    /https?:\/\//.test(snapshot) ||
+    /\bweb\b|\bsite\b|\blink\b|\burl\b|globe|public/.test(snapshot)
+  ) {
+    console.log(`✅ Web`)
     return "Web"
   }
 
+  // FALLBACK: Text
+  console.log(`⚠️ TEXT (fallback)`)
   return "Text"
 }
 
-export function resolveSourceRows(): HTMLElement[] {
-  return queryDeepAll<HTMLElement>(SOURCE_ROW_SELECTORS).filter((row) => {
-    if (!isVisible(row)) {
-      return false
-    }
-    if (inInjectedTree(row)) {
-      return false
-    }
-
-    const hasCheckbox = CHECKBOX_SELECTORS.some((selector) => {
-      const found = row.querySelector(selector)
-      return found instanceof HTMLElement
-    })
-
-    return hasCheckbox
+/**
+ * Coleta contexto completo da linha + ancestrais para detecção precisa
+ */
+function collectRowContextSnapshot(row: HTMLElement): string {
+  const parts: string[] = []
+  
+  // 1. Título e URL da linha
+  parts.push(extractSourceTitle(row))
+  parts.push(extractSourceUrl(row))
+  
+  // 2. Busca TODOS os links dentro da linha (não só o primeiro)
+  const allLinks = Array.from(row.querySelectorAll("a[href]"))
+  allLinks.forEach(link => {
+    const href = (link as HTMLAnchorElement).href
+    parts.push(href)
+    // Adiciona também o texto do link
+    parts.push(link.textContent || "")
+    parts.push(link.getAttribute("aria-label") || "")
+    parts.push(link.getAttribute("title") || "")
   })
+  
+  // 3. Busca mat-icon (ícones do Material Design usados pelo NotebookLM)
+  const matIcons = Array.from(row.querySelectorAll("mat-icon"))
+  matIcons.forEach(icon => {
+    parts.push(icon.textContent || "")
+    parts.push(icon.getAttribute("fonticon") || "")
+    parts.push(icon.getAttribute("svgicon") || "")
+    parts.push(icon.getAttribute("aria-label") || "")
+  })
+  
+  // 4. Texto e atributos da linha
+  parts.push(row.innerText || "")
+  parts.push(row.textContent || "")
+  parts.push(row.getAttribute("aria-label") || "")
+  parts.push(row.getAttribute("title") || "")
+  parts.push(row.getAttribute("data-testid") || "")
+  parts.push(row.getAttribute("class") || "")
+  
+  // 5. Todos os atributos data-*
+  Array.from(row.attributes).forEach(attr => {
+    if (attr.name.startsWith("data-")) {
+      parts.push(`${attr.name}=${attr.value}`)
+    }
+  })
+  
+  // 6. Imagens dentro da linha
+  row.querySelectorAll("img[src]").forEach(img => {
+    parts.push((img as HTMLImageElement).src)
+    parts.push(img.getAttribute("alt") || "")
+  })
+  
+  // 7. Contexto dos ancestrais (até 4 níveis acima - aumentei de 3 para 4)
+  let ancestor = row.parentElement
+  let level = 0
+  
+  while (ancestor && level < 4) {
+    // Atributos importantes do ancestral
+    parts.push(ancestor.getAttribute("data-testid") || "")
+    parts.push(ancestor.getAttribute("class") || "")
+    parts.push(ancestor.getAttribute("aria-label") || "")
+    
+    // Links do ancestral (importante para GDocs que podem ter link no container)
+    ancestor.querySelectorAll("a[href]").forEach(link => {
+      const href = (link as HTMLAnchorElement).href
+      if (href.includes("docs.google.com") || href.includes("drive.google.com")) {
+        parts.push(href)
+      }
+    })
+    
+    // Atributos data-* do ancestral
+    Array.from(ancestor.attributes).forEach(attr => {
+      if (attr.name.startsWith("data-")) {
+        parts.push(`${attr.name}=${attr.value}`)
+      }
+    })
+    
+    ancestor = ancestor.parentElement
+    level++
+  }
+  
+  const fullContext = parts.filter(Boolean).join(" ")
+  
+  // Log detalhado para debug
+  const hasGoogleOrDoc = fullContext.toLowerCase().includes("google") || 
+                         fullContext.toLowerCase().includes("doc") ||
+                         fullContext.toLowerCase().includes("drive")
+  
+  if (hasGoogleOrDoc) {
+    console.log("[collectRowContextSnapshot] 🔍 Contexto com Google/Doc/Drive:")
+    console.log("  - Full context preview:", fullContext.substring(0, 300))
+    console.log("  - Direct URL:", extractSourceUrl(row))
+    console.log("  - All links found:", Array.from(row.querySelectorAll("a[href]")).map(a => (a as HTMLAnchorElement).href))
+  }
+  
+  return fullContext
 }
 
+export function resolveSourceRows(): HTMLElement[] {
+  const rows = new Set<HTMLElement>()
+  const FILTER_HIDDEN_ATTR = "minddockFilterHidden"
+  const CONTROL_CONTAINER_SELECTORS = [
+    "#minddock-source-actions-root",
+    "#minddock-source-filters-root",
+    "[data-minddock-target]",
+    "input[type='search']",
+    "input[placeholder*='Search']",
+    "input[placeholder*='Fontes']",
+    "input[placeholder*='Pesquise']",
+    "button[title*='Refresh']",
+    "button[title*='Export']",
+    "button[title*='Clear']"
+  ] as const
+
+  const sourcePanelRoots = queryDeepAll<HTMLElement>(["source-picker", ".source-panel"]).filter((element) =>
+    element.isConnected
+  )
+  const roots: ParentNode[] = getDeepRoots()
+  const debug = {
+    timestamp: new Date().toISOString(),
+    panelRootsCount: sourcePanelRoots.length,
+    rootsCount: roots.length,
+    checkboxCandidates: 0,
+    selectorCandidates: 0,
+    linkCandidates: 0,
+    resolvedFromCheckbox: 0,
+    resolvedFromSelectors: 0,
+    resolvedFromLinks: 0,
+    finalRows: 0,
+    droppedReasons: {} as Record<string, number>,
+    sampleRows: [] as Array<{
+      title: string
+      url: string
+      type: SourceFilterType
+      width: number
+      height: number
+      checkboxCount: number
+      textPreview: string
+    }>
+  }
+
+  const queryFromRoots = <T extends Element>(selectors: readonly string[]): T[] => {
+    const out: T[] = []
+    const seen = new Set<Element>()
+
+    for (const root of roots) {
+      for (const element of queryDeepAll<T>(selectors, root)) {
+        if (seen.has(element)) {
+          continue
+        }
+        seen.add(element)
+        out.push(element)
+      }
+    }
+
+    return out
+  }
+
+  const countCheckboxes = (element: HTMLElement): number =>
+    CHECKBOX_SELECTORS.reduce((count, selector) => count + element.querySelectorAll(selector).length, 0)
+
+  const countNestedRowCandidates = (element: HTMLElement): number => {
+    let count = 0
+    for (const selector of SOURCE_ROW_SELECTORS) {
+      try {
+        const nested = Array.from(element.querySelectorAll(selector)).filter(
+          (candidate) => candidate instanceof HTMLElement && candidate !== element
+        )
+        count += nested.length
+      } catch {
+        // ignore selector failure
+      }
+    }
+    return count
+  }
+
+  const looksLikeAtomicRow = (element: HTMLElement): boolean => {
+    const nestedRows = countNestedRowCandidates(element)
+    if (nestedRows > 0) {
+      return false
+    }
+
+    const checkboxCount = countCheckboxes(element)
+    if (checkboxCount > 1) {
+      return false
+    }
+
+    const textPreview = String(element.innerText || element.textContent || "")
+      .replace(/\s+/g, " ")
+      .trim()
+    if (textPreview.length > 340) {
+      return false
+    }
+
+    return true
+  }
+
+  const isControlContainer = (element: HTMLElement): boolean => {
+    if (inInjectedTree(element)) {
+      return true
+    }
+
+    return CONTROL_CONTAINER_SELECTORS.some((selector) => {
+      try {
+        return !!element.closest(selector)
+      } catch {
+        return false
+      }
+    })
+  }
+
+  const hasSourceLikeText = (element: HTMLElement): boolean => {
+    const text = normalize(String(element.innerText || element.textContent || ""))
+    const title = normalize(extractSourceTitle(element))
+    const href = normalize(extractSourceUrl(element))
+    const merged = [text, title, href].filter(Boolean).join(" ")
+
+    if (!merged || merged.length < 2) {
+      return false
+    }
+
+    if (/pesquise|search sources|fonte(s)? de pesquisa|sources search/.test(merged)) {
+      return false
+    }
+
+    if (/selecionar todas as fontes|select all sources/.test(merged)) {
+      return false
+    }
+
+    if (/save view|salvar visualizacao/.test(merged)) {
+      return false
+    }
+
+    return true
+  }
+
+  const looksLikeRowShape = (element: HTMLElement): boolean => {
+    const rect = element.getBoundingClientRect()
+    if (rect.width < 120) {
+      return false
+    }
+    if (rect.height < 12 || rect.height > 420) {
+      return false
+    }
+    return true
+  }
+
+  const resolveRowFromCheckbox = (checkbox: HTMLElement): HTMLElement | null => {
+    if (isControlContainer(checkbox)) {
+      bumpReason(debug, "checkbox:control-container")
+      return null
+    }
+
+    // Preferred path: nearest source row selectors that contains only this checkbox.
+    for (const selector of ROW_BY_CHECKBOX_SELECTORS) {
+      const found = checkbox.closest(selector)
+      if (!(found instanceof HTMLElement)) {
+        bumpReason(debug, "checkbox:not-htmlelement")
+        continue
+      }
+      if (isControlContainer(found)) {
+        bumpReason(debug, "checkbox:found-control-container")
+        continue
+      }
+      if (!found.isConnected) {
+        bumpReason(debug, "checkbox:found-disconnected")
+        continue
+      }
+      if (countCheckboxes(found) !== 1) {
+        bumpReason(debug, "checkbox:found-not-single-checkbox")
+        continue
+      }
+      if (!looksLikeRowShape(found)) {
+        bumpReason(debug, "checkbox:found-shape-mismatch")
+        continue
+      }
+      if (!looksLikeAtomicRow(found)) {
+        bumpReason(debug, "checkbox:found-not-atomic-row")
+        continue
+      }
+      if (!hasSourceLikeText(found)) {
+        bumpReason(debug, "checkbox:found-no-source-text")
+        continue
+      }
+      return found
+    }
+
+    // Generic fallback: climb up until parent starts containing multiple checkboxes.
+    let current: HTMLElement | null = checkbox
+    let depth = 0
+    let best: HTMLElement | null = null
+    while (current && depth < 12) {
+      const parent = current.parentElement
+      if (!(parent instanceof HTMLElement)) {
+        bumpReason(debug, "checkbox:fallback-no-parent")
+        break
+      }
+
+      if (isControlContainer(current)) {
+        bumpReason(debug, "checkbox:fallback-control-container")
+        return null
+      }
+
+      if (!current.isConnected) {
+        bumpReason(debug, "checkbox:fallback-disconnected")
+        current = parent
+        depth++
+        continue
+      }
+
+      const selfCount = countCheckboxes(current)
+      const parentCount = countCheckboxes(parent)
+      const looksLikeRow = looksLikeRowShape(current)
+
+      if (selfCount === 1 && looksLikeRow && looksLikeAtomicRow(current) && hasSourceLikeText(current)) {
+        best = current
+      }
+
+      if (best && parentCount > selfCount) {
+        return best
+      }
+
+      current = parent
+      depth++
+    }
+
+    return best
+  }
+
+  // 1) Primary clean-room strategy: one resolved row per checkbox.
+  const checkboxElements = queryFromRoots<HTMLElement>(CHECKBOX_SELECTORS)
+  debug.checkboxCandidates = checkboxElements.length
+  for (const checkbox of checkboxElements) {
+    if (!(checkbox instanceof HTMLElement) || !checkbox.isConnected) {
+      bumpReason(debug, "checkbox:candidate-invalid")
+      continue
+    }
+
+    const row = resolveRowFromCheckbox(checkbox)
+    if (row) {
+      rows.add(row)
+      debug.resolvedFromCheckbox++
+    }
+  }
+
+  // 2) Fallback to selector-based detection.
+  if (rows.size === 0) {
+    const selectorRows = queryFromRoots<HTMLElement>(SOURCE_ROW_SELECTORS)
+    debug.selectorCandidates = selectorRows.length
+    for (const row of selectorRows) {
+      if (isControlContainer(row)) {
+        bumpReason(debug, "selector:control-container")
+        continue
+      }
+      if (!row.isConnected) {
+        bumpReason(debug, "selector:disconnected")
+        continue
+      }
+      if (!looksLikeRowShape(row)) {
+        bumpReason(debug, "selector:shape-mismatch")
+        continue
+      }
+      if (!looksLikeAtomicRow(row)) {
+        bumpReason(debug, "selector:not-atomic-row")
+        continue
+      }
+
+      const hasCheckbox = CHECKBOX_SELECTORS.some((selector) => {
+        const found = row.querySelector(selector)
+        return found instanceof HTMLElement
+      })
+      if (!hasSourceLikeText(row) || (!hasCheckbox && !extractSourceUrl(row))) {
+        bumpReason(debug, "selector:no-source-signals")
+        continue
+      }
+
+      rows.add(row)
+      debug.resolvedFromSelectors++
+    }
+  }
+
+  // 3) Last fallback: resolve from links inside source picker.
+  if (rows.size === 0) {
+    const linkCandidates = queryFromRoots<HTMLElement>(["a[href]"])
+    debug.linkCandidates = linkCandidates.length
+    for (const link of linkCandidates) {
+      if (isControlContainer(link)) {
+        bumpReason(debug, "link:control-container")
+        continue
+      }
+
+      let current: HTMLElement | null = link
+      let depth = 0
+      while (current && depth < 8) {
+        if (
+          current.isConnected &&
+          looksLikeRowShape(current) &&
+          looksLikeAtomicRow(current) &&
+          hasSourceLikeText(current) &&
+          countCheckboxes(current) <= 1
+        ) {
+          rows.add(current)
+          debug.resolvedFromLinks++
+          break
+        }
+
+        current = current.parentElement
+        depth++
+      }
+    }
+  }
+
+  const finalRows = Array.from(rows)
+  debug.finalRows = finalRows.length
+  debug.sampleRows = finalRows.slice(0, 12).map((row) => {
+    const rect = row.getBoundingClientRect()
+    const title = extractSourceTitle(row)
+    const url = extractSourceUrl(row)
+    const textPreview = String(row.innerText || row.textContent || "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 140)
+
+    return {
+      title,
+      url,
+      type: inferSourceType(row),
+      width: Number(rect.width.toFixed(1)),
+      height: Number(rect.height.toFixed(1)),
+      checkboxCount: countCheckboxes(row),
+      textPreview
+    }
+  })
+
+  window.__minddockSourceDebug = debug
+  return finalRows
+}
 export function dispatchSourcePanelToggle(isVisibleNext: boolean): void {
   window.dispatchEvent(
     new CustomEvent(SOURCE_PANEL_TOGGLE_EVENT, {
@@ -201,6 +758,22 @@ export function dispatchSourcePanelExport(): void {
 
 export function dispatchSourcePanelRefresh(): void {
   window.dispatchEvent(new CustomEvent(SOURCE_PANEL_REFRESH_EVENT))
+}
+
+export function dispatchSourceFilterApplyStart(): void {
+  window.dispatchEvent(
+    new CustomEvent(SOURCE_FILTER_APPLY_START_EVENT, {
+      detail: { timestamp: Date.now() }
+    })
+  )
+}
+
+export function dispatchSourceFilterApplyEnd(): void {
+  window.dispatchEvent(
+    new CustomEvent(SOURCE_FILTER_APPLY_END_EVENT, {
+      detail: { timestamp: Date.now() }
+    })
+  )
 }
 
 export function clearNativeSourceSearchInputs(): void {
@@ -1210,3 +1783,4 @@ export async function waitForCreatedNotebookId(
     return nextNotebookId
   }, timeoutMs, 200)
 }
+

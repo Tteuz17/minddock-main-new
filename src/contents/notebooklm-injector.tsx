@@ -1,4 +1,5 @@
 import type { PlasmoCSConfig } from "plasmo"
+import { Component, isValidElement, type ErrorInfo, type ReactNode } from "react"
 import { createRoot, type Root } from "react-dom/client"
 import "~/styles/globals.css"
 import { getFolders, saveSnippet, createFolder, FOLDER_ICONS } from "~/services/highlight-storage"
@@ -8,6 +9,8 @@ import { SourceDownloadPanel } from "../../contents/notebooklm/SourceDownloadPan
 import { SourceFilterPanel } from "../../contents/notebooklm/SourceFilterPanel"
 import { ZettelButton } from "../../contents/notebooklm/ZettelButton"
 import {
+  SOURCE_FILTER_APPLY_END_EVENT,
+  SOURCE_FILTER_APPLY_START_EVENT,
   getDeepRoots,
   isVisible,
   resolveSourceActionsHost,
@@ -40,6 +43,39 @@ interface NotebooklmInjectorGlobalState {
   cleanup?: (() => void) | null
 }
 
+interface InjectionErrorBoundaryProps {
+  targetKey: string
+  children: ReactNode
+}
+
+interface InjectionErrorBoundaryState {
+  hasError: boolean
+}
+
+class InjectionErrorBoundary extends Component<InjectionErrorBoundaryProps, InjectionErrorBoundaryState> {
+  state: InjectionErrorBoundaryState = { hasError: false }
+
+  static getDerivedStateFromError(): InjectionErrorBoundaryState {
+    return { hasError: true }
+  }
+
+  componentDidCatch(error: unknown, errorInfo: ErrorInfo): void {
+    console.error("[MindDock] NotebookLM target render failed", {
+      targetKey: this.props.targetKey,
+      error,
+      stack: errorInfo.componentStack
+    })
+  }
+
+  render(): ReactNode {
+    if (this.state.hasError) {
+      return null
+    }
+
+    return this.props.children
+  }
+}
+
 const TARGETS: readonly InjectionTarget[] = [
   {
     key: "source-actions",
@@ -68,6 +104,8 @@ let refreshTimer: number | null = null
 let agilePositionTimer: number | null = null
 let focusThreadsPositionTimer: number | null = null
 let zettelObserver: MutationObserver | null = null
+let sourceFilterApplyDepth = 0
+let sourceFilterApplyLockUntil = 0
 const INJECTOR_GLOBAL_KEY = "__MINDDOCK_NOTEBOOKLM_INJECTOR_STATE__"
 
 function resolveGlobalState(): NotebooklmInjectorGlobalState {
@@ -166,13 +204,50 @@ function mountRoot(target: InjectionTarget, rootElement: HTMLElement, host: HTML
 
   const active = mountedRoots.get(target.key)
   if (active) {
-    active.root.render(target.render())
     return
   }
 
   const root = createRoot(rootElement)
-  root.render(target.render())
+  root.render(
+    <InjectionErrorBoundary targetKey={target.key}>
+      {renderSafely(target.key, target.render)}
+    </InjectionErrorBoundary>
+  )
   mountedRoots.set(target.key, { root, host })
+}
+
+function renderSafely(targetKey: string, renderFn: () => ReactNode): ReactNode {
+  try {
+    const node = renderFn()
+    if (!isValidElement(node)) {
+      console.error("[MindDock] Invalid React node returned from render function", {
+        targetKey,
+        nodeType: typeof node,
+        node
+      })
+      return null
+    }
+
+    const elementType = node.type as unknown
+    const hasValidType =
+      typeof elementType === "string" ||
+      typeof elementType === "function" ||
+      typeof elementType === "symbol" ||
+      (typeof elementType === "object" && elementType !== null)
+
+    if (!hasValidType) {
+      console.error("[MindDock] Invalid React element type detected", {
+        targetKey,
+        elementType
+      })
+      return null
+    }
+
+    return node
+  } catch (error) {
+    console.error("[MindDock] Failed to create React node", { targetKey, error })
+    return null
+  }
 }
 
 function cleanupDetachedRoots(): void {
@@ -184,6 +259,52 @@ function cleanupDetachedRoots(): void {
     mounted.root.unmount()
     mountedRoots.delete(key)
   }
+}
+
+function isSourceFilterApplyLocked(): boolean {
+  return sourceFilterApplyDepth > 0 || Date.now() < sourceFilterApplyLockUntil
+}
+
+function onSourceFilterApplyStart(): void {
+  sourceFilterApplyDepth += 1
+  sourceFilterApplyLockUntil = Date.now() + 1200
+}
+
+function onSourceFilterApplyEnd(): void {
+  sourceFilterApplyDepth = Math.max(0, sourceFilterApplyDepth - 1)
+  sourceFilterApplyLockUntil = Date.now() + 320
+}
+
+function shouldSkipRefreshForMutations(mutations: MutationRecord[]): boolean {
+  if (isSourceFilterApplyLocked()) {
+    return true
+  }
+
+  const ignoredRootSelector =
+    "#minddock-source-actions-root, #minddock-source-filters-root, [data-minddock-target]"
+
+  const allInsideMindDockRoots = mutations.every((record) => {
+    const target = record.target instanceof Element ? record.target : null
+    if (!target) {
+      return false
+    }
+
+    if (target.closest(ignoredRootSelector)) {
+      return true
+    }
+
+    const added = Array.from(record.addedNodes).filter((node): node is Element => node instanceof Element)
+    const removed = Array.from(record.removedNodes).filter((node): node is Element => node instanceof Element)
+    const allNodes = [...added, ...removed]
+
+    if (allNodes.length === 0) {
+      return false
+    }
+
+    return allNodes.every((node) => node.closest(ignoredRootSelector))
+  })
+
+  return allInsideMindDockRoots
 }
 
 // ─── Agile Bar ────────────────────────────────────────────────────────────────
@@ -203,13 +324,21 @@ function mountAgileBar(): void {
 
   const mounted = mountedRoots.get("agile-bar")
   if (mounted) {
-    mounted.root.render(<AgilePromptsBar />)
+    mounted.root.render(
+      <InjectionErrorBoundary targetKey="agile-bar">
+        {renderSafely("agile-bar", () => <AgilePromptsBar />)}
+      </InjectionErrorBoundary>
+    )
     updateAgileBarPosition()
     return
   }
 
   const root = createRoot(rootElement)
-  root.render(<AgilePromptsBar />)
+  root.render(
+    <InjectionErrorBoundary targetKey="agile-bar">
+      {renderSafely("agile-bar", () => <AgilePromptsBar />)}
+    </InjectionErrorBoundary>
+  )
   mountedRoots.set("agile-bar", { root, host: rootElement })
   updateAgileBarPosition()
 }
@@ -311,13 +440,21 @@ function mountFocusThreadsBar(): void {
 
   const mounted = mountedRoots.get("focus-threads")
   if (mounted) {
-    mounted.root.render(<FocusThreadsBar />)
+    mounted.root.render(
+      <InjectionErrorBoundary targetKey="focus-threads">
+        {renderSafely("focus-threads", () => <FocusThreadsBar />)}
+      </InjectionErrorBoundary>
+    )
     updateFocusThreadsBarPosition()
     return
   }
 
   const root = createRoot(rootElement)
-  root.render(<FocusThreadsBar />)
+  root.render(
+    <InjectionErrorBoundary targetKey="focus-threads">
+      {renderSafely("focus-threads", () => <FocusThreadsBar />)}
+    </InjectionErrorBoundary>
+  )
   mountedRoots.set("focus-threads", { root, host: rootElement })
   updateFocusThreadsBarPosition()
 }
@@ -358,7 +495,11 @@ function injectZettelButtons(): void {
     buttonHost.style.marginLeft = "8px"
 
     const root = createRoot(buttonHost)
-    root.render(<ZettelButton content={node.textContent ?? ""} />)
+    root.render(
+      <InjectionErrorBoundary targetKey="zettel-button">
+        {renderSafely("zettel-button", () => <ZettelButton content={node.textContent ?? ""} />)}
+      </InjectionErrorBoundary>
+    )
     node.appendChild(buttonHost)
   })
 }
@@ -926,6 +1067,10 @@ function refreshUi(): void {
 }
 
 function scheduleRefresh(): void {
+  if (isSourceFilterApplyLocked()) {
+    return
+  }
+
   if (refreshTimer !== null) {
     window.clearTimeout(refreshTimer)
   }
@@ -942,7 +1087,10 @@ function startObservers(): void {
   }
 
   if (!domObserver) {
-    domObserver = new MutationObserver(() => {
+    domObserver = new MutationObserver((mutations) => {
+      if (shouldSkipRefreshForMutations(mutations)) {
+        return
+      }
       scheduleRefresh()
     })
 
@@ -974,6 +1122,8 @@ function startObservers(): void {
   window.addEventListener("resize", updateAgileBarPosition)
   window.addEventListener("scroll", updateAgileBarPosition, true)
   window.addEventListener("resize", updateFocusThreadsBarPosition)
+  window.addEventListener(SOURCE_FILTER_APPLY_START_EVENT, onSourceFilterApplyStart as EventListener)
+  window.addEventListener(SOURCE_FILTER_APPLY_END_EVENT, onSourceFilterApplyEnd as EventListener)
 
   document.addEventListener("mouseup", onHighlightMouseUp)
   document.addEventListener("keydown", onHighlightKeyDown)
@@ -1002,9 +1152,14 @@ function cleanup(): void {
     focusThreadsPositionTimer = null
   }
 
+  sourceFilterApplyDepth = 0
+  sourceFilterApplyLockUntil = 0
+
   window.removeEventListener("resize", updateAgileBarPosition)
   window.removeEventListener("scroll", updateAgileBarPosition, true)
   window.removeEventListener("resize", updateFocusThreadsBarPosition)
+  window.removeEventListener(SOURCE_FILTER_APPLY_START_EVENT, onSourceFilterApplyStart as EventListener)
+  window.removeEventListener(SOURCE_FILTER_APPLY_END_EVENT, onSourceFilterApplyEnd as EventListener)
 
   document.removeEventListener("mouseup", onHighlightMouseUp)
   document.removeEventListener("keydown", onHighlightKeyDown)
@@ -1049,4 +1204,8 @@ bootstrap()
 window.addEventListener("pagehide", cleanup)
 window.addEventListener("beforeunload", cleanup)
 
-export {}
+function NotebooklmInjectorEntrypoint() {
+  return null
+}
+
+export default NotebooklmInjectorEntrypoint
