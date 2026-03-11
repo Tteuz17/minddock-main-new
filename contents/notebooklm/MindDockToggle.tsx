@@ -83,129 +83,122 @@ export function MindDockToggle() {
   }
 
   return (
-    <motion.div
-      initial={{ opacity: 0, x: 24, scale: 0.88 }}
-      animate={{ opacity: 1, x: 0, scale: 1 }}
-      transition={{ delay: 0.6, type: "spring", stiffness: 260, damping: 22 }}>
-
-      <motion.button
-        onClick={toggle}
-        onHoverStart={() => setHovered(true)}
-        onHoverEnd={() => setHovered(false)}
-        whileTap={{ scale: 0.94 }}
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: "10px",
-          padding: "8px 12px 8px 10px",
-          borderRadius: "14px",
-          background: "rgba(0, 0, 0, 0.92)",
-          backdropFilter: "blur(24px)",
-          WebkitBackdropFilter: "blur(24px)",
-          border: enabled
-            ? "1px solid rgba(250, 204, 21, 0.35)"
-            : "1px solid rgba(255, 255, 255, 0.13)",
-          boxShadow: enabled
-            ? "0 0 0 1px rgba(250,204,21,0.08), 0 8px 32px rgba(0,0,0,0.7), 0 0 24px rgba(250,204,21,0.08)"
-            : "0 8px 32px rgba(0,0,0,0.6)",
-          cursor: "pointer",
-          outline: "none",
-          transition: "border 0.3s ease, box-shadow 0.3s ease",
-          userSelect: "none",
-        }}>
-
-        {/* Logo M */}
-        <motion.div
-          animate={{
-            background: enabled ? "#facc15" : "rgba(255,255,255,0.07)",
-            boxShadow: enabled
-              ? "0 0 10px rgba(250,204,21,0.5)"
-              : "none"
-          }}
-          transition={{ duration: 0.3 }}
+    <div style={{ display: "contents" }}>
+      <motion.div
+        initial={{ opacity: 0, x: 24, scale: 0.88 }}
+        animate={{ opacity: 1, x: 0, scale: 1 }}
+        transition={{ delay: 0.6, type: "spring", stiffness: 260, damping: 22 }}>
+        <motion.button
+          onClick={toggle}
+          onHoverStart={() => setHovered(true)}
+          onHoverEnd={() => setHovered(false)}
+          whileTap={{ scale: 0.94 }}
           style={{
-            width: "24px",
-            height: "24px",
-            borderRadius: "7px",
             display: "flex",
             alignItems: "center",
-            justifyContent: "center",
-            flexShrink: 0,
-            border: enabled ? "none" : "1px solid rgba(255,255,255,0.12)",
+            gap: "10px",
+            padding: "8px 12px 8px 10px",
+            borderRadius: "14px",
+            background: "rgba(0, 0, 0, 0.92)",
+            backdropFilter: "blur(24px)",
+            WebkitBackdropFilter: "blur(24px)",
+            border: enabled
+              ? "1px solid rgba(250, 204, 21, 0.35)"
+              : "1px solid rgba(255, 255, 255, 0.13)",
+            boxShadow: enabled
+              ? "0 0 0 1px rgba(250,204,21,0.08), 0 8px 32px rgba(0,0,0,0.7), 0 0 24px rgba(250,204,21,0.08)"
+              : "0 8px 32px rgba(0,0,0,0.6)",
+            cursor: "pointer",
+            outline: "none",
+            transition: "border 0.3s ease, box-shadow 0.3s ease",
+            userSelect: "none",
           }}>
-          <span style={{
-            color: enabled ? "#000" : "rgba(255,255,255,0.35)",
-            fontSize: "13px",
-            fontWeight: "800",
-            lineHeight: 1,
-            fontFamily: "Inter, system-ui, sans-serif",
-            transition: "color 0.3s ease",
-          }}>
-            M
-          </span>
-        </motion.div>
-
-        {/* Label */}
-        <AnimatePresence>
-          {(enabled || hovered) && (
-            <motion.span
-              initial={{ opacity: 0, width: 0 }}
-              animate={{ opacity: 1, width: "auto" }}
-              exit={{ opacity: 0, width: 0 }}
-              transition={{ duration: 0.2 }}
-              style={{
-                fontSize: "12px",
-                fontWeight: "500",
-                color: enabled ? "rgba(255,255,255,0.85)" : "rgba(255,255,255,0.35)",
-                fontFamily: "Inter, system-ui, sans-serif",
-                letterSpacing: "0.01em",
-                whiteSpace: "nowrap",
-                overflow: "hidden",
-                transition: "color 0.3s ease",
-              }}>
-              MindDock
-            </motion.span>
-          )}
-        </AnimatePresence>
-
-        {/* Toggle switch */}
-        <motion.div
-          animate={{
-            background: enabled
-              ? "rgba(250, 204, 21, 0.18)"
-              : "rgba(255,255,255,0.06)",
-            borderColor: enabled
-              ? "rgba(250, 204, 21, 0.45)"
-              : "rgba(255,255,255,0.14)"
-          }}
-          transition={{ duration: 0.25 }}
-          style={{
-            width: "34px",
-            height: "19px",
-            borderRadius: "100px",
-            border: "1px solid",
-            position: "relative",
-            flexShrink: 0,
-          }}>
+          {/* Logo M */}
           <motion.div
             animate={{
-              x: enabled ? 16 : 2,
-              background: enabled ? "#facc15" : "rgba(255,255,255,0.28)",
-              boxShadow: enabled
-                ? "0 0 6px rgba(250,204,21,0.7)"
-                : "none",
+              background: enabled ? "#facc15" : "rgba(255,255,255,0.07)",
+              boxShadow: enabled ? "0 0 10px rgba(250,204,21,0.5)" : "none"
             }}
-            transition={{ type: "spring", stiffness: 420, damping: 28 }}
+            transition={{ duration: 0.3 }}
             style={{
-              position: "absolute",
-              top: "2.5px",
-              width: "12px",
-              height: "12px",
-              borderRadius: "50%",
+              width: "24px",
+              height: "24px",
+              borderRadius: "7px",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              flexShrink: 0,
+              border: enabled ? "none" : "1px solid rgba(255,255,255,0.12)",
+            }}>
+            <span
+              style={{
+                color: enabled ? "#000" : "rgba(255,255,255,0.35)",
+                fontSize: "13px",
+                fontWeight: "800",
+                lineHeight: 1,
+                fontFamily: "Inter, system-ui, sans-serif",
+                transition: "color 0.3s ease",
+              }}>
+              M
+            </span>
+          </motion.div>
+
+          {/* Label */}
+          <AnimatePresence mode="wait">
+            {(enabled || hovered) && (
+              <motion.span
+                initial={{ opacity: 0, width: 0 }}
+                animate={{ opacity: 1, width: "auto" }}
+                exit={{ opacity: 0, width: 0 }}
+                transition={{ duration: 0.2 }}
+                style={{
+                  fontSize: "12px",
+                  fontWeight: "500",
+                  color: enabled ? "rgba(255,255,255,0.85)" : "rgba(255,255,255,0.35)",
+                  fontFamily: "Inter, system-ui, sans-serif",
+                  letterSpacing: "0.01em",
+                  whiteSpace: "nowrap",
+                  overflow: "hidden",
+                  transition: "color 0.3s ease",
+                }}>
+                MindDock
+              </motion.span>
+            )}
+          </AnimatePresence>
+
+          {/* Toggle switch */}
+          <motion.div
+            animate={{
+              background: enabled ? "rgba(250, 204, 21, 0.18)" : "rgba(255,255,255,0.06)",
+              borderColor: enabled ? "rgba(250, 204, 21, 0.45)" : "rgba(255,255,255,0.14)"
             }}
-          />
-        </motion.div>
-      </motion.button>
-    </motion.div>
+            transition={{ duration: 0.25 }}
+            style={{
+              width: "34px",
+              height: "19px",
+              borderRadius: "100px",
+              border: "1px solid",
+              position: "relative",
+              flexShrink: 0,
+            }}>
+            <motion.div
+              animate={{
+                x: enabled ? 16 : 2,
+                background: enabled ? "#facc15" : "rgba(255,255,255,0.28)",
+                boxShadow: enabled ? "0 0 6px rgba(250,204,21,0.7)" : "none",
+              }}
+              transition={{ type: "spring", stiffness: 420, damping: 28 }}
+              style={{
+                position: "absolute",
+                top: "2.5px",
+                width: "12px",
+                height: "12px",
+                borderRadius: "50%",
+              }}
+            />
+          </motion.div>
+        </motion.button>
+      </motion.div>
+    </div>
   )
 }

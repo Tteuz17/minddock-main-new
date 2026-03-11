@@ -5,8 +5,12 @@
   "description": "Transforma o Google NotebookLM num centro de conhecimento completo com importação de IA, Zettelkasten e Prompts Ágeis.",
   "private": true,
   "scripts": {
+    "postinstall": "node scripts/patch-framer-motion-poplayout.cjs",
+    "predev": "node scripts/patch-framer-motion-poplayout.cjs",
     "dev": "node --no-deprecation ./node_modules/plasmo/bin/index.mjs dev",
+    "prebuild": "node scripts/patch-framer-motion-poplayout.cjs",
     "build": "node --no-deprecation ./node_modules/plasmo/bin/index.mjs build",
+    "prepackage": "node scripts/patch-framer-motion-poplayout.cjs",
     "package": "node --no-deprecation ./node_modules/plasmo/bin/index.mjs package",
     "type-check": "tsc -p tsconfig.json --noEmit",
     "verify": "npm run type-check && npm run build"
@@ -84,7 +88,8 @@
       "webRequest",
       "alarms",
       "sidePanel",
-      "notifications"
+      "notifications",
+      "offscreen"
     ],
     "host_permissions": [
       "http://*/*",

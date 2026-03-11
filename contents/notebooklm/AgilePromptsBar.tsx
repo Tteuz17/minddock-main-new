@@ -172,7 +172,7 @@ export function AgilePromptsBar() {
 
   return (
     <div ref={containerRef} className="flex flex-col items-center gap-0">
-      <AnimatePresence>
+      <AnimatePresence mode="wait">
         {isExpanded && (
           <motion.div
             key="panel"

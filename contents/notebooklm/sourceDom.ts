@@ -1,11 +1,31 @@
-export const SOURCE_PANEL_TOGGLE_EVENT = "minddock:source-panel:toggle"
+﻿export const SOURCE_PANEL_TOGGLE_EVENT = "minddock:source-panel:toggle"
 export const SOURCE_PANEL_RESET_EVENT = "minddock:source-panel:reset"
 export const SOURCE_PANEL_EXPORT_EVENT = "minddock:source-panel:export"
 export const SOURCE_PANEL_REFRESH_EVENT = "minddock:source-panel:refresh"
+export const SOURCE_PANEL_SAVED_GROUPS_EVENT = "minddock:source-panel:saved-groups"
+export const SOURCE_PANEL_SAVED_GROUPS_UPDATED_EVENT = "minddock:source-panel:saved-groups:updated"
 export const SOURCE_FILTER_APPLY_START_EVENT = "minddock:source-filters:apply-start"
 export const SOURCE_FILTER_APPLY_END_EVENT = "minddock:source-filters:apply-end"
+export const SOURCE_DOWNLOAD_MODAL_STATE_EVENT = "minddock:source-download:modal-state"
 
 export type SourceFilterType = "All" | "PDFs" | "GDocs" | "Web" | "Text" | "YouTube"
+
+export interface SourcePanelRefreshCandidate {
+  title: string
+  docReference?: string
+  sourceUrl?: string
+  sourceId?: string
+}
+
+export interface SourcePanelRefreshDetail {
+  gdocSources?: SourcePanelRefreshCandidate[]
+}
+
+export interface SourcePanelSavedGroupsDetail {
+  open?: boolean
+  action?: "open-menu" | "request-save" | "apply-group"
+  groupId?: string
+}
 
 declare global {
   interface Window {
@@ -247,10 +267,6 @@ export function inferSourceType(row: HTMLElement): SourceFilterType {
   const fullSnapshot = collectRowContextSnapshot(row)
   const snapshot = normalize(fullSnapshot)
 
-  // Log detalhado para debug
-  const rowText = (row.textContent || "").trim().substring(0, 50)
-  console.log(`[inferSourceType] Row Text: "${rowText}" | Title: "${title}" | URL: "${directUrl}" | Snapshot length: ${snapshot.length}`)
-
   // PRIORIDADE 1: GDOC (detecção expandida)
   const gdocIndicators = {
     hasDocsUrl: /docs\.google\.com\/(document|spreadsheets|presentation|forms)/.test(snapshot),
@@ -265,27 +281,24 @@ export function inferSourceType(row: HTMLElement): SourceFilterType {
     hasDocsAnywhere: snapshot.includes("docs.google") || snapshot.includes("drive.google")
   }
   
-  // Log dos indicadores para debug
-  if (rowText.length > 0 && rowText !== "description") {
-    console.log(`[inferSourceType] GDoc Indicators:`, gdocIndicators)
-  }
-  
   const isGDoc = Object.values(gdocIndicators).some(v => v === true)
   
   if (isGDoc) {
-    console.log(`✅ GDOC | Indicators:`, gdocIndicators)
     return "GDocs"
   }
 
   // PRIORIDADE 2: YouTube
   if (/youtube|youtu\.be|youtube\.com/.test(snapshot)) {
-    console.log(`✅ YouTube`)
     return "YouTube"
+  }
+
+  const firstToken = String(snapshot.split(/\s+/)[0] ?? "").trim()
+  if (firstToken === "article" || firstToken === "drive_spreadsheet" || firstToken === "drive_presentation") {
+    return "GDocs"
   }
 
   // PRIORIDADE 3: PDF
   if (/\.pdf(\b|$)|\bpdf\b|application\/pdf|adobe acrobat/.test(snapshot)) {
-    console.log(`✅ PDF`)
     return "PDFs"
   }
 
@@ -295,12 +308,10 @@ export function inferSourceType(row: HTMLElement): SourceFilterType {
     /https?:\/\//.test(snapshot) ||
     /\bweb\b|\bsite\b|\blink\b|\burl\b|globe|public/.test(snapshot)
   ) {
-    console.log(`✅ Web`)
     return "Web"
   }
 
   // FALLBACK: Text
-  console.log(`⚠️ TEXT (fallback)`)
   return "Text"
 }
 
@@ -385,19 +396,7 @@ function collectRowContextSnapshot(row: HTMLElement): string {
   }
   
   const fullContext = parts.filter(Boolean).join(" ")
-  
-  // Log detalhado para debug
-  const hasGoogleOrDoc = fullContext.toLowerCase().includes("google") || 
-                         fullContext.toLowerCase().includes("doc") ||
-                         fullContext.toLowerCase().includes("drive")
-  
-  if (hasGoogleOrDoc) {
-    console.log("[collectRowContextSnapshot] 🔍 Contexto com Google/Doc/Drive:")
-    console.log("  - Full context preview:", fullContext.substring(0, 300))
-    console.log("  - Direct URL:", extractSourceUrl(row))
-    console.log("  - All links found:", Array.from(row.querySelectorAll("a[href]")).map(a => (a as HTMLAnchorElement).href))
-  }
-  
+
   return fullContext
 }
 
@@ -532,7 +531,7 @@ export function resolveSourceRows(): HTMLElement[] {
       return false
     }
 
-    if (/save view|salvar visualizacao/.test(merged)) {
+    if (/save view|salvar visualizacao|source groups|grupos de fontes|search saved views|visualizacoes da pesquisa/.test(merged)) {
       return false
     }
 
@@ -595,7 +594,7 @@ export function resolveSourceRows(): HTMLElement[] {
     let depth = 0
     let best: HTMLElement | null = null
     while (current && depth < 12) {
-      const parent = current.parentElement
+      const parent: HTMLElement | null = current.parentElement
       if (!(parent instanceof HTMLElement)) {
         bumpReason(debug, "checkbox:fallback-no-parent")
         break
@@ -756,8 +755,28 @@ export function dispatchSourcePanelExport(): void {
   window.dispatchEvent(new CustomEvent(SOURCE_PANEL_EXPORT_EVENT))
 }
 
-export function dispatchSourcePanelRefresh(): void {
-  window.dispatchEvent(new CustomEvent(SOURCE_PANEL_REFRESH_EVENT))
+export function dispatchSourcePanelRefresh(detail?: SourcePanelRefreshDetail): void {
+  window.dispatchEvent(
+    new CustomEvent(SOURCE_PANEL_REFRESH_EVENT, {
+      detail
+    })
+  )
+}
+
+export function dispatchSourcePanelSavedGroups(detail?: SourcePanelSavedGroupsDetail): void {
+  window.dispatchEvent(
+    new CustomEvent(SOURCE_PANEL_SAVED_GROUPS_EVENT, {
+      detail
+    })
+  )
+}
+
+export function dispatchSourcePanelSavedGroupsUpdated(): void {
+  window.dispatchEvent(
+    new CustomEvent(SOURCE_PANEL_SAVED_GROUPS_UPDATED_EVENT, {
+      detail: { timestamp: Date.now() }
+    })
+  )
 }
 
 export function dispatchSourceFilterApplyStart(): void {
@@ -1783,4 +1802,3 @@ export async function waitForCreatedNotebookId(
     return nextNotebookId
   }, timeoutMs, 200)
 }
-

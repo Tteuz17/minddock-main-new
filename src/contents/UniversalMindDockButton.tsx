@@ -5626,7 +5626,7 @@ interface MenuPanelProps {
 
 function MenuPanel(props: MenuPanelProps): JSX.Element {
   return (
-    <AnimatePresence>
+    <AnimatePresence mode="wait">
       {props.isOpen ? (
         <motion.div
           animate={{ opacity: 1, y: 0, scale: 1 }}

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import {
   CheckCircle2,
   File,
@@ -10,25 +10,43 @@ import {
   Music,
   RefreshCw,
   Search,
+  SquareCheck,
   Trash2,
+  X,
   Youtube
 } from "lucide-react"
+import { MESSAGE_ACTIONS, type StandardResponse } from "~/lib/contracts"
 import {
   SOURCE_PANEL_RESET_EVENT,
   SOURCE_PANEL_TOGGLE_EVENT,
-  clearNativeSourceSearchInputs,
   dispatchSourceFilterApplyEnd,
   dispatchSourceFilterApplyStart,
   dispatchSourcePanelExport,
   dispatchSourcePanelRefresh,
-  dispatchSourcePanelReset,
+  dispatchSourcePanelSavedGroupsUpdated,
   dispatchSourcePanelToggle,
+  extractSourceTitle,
+  extractSourceUrl,
+  inferSourceType,
   queryDeepAll,
-  resolveSourceRows
+  resolveNotebookIdFromRoute,
+  resolveSourceRows,
+  type SourcePanelRefreshCandidate
 } from "./sourceDom"
 import { DownloadSourcesButton } from "./DownloadSourcesButton"
+import {
+  buildSavedSelectionEntriesFromSources,
+  deleteSavedSourceSelectionGroup,
+  listSavedSourceSelectionGroupsByNotebook,
+  loadSavedSourceSelectionGroups,
+  normalizeGroupName,
+  persistSavedSourceSelectionGroups,
+  resolveMatchingSourceIdsForGroup,
+  upsertSavedSourceSelectionGroup,
+  type SavedSourceSelectionGroup
+} from "./sourceSelectionGroups"
+import { resolveSourceFilterUiCopy, type SourceFilterUiCopy } from "./notebooklmI18n"
 
-const SAVED_VIEW_KEY = "minddock:source-panel-saved-view"
 const FILTER_HIDDEN_DATASET_KEY = "minddockFilterHidden"
 const SOURCE_NODE_CONTAINER_SELECTOR =
   "[data-testid='source-list-item'], [data-testid*='source-item'], [role='row'], [role='listitem'], li"
@@ -54,6 +72,13 @@ let filterRetryAttempts = 0
 
 type SourceDetectedType = "PDF" | "YOUTUBE" | "GDOC" | "WEB" | "TEXT" | "AUDIO" | "IMAGE"
 type SourcePanelFilterType = "ALL" | SourceDetectedType
+type DeleteToastStatus = "idle" | "running" | "success" | "error" | "info"
+
+interface DeleteToastState {
+  status: DeleteToastStatus
+  message: string
+  progress: number
+}
 
 declare global {
   interface Window {
@@ -68,18 +93,20 @@ declare global {
   }
 }
 
+type SourceFilterLabelKey = keyof SourceFilterUiCopy["filterLabels"]
+
 const FILTERS: Array<{
   type: SourcePanelFilterType
-  label: string
+  labelKey: SourceFilterLabelKey
 }> = [
-  { type: "ALL", label: "All" },
-  { type: "PDF", label: "PDF" },
-  { type: "GDOC", label: "GDocs" },
-  { type: "WEB", label: "Web" },
-  { type: "TEXT", label: "Text" },
-  { type: "AUDIO", label: "Audio" },
-  { type: "IMAGE", label: "Images" },
-  { type: "YOUTUBE", label: "YouTube" }
+  { type: "ALL", labelKey: "ALL" },
+  { type: "PDF", labelKey: "PDF" },
+  { type: "GDOC", labelKey: "GDOC" },
+  { type: "WEB", labelKey: "WEB" },
+  { type: "TEXT", labelKey: "TEXT" },
+  { type: "AUDIO", labelKey: "AUDIO" },
+  { type: "IMAGE", labelKey: "IMAGE" },
+  { type: "YOUTUBE", labelKey: "YOUTUBE" }
 ]
 
 function getSafeIcon(type: string, isActive: boolean): ReactNode {
@@ -146,37 +173,43 @@ function useSourceFilterLogic() {
 export function SourceFilterPanel() {
   const [searchText, setSearchText] = useState("")
   const [isVisible, setIsVisible] = useState(true)
+  const [savedSelectionGroups, setSavedSelectionGroups] = useState<SavedSourceSelectionGroup[]>([])
+  const [isGroupsMenuOpen, setIsGroupsMenuOpen] = useState(false)
+  const [groupsSearchText, setGroupsSearchText] = useState("")
+  const [isSaveSelectionDialogOpen, setIsSaveSelectionDialogOpen] = useState(false)
+  const [saveSelectionName, setSaveSelectionName] = useState("")
+  const [isDeletingSources, setIsDeletingSources] = useState(false)
+  const [isDeleteConfirmOpen, setIsDeleteConfirmOpen] = useState(false)
+  const [pendingDeleteRows, setPendingDeleteRows] = useState<SelectableSourceRow[]>([])
+  const [deleteToast, setDeleteToast] = useState<DeleteToastState>({
+    status: "idle",
+    message: "",
+    progress: 0
+  })
+  const groupsMenuRef = useRef<HTMLDivElement | null>(null)
   const { activeFilters, setActiveFilters, handleToggleFilter } = useSourceFilterLogic()
+  const notebookId = resolveNotebookIdFromRoute() ?? ""
+  const uiCopy = useMemo(() => resolveSourceFilterUiCopy(), [])
+  const deleteCopy = uiCopy.delete
 
-  const activeFilterList = useMemo<string[]>(() => Array.from(activeFilters), [activeFilters])
+  const notebookSavedGroups = useMemo(
+    () => listSavedSourceSelectionGroupsByNotebook(notebookId, savedSelectionGroups),
+    [notebookId, savedSelectionGroups]
+  )
+  const filteredNotebookSavedGroups = useMemo(() => {
+    const query = normalizeGroupName(groupsSearchText).toLowerCase()
+    if (!query) {
+      return notebookSavedGroups
+    }
+
+    return notebookSavedGroups.filter((group) => group.name.toLowerCase().includes(query))
+  }, [groupsSearchText, notebookSavedGroups])
 
   const resetPanelState = useCallback(() => {
     setSearchText("")
     setActiveFilters(new Set(["ALL"]))
     setIsVisible(true)
     dispatchSourcePanelToggle(true)
-  }, [setActiveFilters])
-
-  useEffect(() => {
-    try {
-      const raw = window.localStorage.getItem(SAVED_VIEW_KEY)
-      if (!raw) {
-        return
-      }
-
-      const parsed = JSON.parse(raw) as {
-        searchText?: string
-        filters?: unknown
-      }
-
-      if (typeof parsed.searchText === "string") {
-        setSearchText(parsed.searchText)
-      }
-
-      setActiveFilters(hydratePersistedFilterSet(parsed.filters))
-    } catch {
-      // Ignore malformed local state.
-    }
   }, [setActiveFilters])
 
   useEffect(() => {
@@ -226,18 +259,84 @@ export function SourceFilterPanel() {
     []
   )
 
-  const saveView = () => {
-    try {
-      window.localStorage.setItem(
-        SAVED_VIEW_KEY,
-        JSON.stringify({
-          searchText,
-          filters: activeFilterList
-        })
-      )
-    } catch {
-      // Ignore storage failures.
+  useEffect(() => {
+    setSavedSelectionGroups(loadSavedSourceSelectionGroups())
+  }, [])
+
+  useEffect(() => {
+    persistSavedSourceSelectionGroups(savedSelectionGroups)
+  }, [savedSelectionGroups])
+
+  useEffect(() => {
+    if (!isGroupsMenuOpen) {
+      return
     }
+
+    const onPointerDown = (event: MouseEvent) => {
+      const target = event.target
+      if (!(target instanceof Node)) {
+        return
+      }
+      if (groupsMenuRef.current?.contains(target)) {
+        return
+      }
+      setIsGroupsMenuOpen(false)
+    }
+
+    document.addEventListener("mousedown", onPointerDown, true)
+    return () => document.removeEventListener("mousedown", onPointerDown, true)
+  }, [isGroupsMenuOpen])
+
+  useEffect(() => {
+    if (deleteToast.status === "idle" || deleteToast.status === "running") {
+      return
+    }
+
+    const timeout = window.setTimeout(() => {
+      setDeleteToast({ status: "idle", message: "", progress: 0 })
+    }, deleteToast.status === "error" ? 5200 : 3200)
+
+    return () => window.clearTimeout(timeout)
+  }, [deleteToast.status])
+
+  useEffect(() => {
+    if (!isDeletingSources || deleteToast.status !== "running") {
+      return
+    }
+
+    const timer = window.setInterval(() => {
+      setDeleteToast((currentToast) => {
+        if (currentToast.status !== "running") {
+          return currentToast
+        }
+        const nextProgress = Math.min(90, currentToast.progress + (currentToast.progress < 60 ? 8 : 4))
+        return {
+          ...currentToast,
+          progress: nextProgress
+        }
+      })
+    }, 260)
+
+    return () => window.clearInterval(timer)
+  }, [isDeletingSources, deleteToast.status])
+
+  const openSaveSelectionDialog = () => {
+    if (!notebookId) {
+      window.alert(uiCopy.notebookIdMissing)
+      return
+    }
+
+    const selectedSourceRows = collectSelectedSourceRows()
+    if (selectedSourceRows.length === 0) {
+      window.alert(uiCopy.selectAtLeastOneToSave)
+      return
+    }
+
+    const suggestedName = uiCopy.suggestedGroupName(notebookSavedGroups.length + 1).slice(0, 50)
+    setSaveSelectionName(suggestedName)
+    setIsSaveSelectionDialogOpen(true)
+    setIsGroupsMenuOpen(false)
+    setGroupsSearchText("")
   }
 
   const openExportPanel = () => {
@@ -245,20 +344,290 @@ export function SourceFilterPanel() {
   }
 
   const refreshSources = () => {
-    dispatchSourcePanelRefresh()
+    dispatchSourcePanelRefresh({
+      gdocSources: collectGDocRefreshCandidates()
+    })
   }
 
-  const resetAllSources = () => {
-    clearNativeSourceSearchInputs()
-    dispatchSourcePanelReset()
+  const toggleSavedSourceGroupsMenu = () => {
+    setSavedSelectionGroups(loadSavedSourceSelectionGroups())
+    setGroupsSearchText("")
+    setIsGroupsMenuOpen((currentValue) => !currentValue)
   }
+
+  const closeSaveSelectionDialog = () => {
+    setIsSaveSelectionDialogOpen(false)
+    setSaveSelectionName("")
+  }
+
+  const saveCurrentSelectionAsGroup = () => {
+    const groupName = normalizeGroupName(saveSelectionName).slice(0, 50)
+    if (!groupName) {
+      window.alert(uiCopy.saveGroupNameRequired)
+      return
+    }
+
+    if (!notebookId) {
+      window.alert(uiCopy.notebookIdMissing)
+      return
+    }
+
+    const selectedSourceRows = collectSelectedSourceRows()
+    if (selectedSourceRows.length === 0) {
+      window.alert(uiCopy.selectAtLeastOneToSave)
+      return
+    }
+
+    const entries = buildSavedSelectionEntriesFromSources(selectedSourceRows)
+    if (entries.length === 0) {
+      window.alert(uiCopy.saveGroupFailed)
+      return
+    }
+
+    const result = upsertSavedSourceSelectionGroup({
+      notebookId,
+      groupName,
+      entries,
+      selectionCount: selectedSourceRows.length,
+      groups: savedSelectionGroups
+    })
+    setSavedSelectionGroups(result.groups)
+    dispatchSourcePanelSavedGroupsUpdated()
+    setIsSaveSelectionDialogOpen(false)
+    setSaveSelectionName("")
+    setIsGroupsMenuOpen(true)
+    setGroupsSearchText("")
+  }
+
+  const removeSavedSelectionGroup = (groupId: string) => {
+    const targetId = String(groupId ?? "").trim()
+    if (!targetId) {
+      return
+    }
+    const nextGroups = deleteSavedSourceSelectionGroup(savedSelectionGroups, targetId)
+    if (nextGroups.length === savedSelectionGroups.length) {
+      return
+    }
+    setSavedSelectionGroups(nextGroups)
+    dispatchSourcePanelSavedGroupsUpdated()
+  }
+
+  const applySavedSelectionGroup = (groupId: string) => {
+    const targetId = String(groupId ?? "").trim()
+    if (!targetId) {
+      return
+    }
+
+    const group = notebookSavedGroups.find((item) => item.id === targetId)
+    if (!group) {
+      window.alert(uiCopy.groupNotFound)
+      return
+    }
+
+    const rows = collectSelectedSourceRows(true)
+    if (rows.length === 0) {
+      window.alert(uiCopy.noSourcesToApplyGroup)
+      return
+    }
+
+    const matchingIds = resolveMatchingSourceIdsForGroup(group, rows)
+    let appliedChanges = 0
+    for (const row of rows) {
+      const shouldBeChecked = matchingIds.has(row.sourceId)
+      if (row.isChecked === shouldBeChecked) {
+        continue
+      }
+      if (toggleRowSelection(row.row, shouldBeChecked)) {
+        appliedChanges += 1
+      }
+    }
+
+    if (matchingIds.size === 0) {
+      window.alert(uiCopy.noGroupSourcesFound(group.name))
+      return
+    }
+
+    setIsGroupsMenuOpen(false)
+    setGroupsSearchText("")
+    // Se o grupo ja estiver aplicado, mantem fluxo silencioso (sem popup).
+    if (appliedChanges === 0) {
+      return
+    }
+  }
+
+  const dismissDeleteToast = useCallback(() => {
+    setDeleteToast({ status: "idle", message: "", progress: 0 })
+  }, [])
+
+  const closeDeleteConfirmDialog = useCallback(() => {
+    if (isDeletingSources) {
+      return
+    }
+    setIsDeleteConfirmOpen(false)
+    setPendingDeleteRows([])
+  }, [isDeletingSources])
+
+  const requestDeleteSelectedSources = useCallback(() => {
+    if (isDeletingSources) {
+      return
+    }
+
+    const currentNotebookId = resolveNotebookIdFromRoute() ?? notebookId
+    if (!currentNotebookId) {
+      setDeleteToast({
+        status: "error",
+        message: deleteCopy.notebookMissing,
+        progress: 0
+      })
+      return
+    }
+
+    const selectedRows = collectSelectedSourceRows()
+    if (selectedRows.length === 0) {
+      setDeleteToast({
+        status: "info",
+        message: deleteCopy.selectAtLeastOne,
+        progress: 0
+      })
+      return
+    }
+
+    setPendingDeleteRows(selectedRows)
+    setIsDeleteConfirmOpen(true)
+  }, [deleteCopy, isDeletingSources, notebookId])
+
+  const deleteSelectedSources = useCallback(async () => {
+    if (isDeletingSources) {
+      return
+    }
+
+    const currentNotebookId = resolveNotebookIdFromRoute() ?? notebookId
+    if (!currentNotebookId) {
+      setDeleteToast({
+        status: "error",
+        message: deleteCopy.notebookMissing,
+        progress: 0
+      })
+      setIsDeleteConfirmOpen(false)
+      setPendingDeleteRows([])
+      return
+    }
+
+    const selectedRows = pendingDeleteRows
+    if (selectedRows.length === 0) {
+      setDeleteToast({
+        status: "info",
+        message: deleteCopy.selectAtLeastOne,
+        progress: 0
+      })
+      setIsDeleteConfirmOpen(false)
+      return
+    }
+
+    setIsDeleteConfirmOpen(false)
+    setDeleteToast({
+      status: "running",
+      message: deleteCopy.deletingMessage(selectedRows.length),
+      progress: 10
+    })
+    setIsDeletingSources(true)
+    try {
+      const explicitBackendSourceIds = selectedRows
+        .map((row) => String(row.backendId ?? "").trim())
+        .filter(Boolean)
+
+      const response = await sendBackgroundCommand<{
+        deletedCount?: number
+        total?: number
+        deletedCandidateIndexList?: number[]
+        deletedSourceIdList?: string[]
+        deletedSourceTitleList?: string[]
+        skippedSourceTitleList?: string[]
+        failedSourceTitleList?: string[]
+        message?: string
+      }>(MESSAGE_ACTIONS.CMD_DELETE_NOTEBOOK_SOURCES, {
+        notebookId: currentNotebookId,
+        sourceIds: explicitBackendSourceIds,
+        sources: selectedRows.map((row) => ({
+          sourceId: row.sourceId,
+          backendId: row.backendId ?? undefined,
+          sourceTitle: row.sourceTitle,
+          rowIndex: row.sourceIndex
+        }))
+      })
+
+      if (!response.success) {
+        throw new Error(response.error ?? deleteCopy.genericDeleteError)
+      }
+
+      const payload = response.payload ?? response.data
+      const deletedSourceIds = Array.isArray(payload?.deletedSourceIdList)
+        ? payload.deletedSourceIdList
+        : []
+      const deletedCandidateIndexes = Array.isArray(payload?.deletedCandidateIndexList)
+        ? payload.deletedCandidateIndexList.filter((value) => Number.isInteger(value) && value >= 0)
+        : []
+      const deletedSet = new Set(deletedSourceIds)
+      const deletedIndexSet = new Set(deletedCandidateIndexes)
+      for (let index = 0; index < selectedRows.length; index += 1) {
+        const selectedRow = selectedRows[index]
+        const backendId = String(selectedRow.backendId ?? "").trim()
+        const matchedByBackendId = backendId ? deletedSet.has(backendId) : false
+        const matchedByCandidateIndex = deletedIndexSet.has(index)
+        if (matchedByBackendId || matchedByCandidateIndex) {
+          selectedRow.row.remove()
+        }
+      }
+
+      const deletedCount = Number(payload?.deletedCount ?? 0)
+      const skippedCount = Array.isArray(payload?.skippedSourceTitleList)
+        ? payload.skippedSourceTitleList.length
+        : 0
+      const failedCount = Array.isArray(payload?.failedSourceTitleList)
+        ? payload.failedSourceTitleList.length
+        : 0
+
+      if (deletedCount > 0) {
+        const parts = [deleteCopy.deletedMessage(deletedCount)]
+        if (skippedCount > 0) {
+          parts.push(deleteCopy.unmappedMessage(skippedCount))
+        }
+        if (failedCount > 0) {
+          parts.push(deleteCopy.failedMessage(failedCount))
+        }
+        setDeleteToast({
+          status: failedCount > 0 ? "info" : "success",
+          message: parts.join(" "),
+          progress: 100
+        })
+      } else {
+        setDeleteToast({
+          status: failedCount > 0 ? "error" : "info",
+          message: String(payload?.message ?? deleteCopy.noneDeletedMessage),
+          progress: failedCount > 0 ? 0 : 100
+        })
+      }
+    } catch (error) {
+      setDeleteToast({
+        status: "error",
+        message: error instanceof Error ? error.message : deleteCopy.genericDeleteError,
+        progress: 0
+      })
+    } finally {
+      setIsDeletingSources(false)
+      setPendingDeleteRows([])
+    }
+  }, [deleteCopy, isDeletingSources, notebookId, pendingDeleteRows])
 
   if (!isVisible) {
     return null
   }
 
   return (
-    <section className="relative mt-2 w-full overflow-visible rounded-[22px] border border-white/[0.06] bg-[#08090b] p-3.5 shadow-[0_12px_28px_rgba(0,0,0,0.18)]">
+    <section
+      onMouseDown={stopPanelEventPropagation}
+      onClick={stopPanelEventPropagation}
+      className="relative mt-2 w-full overflow-visible rounded-[22px] border border-white/[0.06] bg-[#08090b] p-3.5 shadow-[0_12px_28px_rgba(0,0,0,0.18)]">
       <div
         aria-hidden="true"
         className="pointer-events-none absolute inset-0 rounded-[inherit] opacity-90"
@@ -280,17 +649,77 @@ export function SourceFilterPanel() {
               type="search"
               value={searchText}
               onChange={(event) => setSearchText(event.target.value)}
-              placeholder="Search sources..."
+              placeholder={uiCopy.searchPlaceholder}
               className="w-full bg-transparent text-[12px] text-white outline-none placeholder:text-[#6f7580]"
             />
           </div>
 
           <div className="inline-flex shrink-0 items-center gap-1 rounded-[16px] border border-white/[0.06] bg-[#0d0f12] p-1">
             <DownloadSourcesButton onClick={openExportPanel} />
-            <PanelActionButton title="Refresh Google Docs sources" onClick={refreshSources}>
+            <PanelActionButton title={uiCopy.refreshGoogleDocsTitle} onClick={refreshSources}>
               <RefreshCw size={15} strokeWidth={1.8} />
             </PanelActionButton>
-            <PanelActionButton title="Clear filters and reset panel" onClick={resetAllSources}>
+            <div ref={groupsMenuRef} className="relative">
+              <PanelActionButton
+                title={uiCopy.sourceGroupsTitle}
+                onClick={toggleSavedSourceGroupsMenu}
+                active={isGroupsMenuOpen}>
+                <SquareCheck size={15} strokeWidth={1.8} />
+              </PanelActionButton>
+              {isGroupsMenuOpen ? (
+                <div className="absolute right-0 top-[calc(100%+8px)] z-[9999] w-[310px] rounded-[16px] border border-white/[0.08] bg-[#0d1015] p-2 shadow-[0_18px_40px_rgba(0,0,0,0.45)]">
+                  <div className="mb-2 flex items-center gap-2 rounded-[11px] border border-white/[0.08] bg-[#0a0d12] px-2.5 py-2">
+                    <Search size={13} strokeWidth={1.8} className="text-[#7f8794]" />
+                    <input
+                      type="search"
+                      value={groupsSearchText}
+                      onChange={(event) => setGroupsSearchText(event.target.value)}
+                      placeholder={uiCopy.groupsSearchPlaceholder}
+                      className="w-full bg-transparent text-[11px] text-white outline-none placeholder:text-[#6d7380]"
+                    />
+                  </div>
+                  <div className="max-h-[112px] space-y-1 overflow-y-auto pr-0.5">
+                    {filteredNotebookSavedGroups.length === 0 ? (
+                      <p className="px-2 py-1.5 text-[11px] text-[#9aa2af]">{uiCopy.noSavedGroups}</p>
+                    ) : (
+                      filteredNotebookSavedGroups.map((group) => (
+                        <div
+                          key={group.id}
+                          className="group relative rounded-[10px] border border-transparent transition-colors hover:border-white/[0.08] hover:bg-[#131823]">
+                          <button
+                            type="button"
+                            onClick={() => applySavedSelectionGroup(group.id)}
+                            className="block w-full px-2.5 py-2 pr-10 text-left text-[12px] text-white">
+                            <span className="block truncate font-medium">{group.name}</span>
+                            <span className="block text-[10px] text-[#8590a0]">
+                              {uiCopy.groupCountLabel(resolveSavedGroupSelectionCount(group))}
+                            </span>
+                          </button>
+                          <button
+                            type="button"
+                            title={uiCopy.deleteGroupTitle}
+                            aria-label={uiCopy.deleteGroupAriaLabel(group.name)}
+                            onClick={(event) => {
+                              event.preventDefault()
+                              event.stopPropagation()
+                              removeSavedSelectionGroup(group.id)
+                            }}
+                            className="absolute right-1.5 top-1/2 inline-flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-[8px] border border-transparent text-[#6f7784] opacity-0 transition-all group-hover:opacity-100 hover:border-[#facc15]/30 hover:bg-[#2a2208] hover:text-[#facc15]">
+                            <Trash2 size={13} strokeWidth={1.9} />
+                          </button>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              ) : null}
+            </div>
+            <PanelActionButton
+              title={deleteCopy.deleteActionLabel}
+              onClick={() => {
+                requestDeleteSelectedSources()
+              }}
+              disabled={isDeletingSources}>
               <Trash2 size={15} strokeWidth={1.8} />
             </PanelActionButton>
           </div>
@@ -313,22 +742,466 @@ export function SourceFilterPanel() {
                       : "border-white/[0.06] bg-[#101216] text-[#a4acb8] hover:text-white"
                   ].join(" ")}>
                   {getSafeIcon(filter.type, isActive)}
-                  {filter.label}
+                  {uiCopy.filterLabels[filter.labelKey]}
                 </button>
               )
             })}
 
             <button
               type="button"
-              onClick={saveView}
-              className="ml-auto rounded-full border border-white/[0.06] bg-[#101216] px-3.5 py-1.5 text-[11px] font-medium text-white transition-colors hover:bg-[#14171c]">
-              Save view
+              onClick={openSaveSelectionDialog}
+                className={[
+                  "ml-auto rounded-full border px-3.5 py-1.5 text-[11px] font-medium transition-colors",
+                  "mt-0 ml-6",
+                isSaveSelectionDialogOpen
+                  ? "border-[#facc15]/45 bg-[#3a300b] text-[#fff3b8] hover:bg-[#46380d]"
+                  : "border-white/[0.06] bg-[#101216] text-white hover:bg-[#14171c]"
+              ].join(" ")}>
+              {uiCopy.saveViewButton}
             </button>
           </div>
         </div>
       </div>
+      {isSaveSelectionDialogOpen ? (
+        <div
+          className="fixed inset-0 z-[150] flex items-center justify-center bg-black/40 px-4"
+          onMouseDown={closeSaveSelectionDialog}>
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label={uiCopy.saveDialogAriaLabel}
+            onMouseDown={(event) => event.stopPropagation()}
+            className="w-full max-w-[480px] rounded-[16px] border border-white/[0.08] bg-[#0d1015] p-5 shadow-[0_18px_40px_rgba(0,0,0,0.45)]">
+            <div className="mb-3 flex items-center gap-2">
+              <SquareCheck size={14} strokeWidth={1.9} className="text-[#facc15]" />
+              <h3 className="text-[15px] font-semibold text-white">{uiCopy.saveDialogTitle}</h3>
+            </div>
+            <div className="rounded-[11px] border border-white/[0.08] bg-[#0a0d12] px-3 py-2.5">
+              <input
+                autoFocus
+                maxLength={50}
+                value={saveSelectionName}
+                onChange={(event) => setSaveSelectionName(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault()
+                    saveCurrentSelectionAsGroup()
+                  } else if (event.key === "Escape") {
+                    event.preventDefault()
+                    closeSaveSelectionDialog()
+                  }
+                }}
+                placeholder={uiCopy.saveDialogPlaceholder}
+                className="w-full bg-transparent text-[12px] text-white outline-none placeholder:text-[#727a88]"
+              />
+            </div>
+            <div className="mt-1 text-right text-[10px] text-[#7f8794]">
+              {Math.min(50, saveSelectionName.length)}/50
+            </div>
+            <div className="mt-5 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={closeSaveSelectionDialog}
+                className="rounded-full border border-white/[0.1] bg-[#12161d] px-4 py-1.5 text-[12px] text-white transition-colors hover:bg-[#171c25]">
+                {uiCopy.saveDialogCancel}
+              </button>
+              <button
+                type="button"
+                onClick={saveCurrentSelectionAsGroup}
+                className="rounded-full border border-[#facc15]/35 bg-[#2a2208] px-4 py-1.5 text-[12px] font-semibold text-[#fff1a6] transition-colors hover:bg-[#33290a]">
+                {uiCopy.saveDialogSave}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {isDeleteConfirmOpen ? (
+        <div
+          className="fixed inset-0 z-[160] flex items-center justify-center bg-black/45 px-4"
+          onMouseDown={closeDeleteConfirmDialog}>
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label={deleteCopy.confirmAriaLabel}
+            onMouseDown={(event) => event.stopPropagation()}
+            className="w-full max-w-[500px] rounded-[16px] border border-white/[0.08] bg-[#0d1015] p-5 shadow-[0_18px_40px_rgba(0,0,0,0.45)]">
+            <div className="mb-3 flex items-center gap-2">
+              <Trash2 size={14} strokeWidth={1.9} className="text-[#facc15]" />
+              <h3 className="text-[15px] font-semibold text-white">{deleteCopy.confirmTitle}</h3>
+            </div>
+            <p className="text-[12px] leading-relaxed text-[#b7beca]">
+              {deleteCopy.confirmBody(pendingDeleteRows.length)}
+            </p>
+            <div className="mt-5 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={closeDeleteConfirmDialog}
+                disabled={isDeletingSources}
+                className="rounded-full border border-white/[0.1] bg-[#12161d] px-4 py-1.5 text-[12px] text-white transition-colors hover:bg-[#171c25] disabled:cursor-not-allowed disabled:opacity-50">
+                {deleteCopy.cancelLabel}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  void deleteSelectedSources()
+                }}
+                disabled={isDeletingSources}
+                className="rounded-full border border-[#facc15]/35 bg-[#2a2208] px-4 py-1.5 text-[12px] font-semibold text-[#fff1a6] transition-colors hover:bg-[#33290a] disabled:cursor-not-allowed disabled:opacity-50">
+                {isDeletingSources ? deleteCopy.deletingLabel : deleteCopy.confirmDeleteLabel}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {deleteToast.status !== "idle" ? (
+        <aside className="fixed bottom-4 right-4 z-[2147483647] w-[min(370px,calc(100vw-28px))] overflow-hidden rounded-[18px] border border-white/[0.1] bg-[#08090b] text-[#d6dae0] shadow-[0_18px_44px_rgba(0,0,0,0.5)]">
+          <div
+            aria-hidden="true"
+            className="pointer-events-none absolute inset-0 rounded-[inherit] opacity-85"
+            style={{
+              backgroundImage: "radial-gradient(circle, rgba(255, 255, 255, 0.065) 1px, transparent 1px)",
+              backgroundSize: "14px 14px",
+              backgroundPosition: "0 0"
+            }}
+          />
+          <div className="relative z-[1] p-3.5">
+            <header className="mb-2 flex items-center justify-between gap-2">
+              <strong className="text-[20px] font-semibold leading-none tracking-tight text-white">
+                {deleteCopy.toastTitle}
+              </strong>
+              <button
+                type="button"
+                aria-label={deleteCopy.closeToastLabel}
+                onClick={dismissDeleteToast}
+                className="inline-flex h-7 w-7 items-center justify-center rounded-[10px] border border-white/[0.12] bg-[#101319] text-[#8f98a6] transition-colors hover:text-white">
+                <X size={14} strokeWidth={1.8} />
+              </button>
+            </header>
+            <p className="mb-2 text-sm text-[#b5bcc8]">{deleteToast.message}</p>
+            <div className="h-2 overflow-hidden rounded-full bg-white/[0.1]">
+              <div
+                className={[
+                  "h-full rounded-full transition-all duration-200",
+                  deleteToast.status === "error"
+                    ? "bg-[linear-gradient(90deg,#ef4444_0%,#f97316_100%)]"
+                    : "bg-[linear-gradient(90deg,#60a5fa_0%,#22c55e_100%)]"
+                ].join(" ")}
+                style={{ width: `${Math.max(0, Math.min(100, deleteToast.progress))}%` }}
+              />
+            </div>
+          </div>
+        </aside>
+      ) : null}
     </section>
   )
+}
+
+function stopPanelEventPropagation(event: { stopPropagation: () => void; nativeEvent?: Event }): void {
+  event.stopPropagation()
+  const native = event.nativeEvent as Event & { stopImmediatePropagation?: () => void }
+  native?.stopImmediatePropagation?.()
+}
+
+function collectGDocRefreshCandidates(): SourcePanelRefreshCandidate[] {
+  const rows = resolveSourceRows()
+  const candidates: SourcePanelRefreshCandidate[] = []
+  const seen = new Set<string>()
+
+  for (let index = 0; index < rows.length; index += 1) {
+    const row = rows[index]
+    const sourceType = inferSourceType(row)
+    const title = String(extractSourceTitle(row) ?? "").trim() || `Google Doc ${index + 1}`
+    const sourceUrl = resolveGoogleDocReferenceFromRow(row)
+    const sourceId = resolveBackendSourceIdFromRow(row)
+    const rowSignalSnapshot = String(row.innerText || row.textContent || "").toLowerCase()
+    const hasWorkspaceIconToken =
+      /\b(article|drive_spreadsheet|drive_presentation)\b/u.test(rowSignalSnapshot)
+    const hasEditableDocExtension = /\.(docx?|odt|rtf)\b/u.test(title.toLowerCase())
+
+    const isLikelyGDoc =
+      sourceType === "GDocs" ||
+      hasWorkspaceIconToken ||
+      hasEditableDocExtension ||
+      /google\s*docs?|docs\.google\.com|drive\.google\.com/iu.test(
+        `${title} ${String(sourceUrl ?? "").trim()} ${String(row.textContent ?? "")}`
+      )
+
+    if (!isLikelyGDoc) {
+      continue
+    }
+
+    const dedupeUrl = String(sourceUrl ?? "").trim().toLowerCase()
+    const key = `${title.toLowerCase()}::${dedupeUrl}::${String(sourceId ?? "").toLowerCase()}`
+    if (seen.has(key)) {
+      continue
+    }
+    seen.add(key)
+
+    candidates.push({
+      title,
+      docReference: sourceUrl || undefined,
+      sourceUrl: sourceUrl || undefined,
+      sourceId: sourceId ?? undefined
+    })
+  }
+
+  return candidates
+}
+
+function resolveGoogleDocReferenceFromRow(row: HTMLElement): string | null {
+  const directUrl = String(extractSourceUrl(row) ?? "").trim()
+  if (directUrl && /docs\.google\.com|drive\.google\.com/iu.test(directUrl)) {
+    return directUrl
+  }
+
+  const rowAttrs = [
+    row.getAttribute("data-doc-id"),
+    row.getAttribute("doc-id"),
+    row.getAttribute("data-source-url"),
+    row.getAttribute("data-url"),
+    row.getAttribute("href"),
+    row.getAttribute("data-href")
+  ]
+
+  for (const attrValue of rowAttrs) {
+    const value = String(attrValue ?? "").trim()
+    if (!value) {
+      continue
+    }
+    if (/^[A-Za-z0-9_-]{20,}$/u.test(value)) {
+      return value
+    }
+    if (/docs\.google\.com|drive\.google\.com/iu.test(value)) {
+      return value
+    }
+  }
+
+  const nestedWithDocId = row.querySelector<HTMLElement>("[data-doc-id],[doc-id]")
+  if (nestedWithDocId) {
+    const nestedDocId = String(
+      nestedWithDocId.getAttribute("data-doc-id") ?? nestedWithDocId.getAttribute("doc-id") ?? ""
+    ).trim()
+    if (nestedDocId && /^[A-Za-z0-9_-]{20,}$/u.test(nestedDocId)) {
+      return nestedDocId
+    }
+  }
+
+  const fullText = String(row.innerText || row.textContent || "")
+  const urlMatch = fullText.match(/https?:\/\/[^\s)\]}>"']+/iu)
+  if (urlMatch?.[0] && /docs\.google\.com|drive\.google\.com/iu.test(urlMatch[0])) {
+    return String(urlMatch[0]).trim()
+  }
+
+  const docIdMatch = fullText.match(/\b([A-Za-z0-9_-]{25,})\b/u)
+  if (docIdMatch?.[1]) {
+    return String(docIdMatch[1]).trim()
+  }
+
+  return null
+}
+
+function resolveBackendSourceIdFromRow(row: HTMLElement): string | null {
+  const directCandidates = [
+    row.getAttribute("data-source-id"),
+    row.getAttribute("source-id"),
+    row.getAttribute("data-id"),
+    row.getAttribute("data-doc-id"),
+    row.getAttribute("data-resource-id"),
+    row.getAttribute("data-source"),
+    row.getAttribute("id")
+  ]
+
+  for (const candidate of directCandidates) {
+    const value = String(candidate ?? "").trim()
+    if (value && !value.startsWith("minddock-") && !value.startsWith("source-picker")) {
+      return value
+    }
+  }
+
+  const nestedNode = row.querySelector<HTMLElement>(
+    "[data-source-id],[source-id],[data-id],[data-doc-id],[data-resource-id],[data-source]"
+  )
+  if (!nestedNode) {
+    return null
+  }
+
+  const nestedCandidates = [
+    nestedNode.getAttribute("data-source-id"),
+    nestedNode.getAttribute("source-id"),
+    nestedNode.getAttribute("data-id"),
+    nestedNode.getAttribute("data-doc-id"),
+    nestedNode.getAttribute("data-resource-id"),
+    nestedNode.getAttribute("data-source")
+  ]
+
+  for (const candidate of nestedCandidates) {
+    const value = String(candidate ?? "").trim()
+    if (value && !value.startsWith("minddock-")) {
+      return value
+    }
+  }
+
+  return null
+}
+
+interface SelectableSourceRow {
+  sourceId: string
+  backendId: string | null
+  sourceTitle: string
+  sourceIndex: number
+  row: HTMLElement
+  isChecked: boolean
+}
+
+function resolveRowCheckboxControl(row: HTMLElement): HTMLElement | null {
+  const input = row.querySelector<HTMLInputElement>("input[type='checkbox']")
+  if (input) {
+    return input
+  }
+  const roleCheckbox = row.querySelector<HTMLElement>("[role='checkbox']")
+  if (roleCheckbox) {
+    return roleCheckbox
+  }
+  return null
+}
+
+function readCheckboxCheckedState(control: HTMLElement | null): boolean {
+  if (!control) {
+    return false
+  }
+  if (control instanceof HTMLInputElement) {
+    return control.checked
+  }
+  const ariaChecked = String(control.getAttribute("aria-checked") ?? "").toLowerCase()
+  return ariaChecked === "true"
+}
+
+function collectSelectedSourceRows(includeUnchecked = false): SelectableSourceRow[] {
+  const rows = resolveSourceRows()
+  const selected: SelectableSourceRow[] = []
+
+  for (let index = 0; index < rows.length; index += 1) {
+    const row = rows[index]
+    if (isIgnoredUiRow(row)) {
+      continue
+    }
+
+    const control = resolveRowCheckboxControl(row)
+    if (!control) {
+      continue
+    }
+
+    const sourceTitle = resolveSourceTitleForSelectionRow(row, index)
+    const backendId = resolveBackendSourceIdFromRow(row)
+    const sourceId = resolveStableSourceSelectionId(row, sourceTitle, index)
+    if (!sourceId) {
+      continue
+    }
+
+    const isChecked = readCheckboxCheckedState(control)
+    if (!includeUnchecked && !isChecked) {
+      continue
+    }
+
+    selected.push({
+      row,
+      sourceId,
+      backendId,
+      sourceTitle,
+      sourceIndex: index,
+      isChecked
+    })
+  }
+
+  return selected
+}
+
+function resolveSourceTitleForSelectionRow(row: HTMLElement, index: number): string {
+  const extractedTitle = String(extractSourceTitle(row) ?? "").trim()
+  if (extractedTitle) {
+    return extractedTitle
+  }
+
+  const rawText = String(row.innerText || row.textContent || "")
+  const lines = rawText
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter(Boolean)
+
+  for (const line of lines) {
+    const normalized = normalizeSnapshotValue(line)
+    if (!normalized) {
+      continue
+    }
+    if (
+      /^(more_vert|article|drive_pdf|drive_spreadsheet|drive_presentation|video_audio_call|video_youtube|image|description)$/u.test(
+        normalized
+      )
+    ) {
+      continue
+    }
+    return line
+  }
+
+  return `Fonte ${index + 1}`
+}
+
+function resolveStableSourceSelectionId(row: HTMLElement, sourceTitle: string, index: number): string {
+  const preferred = [
+    row.getAttribute("data-source-id"),
+    row.getAttribute("source-id"),
+    row.getAttribute("data-id"),
+    row.getAttribute("data-resource-id")
+  ]
+  for (const candidate of preferred) {
+    const normalized = String(candidate ?? "").trim()
+    if (normalized) {
+      return normalized
+    }
+  }
+
+  return `dom-${normalizeSnapshotValue(sourceTitle)}-${index + 1}`
+}
+
+function toggleRowSelection(row: HTMLElement, shouldBeChecked: boolean): boolean {
+  const control = resolveRowCheckboxControl(row)
+  if (!control) {
+    return false
+  }
+
+  const currentChecked = readCheckboxCheckedState(control)
+  if (currentChecked === shouldBeChecked) {
+    return false
+  }
+
+  control.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }))
+  control.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true }))
+  control.click()
+
+  let nextChecked = readCheckboxCheckedState(control)
+  if (nextChecked === shouldBeChecked) {
+    return true
+  }
+
+  if (control instanceof HTMLInputElement) {
+    control.checked = shouldBeChecked
+    control.dispatchEvent(new Event("input", { bubbles: true, cancelable: true }))
+    control.dispatchEvent(new Event("change", { bubbles: true, cancelable: true }))
+    nextChecked = readCheckboxCheckedState(control)
+  }
+
+  if (nextChecked === shouldBeChecked) {
+    return true
+  }
+
+  const fallbackClickable = control.closest<HTMLElement>("label, button, [role='checkbox'], div")
+  if (fallbackClickable && fallbackClickable !== control) {
+    fallbackClickable.click()
+    nextChecked = readCheckboxCheckedState(control)
+    return nextChecked === shouldBeChecked
+  }
+
+  return false
 }
 
 function normalizeSnapshotValue(value: unknown): string {
@@ -338,6 +1211,14 @@ function normalizeSnapshotValue(value: unknown): string {
     .toLowerCase()
     .replace(/\s+/g, " ")
     .trim()
+}
+
+function resolveSavedGroupSelectionCount(group: SavedSourceSelectionGroup): number {
+  const parsed = Number(group.selectionCount)
+  if (Number.isFinite(parsed) && parsed > 0) {
+    return Math.max(1, Math.round(parsed))
+  }
+  return Math.max(1, group.entries.length)
 }
 
 function normalizeFilterType(type: string): SourceDetectedType | null {
@@ -388,35 +1269,6 @@ function normalizeFilterType(type: string): SourceDetectedType | null {
 function isAllFilter(type: string): boolean {
   const compact = normalizeSnapshotValue(type).replace(/\s+/g, "")
   return compact === "all" || compact === "todos" || compact === "todas"
-}
-
-function hydratePersistedFilterSet(rawFilters: unknown): Set<string> {
-  if (!Array.isArray(rawFilters)) {
-    return new Set(["ALL"])
-  }
-
-  let firstSpecific: string | null = null
-  for (const rawItem of rawFilters) {
-    const item = String(rawItem ?? "")
-    if (!item) {
-      continue
-    }
-
-    if (isAllFilter(item)) {
-      return new Set(["ALL"])
-    }
-
-    const normalizedFilter = normalizeFilterType(item)
-    if (normalizedFilter && !firstSpecific) {
-      firstSpecific = normalizedFilter
-    }
-  }
-
-  if (!firstSpecific) {
-    return new Set(["ALL"])
-  }
-
-  return new Set([firstSpecific])
 }
 
 function extractFirstUrl(input: string): string {
@@ -805,7 +1657,6 @@ function detectSourceTypeFromRow(row: HTMLElement): SourceDetectedType {
     `${hrefSnapshot} ${mediaSnapshot} ${rawTypeSignals} ${fullSnapshot}`
   )
   if (strictGoogleDocsSignal) {
-    console.log(`  ✅ GDOC (strict signal)`)
     return "GDOC"
   }
 
@@ -836,7 +1687,7 @@ function isControlSnapshot(snapshot: string): boolean {
     return true
   }
 
-  return /search sources|filter sources|save view|export visible sources|refresh google docs sources|clear filters and reset panel/.test(
+  return /search sources|filtrar fontes|filter sources|save view|salvar visualizacao|source groups|grupos de fontes|download sources|baixar fontes|export visible sources|refresh google docs sources|atualizar fontes do google docs|clear filters and reset panel/.test(
     snapshot
   )
 }
@@ -906,7 +1757,7 @@ function isIgnoredUiRow(row: HTMLElement): boolean {
 
   const normalizedText = normalizeSnapshotValue(String(row.innerText || row.textContent || ""))
   if (
-    /adicionar fontes|add sources|search sources|save view|export visible sources|refresh google docs sources|clear filters and reset panel/.test(
+    /adicionar fontes|add sources|search sources|filtrar fontes|save view|salvar visualizacao|source groups|grupos de fontes|export visible sources|download sources|baixar fontes|refresh google docs sources|atualizar fontes do google docs|clear filters and reset panel/.test(
       normalizedText
     )
   ) {
@@ -1017,58 +1868,43 @@ function executeDomFiltering(filters: Set<string>, searchText: string): {
   let hiddenCount = 0
   const sample: Array<{ type: SourceDetectedType; title: string; visible: boolean }> = []
 
-  console.group("--- DEBUG FILTERING ---")
-  console.log("Active Filters:", Array.from(filterSet))
-  console.log("Search:", normalizedSearch || "(empty)")
-  try {
-    for (const row of visibleSourceNodes) {
-      if (isIgnoredUiRow(row)) {
-        continue
-      }
-
-      const detectedType = detectSourceTypeFromRow(row)
-      const matchesType = filterSet.has("ALL") || filterSet.has(detectedType)
-      const rowSearchSnapshot = hasSearch ? collectRowSearchSnapshot(row) : ""
-      const matchesSearch = !hasSearch || rowSearchSnapshot.includes(normalizedSearch)
-      const shouldShow = matchesType && matchesSearch
-      const rowPreview = String(row.innerText || row.textContent || "")
-        .replace(/\s+/g, " ")
-        .trim()
-        .slice(0, 20)
-
-      console.log(
-        `Row Text: "${rowPreview}..." | Detected: ${detectedType} | TypeMatch: ${matchesType} | SearchMatch: ${matchesSearch} | Visible: ${shouldShow}`
-      )
-
-      if (shouldShow) {
-        row.style.display = ""
-        row.style.visibility = "visible"
-        delete row.dataset[FILTER_HIDDEN_DATASET_KEY]
-      } else {
-        row.style.visibility = ""
-        row.style.display = "none"
-        row.dataset[FILTER_HIDDEN_DATASET_KEY] = "1"
-      }
-
-      if (shouldShow) {
-        visibleCount += 1
-      } else {
-        hiddenCount += 1
-      }
-
-      if (sample.length < 8) {
-        sample.push({
-          type: detectedType,
-          title: String(row.innerText || row.textContent || "")
-            .replace(/\s+/g, " ")
-            .trim()
-            .slice(0, 120),
-          visible: shouldShow
-        })
-      }
+  for (const row of visibleSourceNodes) {
+    if (isIgnoredUiRow(row)) {
+      continue
     }
-  } finally {
-    console.groupEnd()
+
+    const detectedType = detectSourceTypeFromRow(row)
+    const matchesType = filterSet.has("ALL") || filterSet.has(detectedType)
+    const rowSearchSnapshot = hasSearch ? collectRowSearchSnapshot(row) : ""
+    const matchesSearch = !hasSearch || rowSearchSnapshot.includes(normalizedSearch)
+    const shouldShow = matchesType && matchesSearch
+
+    if (shouldShow) {
+      row.style.display = ""
+      row.style.visibility = "visible"
+      delete row.dataset[FILTER_HIDDEN_DATASET_KEY]
+    } else {
+      row.style.visibility = ""
+      row.style.display = "none"
+      row.dataset[FILTER_HIDDEN_DATASET_KEY] = "1"
+    }
+
+    if (shouldShow) {
+      visibleCount += 1
+    } else {
+      hiddenCount += 1
+    }
+
+    if (sample.length < 8) {
+      sample.push({
+        type: detectedType,
+        title: String(row.innerText || row.textContent || "")
+          .replace(/\s+/g, " ")
+          .trim()
+          .slice(0, 120),
+        visible: shouldShow
+      })
+    }
   }
 
   return {
@@ -1117,13 +1953,6 @@ function applyVisualFilters(filters: Set<string>, searchText: string): void {
       sample: result.sample
     }
 
-    console.info("[sources:filters] applied", {
-      activeFilters: Array.from(filterSet),
-      searchText: currentSearchText,
-      rows: result.rows,
-      visibleCount: result.visibleCount,
-      hiddenCount: result.hiddenCount
-    })
   } finally {
     dispatchSourceFilterApplyEnd()
   }
@@ -1151,8 +1980,9 @@ function PanelActionButton(props: {
   onClick: () => void
   children: ReactNode
   active?: boolean
+  disabled?: boolean
 }) {
-  const { title, onClick, children, active = false } = props
+  const { title, onClick, children, active = false, disabled = false } = props
 
   return (
     <button
@@ -1160,9 +1990,18 @@ function PanelActionButton(props: {
       title={title}
       aria-label={title}
       aria-pressed={active}
-      onClick={onClick}
+      disabled={disabled}
+      onMouseDown={swallowPanelActionClick}
+      onClick={(event) => {
+        swallowPanelActionClick(event)
+        if (disabled) {
+          return
+        }
+        onClick()
+      }}
       className={[
         "inline-flex h-8 w-8 items-center justify-center rounded-[11px] border text-[#8e959e] transition-colors",
+        disabled ? "cursor-not-allowed opacity-50" : "",
         active
           ? "border-[#facc15]/30 bg-[#221c08] text-[#facc15]"
           : "border-white/[0.06] bg-[#131519] hover:bg-[#171a1f] hover:text-white"
@@ -1170,4 +2009,41 @@ function PanelActionButton(props: {
       {children}
     </button>
   )
+}
+
+function swallowPanelActionClick(event: {
+  preventDefault: () => void
+  stopPropagation: () => void
+  nativeEvent?: Event
+}): void {
+  event.preventDefault()
+  event.stopPropagation()
+  const native = event.nativeEvent as Event & { stopImmediatePropagation?: () => void }
+  native?.stopImmediatePropagation?.()
+}
+
+async function sendBackgroundCommand<T = unknown>(
+  action: string,
+  payload?: Record<string, unknown>
+): Promise<StandardResponse<T>> {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage(
+      {
+        action,
+        command: action,
+        payload
+      },
+      (response: StandardResponse<T> & { data?: T }) => {
+        if (chrome.runtime.lastError?.message) {
+          resolve({
+            success: false,
+            error: chrome.runtime.lastError.message
+          })
+          return
+        }
+
+        resolve(response ?? { success: false, error: "No response from the background script." })
+      }
+    )
+  })
 }

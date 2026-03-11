@@ -286,106 +286,108 @@ export function PromptCoachBubble() {
   }
 
   return (
-    <AnimatePresence>
-      {visible ? (
-        <motion.div
-          key="prompt-coach"
-          initial={{ opacity: 0, y: 10, scale: 0.97 }}
-          animate={{ opacity: 1, y: 0, scale: 1 }}
-          exit={{ opacity: 0, y: 8, scale: 0.97 }}
-          transition={{ duration: 0.18 }}
-          className="pointer-events-none fixed z-[2147483646]"
-          style={{
-            left: bubbleStyle.left,
-            top: bubbleStyle.top,
-            width: `${TRIGGER_WIDTH}px`
-          }}>
-          <div ref={containerRef} className="pointer-events-none relative">
-            <AnimatePresence>
-              {isExpanded ? (
-                <motion.div
-                  key="prompt-coach-panel"
-                  initial={{ opacity: 0, y: 8, scale: 0.98 }}
-                  animate={{ opacity: 1, y: 0, scale: 1 }}
-                  exit={{ opacity: 0, y: 8, scale: 0.98 }}
-                  transition={{ duration: 0.16 }}
-                  className="pointer-events-auto absolute bottom-[calc(100%+10px)] right-0"
-                  style={{ width: `${PANEL_WIDTH}px` }}>
-                  <div className="liquid-glass-panel rounded-[18px] p-3">
-                    <div className="liquid-glass-content">
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0">
-                          <p className="text-[10px] font-medium uppercase tracking-[0.14em] text-zinc-500">
-                            Optimizations
-                          </p>
-                          <p className="mt-0.5 text-[10px] text-zinc-300">
-                            Improvements to get better results.
-                          </p>
+    <div style={{ display: "contents" }}>
+      <AnimatePresence mode="wait">
+        {visible ? (
+          <motion.div
+            key="prompt-coach"
+            initial={{ opacity: 0, y: 10, scale: 0.97 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 8, scale: 0.97 }}
+            transition={{ duration: 0.18 }}
+            className="pointer-events-none fixed z-[2147483646]"
+            style={{
+              left: bubbleStyle.left,
+              top: bubbleStyle.top,
+              width: `${TRIGGER_WIDTH}px`
+            }}>
+            <div ref={containerRef} className="pointer-events-none relative">
+              <AnimatePresence mode="wait">
+                {isExpanded ? (
+                  <motion.div
+                    key="prompt-coach-panel"
+                    initial={{ opacity: 0, y: 8, scale: 0.98 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    exit={{ opacity: 0, y: 8, scale: 0.98 }}
+                    transition={{ duration: 0.16 }}
+                    className="pointer-events-auto absolute bottom-[calc(100%+10px)] right-0"
+                    style={{ width: `${PANEL_WIDTH}px` }}>
+                    <div className="liquid-glass-panel rounded-[18px] p-3">
+                      <div className="liquid-glass-content">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <p className="text-[10px] font-medium uppercase tracking-[0.14em] text-zinc-500">
+                              Optimizations
+                            </p>
+                            <p className="mt-0.5 text-[10px] text-zinc-300">
+                              Improvements to get better results.
+                            </p>
+                          </div>
+
+                          {isThinker ? (
+                            <button
+                              type="button"
+                              onClick={() => void improveWithAI()}
+                              className="liquid-glass-soft inline-flex h-8 shrink-0 items-center gap-1.5 rounded-[12px] px-2.5 text-[10px] font-medium text-zinc-100 hover:-translate-y-px hover:text-white">
+                              <Wand2 size={11} strokeWidth={1.9} />
+                              {isImproving ? "Refining..." : "AI"}
+                            </button>
+                          ) : null}
                         </div>
 
-                        {isThinker ? (
-                          <button
-                            type="button"
-                            onClick={() => void improveWithAI()}
-                            className="liquid-glass-soft inline-flex h-8 shrink-0 items-center gap-1.5 rounded-[12px] px-2.5 text-[10px] font-medium text-zinc-100 hover:-translate-y-px hover:text-white">
-                            <Wand2 size={11} strokeWidth={1.9} />
-                            {isImproving ? "Refining..." : "AI"}
-                          </button>
+                        <div className="mt-2 grid gap-1.5">
+                          {suggestions.map((suggestion) => (
+                            <button
+                              key={suggestion.key}
+                              type="button"
+                              onClick={() => applySuggestion(suggestion)}
+                              className="liquid-glass-soft flex items-start justify-between gap-3 rounded-[14px] px-2.5 py-2 text-left hover:-translate-y-px">
+                              <div className="liquid-glass-content min-w-0">
+                                <p className="text-[10px] font-medium text-white">{suggestion.label}</p>
+                                <p className="mt-0.5 text-[9px] leading-4 text-zinc-400">
+                                  {suggestion.hint}
+                                </p>
+                              </div>
+                              <span className="liquid-glass-content mt-0.5 text-[9px] text-zinc-500">
+                                apply
+                              </span>
+                            </button>
+                          ))}
+                        </div>
+
+                        {feedback ? (
+                          <p className="mt-2 text-[9px] font-medium text-zinc-400">{feedback}</p>
                         ) : null}
                       </div>
-
-                      <div className="mt-2 grid gap-1.5">
-                        {suggestions.map((suggestion) => (
-                          <button
-                            key={suggestion.key}
-                            type="button"
-                            onClick={() => applySuggestion(suggestion)}
-                            className="liquid-glass-soft flex items-start justify-between gap-3 rounded-[14px] px-2.5 py-2 text-left hover:-translate-y-px">
-                            <div className="liquid-glass-content min-w-0">
-                              <p className="text-[10px] font-medium text-white">{suggestion.label}</p>
-                              <p className="mt-0.5 text-[9px] leading-4 text-zinc-400">
-                                {suggestion.hint}
-                              </p>
-                            </div>
-                            <span className="liquid-glass-content mt-0.5 text-[9px] text-zinc-500">
-                              apply
-                            </span>
-                          </button>
-                        ))}
-                      </div>
-
-                      {feedback ? (
-                        <p className="mt-2 text-[9px] font-medium text-zinc-400">{feedback}</p>
-                      ) : null}
                     </div>
-                  </div>
-                </motion.div>
-              ) : null}
-            </AnimatePresence>
+                  </motion.div>
+                ) : null}
+              </AnimatePresence>
 
-            <button
-              type="button"
-              onClick={() => setIsExpanded((current) => !current)}
-              className="pointer-events-auto flex h-[42px] w-full items-center justify-between gap-3 rounded-[14px] border border-[#eab308] bg-[#facc15] px-3 text-left shadow-[0_10px_28px_rgba(250,204,21,0.22)]">
-              <div className="flex min-w-0 items-center gap-2.5">
+              <button
+                type="button"
+                onClick={() => setIsExpanded((current) => !current)}
+                className="pointer-events-auto flex h-[42px] w-full items-center justify-between gap-3 rounded-[14px] border border-[#eab308] bg-[#facc15] px-3 text-left shadow-[0_10px_28px_rgba(250,204,21,0.22)]">
+                <div className="flex min-w-0 items-center gap-2.5">
+                  <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[10px] bg-black/10 text-black">
+                    <Sparkles size={12} strokeWidth={2} />
+                  </span>
+                  <span className="truncate text-[11px] font-semibold tracking-[-0.01em] text-black">
+                    We have optimizations for your prompt
+                  </span>
+                </div>
                 <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[10px] bg-black/10 text-black">
-                  <Sparkles size={12} strokeWidth={2} />
+                  <ChevronUp
+                    size={13}
+                    strokeWidth={2.2}
+                    className={isExpanded ? "" : "rotate-180"}
+                  />
                 </span>
-                <span className="truncate text-[11px] font-semibold tracking-[-0.01em] text-black">
-                  We have optimizations for your prompt
-                </span>
-              </div>
-              <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[10px] bg-black/10 text-black">
-                <ChevronUp
-                  size={13}
-                  strokeWidth={2.2}
-                  className={isExpanded ? "" : "rotate-180"}
-                />
-              </span>
-            </button>
-          </div>
-        </motion.div>
-      ) : null}
-    </AnimatePresence>
+              </button>
+            </div>
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
+    </div>
   )
 }
