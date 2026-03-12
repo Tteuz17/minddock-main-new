@@ -150,7 +150,9 @@ export function isVisible(element: HTMLElement | null | undefined): element is H
 }
 
 function inInjectedTree(element: HTMLElement): boolean {
-  return !!element.closest("#minddock-source-actions-root, #minddock-source-filters-root")
+  return !!element.closest(
+    "#minddock-source-actions-root, #minddock-source-filters-root, #minddock-conversation-export-root"
+  )
 }
 
 function normalize(text: string): string {
@@ -906,6 +908,102 @@ export function resolveConversationHeaderHost(): HTMLElement | null {
 }
 
 /**
+ * Resolve o container de ações no header da conversa para acoplar ações extras.
+ * Prioriza o bloco à direita (onde ficam os botões nativos de configurações/menu).
+ */
+export function resolveConversationActionsHost(): HTMLElement | null {
+  const bySelector = queryDeepFirstVisible<HTMLElement>([
+    "chat-panel-v2 .panel-title-row > div:last-child",
+    "chat-panel .panel-title-row > div:last-child",
+    "[data-testid='conversation-header'] > div:last-child",
+    "div.conversation-header > div:last-child"
+  ])
+
+  if (isViableConversationActionsHost(bySelector)) {
+    return bySelector
+  }
+
+  const headerHost = resolveConversationHeaderHost()
+  if (!(headerHost instanceof HTMLElement) || !isVisible(headerHost)) {
+    return null
+  }
+
+  const headerRect = headerHost.getBoundingClientRect()
+  const candidates = [
+    headerHost,
+    ...Array.from(headerHost.querySelectorAll<HTMLElement>("div, section, span"))
+  ].filter((candidate) => isViableConversationActionsHost(candidate))
+
+  const scored = candidates
+    .map((candidate) => ({
+      candidate,
+      score: scoreConversationActionsHost(candidate, headerRect)
+    }))
+    .sort((left, right) => right.score - left.score)
+
+  return scored[0]?.candidate ?? null
+}
+
+/**
+ * Resolve o botão nativo "Configurar notebook" (ou equivalentes por idioma).
+ * Esse botão é usado como âncora para inserir ações customizadas no topo do chat.
+ */
+export function resolveNotebookConfigureButton(): HTMLElement | null {
+  const bySelector = queryDeepFirstVisible<HTMLElement>([
+    "button[aria-label*='Configurar notebook' i]",
+    "button[title*='Configurar notebook' i]",
+    "button[aria-label*='Configurações do notebook' i]",
+    "button[title*='Configurações do notebook' i]",
+    "button[aria-label*='Configure notebook' i]",
+    "button[title*='Configure notebook' i]",
+    "button[aria-label*='Notebook settings' i]",
+    "button[title*='Notebook settings' i]"
+  ])
+
+  if (bySelector && isVisible(bySelector)) {
+    const rect = bySelector.getBoundingClientRect()
+    if (rect.top <= 180) {
+      return bySelector
+    }
+  }
+
+  // Fallback semântico: procura botões no topo direito com label de configuração.
+  const candidates = queryDeepAll<HTMLElement>(["button", "[role='button']"]).filter((candidate) => {
+    if (!isVisible(candidate)) {
+      return false
+    }
+    const rect = candidate.getBoundingClientRect()
+    if (rect.top > 180 || rect.left < window.innerWidth * 0.45) {
+      return false
+    }
+
+    const label = String(
+      candidate.getAttribute("aria-label") ??
+        candidate.getAttribute("title") ??
+        candidate.textContent ??
+        ""
+    )
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .toLowerCase()
+      .trim()
+
+    if (!label) {
+      return false
+    }
+
+    return (
+      label.includes("configurar notebook") ||
+      label.includes("configuracoes do notebook") ||
+      label.includes("configure notebook") ||
+      label.includes("notebook settings")
+    )
+  })
+
+  return candidates[0] ?? null
+}
+
+/**
  * Captura as mensagens visíveis no chat do NotebookLM.
  * Retorna array de {role, content} para salvar na thread ativa.
  */
@@ -971,6 +1069,57 @@ function resolveConversationLabel(): HTMLElement | null {
   return null
 }
 
+function isViableConversationActionsHost(candidate: HTMLElement | null | undefined): candidate is HTMLElement {
+  if (!(candidate instanceof HTMLElement) || !isVisible(candidate)) {
+    return false
+  }
+
+  if (candidate.id === "minddock-conversation-export-root" || candidate.hasAttribute("data-minddock-target")) {
+    return false
+  }
+
+  const rect = candidate.getBoundingClientRect()
+  if (rect.top > 180 || rect.height < 18 || rect.height > 120) {
+    return false
+  }
+
+  const interactiveCount = resolveVisibleInteractiveCount(candidate)
+  if (interactiveCount === 0) {
+    return false
+  }
+
+  return true
+}
+
+function resolveVisibleInteractiveCount(element: HTMLElement): number {
+  const controls = Array.from(
+    element.querySelectorAll<HTMLElement>("button, [role='button'], a[role='button'], a[aria-label], span[role='button']")
+  )
+  const selfIsControl =
+    element.matches("button, [role='button'], a[role='button'], a[aria-label], span[role='button']") && isVisible(element)
+
+  let count = selfIsControl ? 1 : 0
+  for (const control of controls) {
+    if (!isVisible(control)) {
+      continue
+    }
+    if (control.closest("#minddock-conversation-export-root")) {
+      continue
+    }
+    count += 1
+  }
+
+  return count
+}
+
+function scoreConversationActionsHost(candidate: HTMLElement, headerRect: DOMRect): number {
+  const rect = candidate.getBoundingClientRect()
+  const controls = resolveVisibleInteractiveCount(candidate)
+  const rightPreference = rect.left > headerRect.left + headerRect.width * 0.4 ? 220 : 0
+  const compactPreference = Math.max(0, 120 - Math.abs(rect.height - 34) * 6)
+  return controls * 120 + rightPreference + compactPreference + rect.left * 0.14
+}
+
 function clickElement(element: HTMLElement): boolean {
   element.dispatchEvent(
     new MouseEvent("mousedown", {
@@ -1006,7 +1155,7 @@ function activateElementForInlineEdit(element: HTMLElement): boolean {
 
 function isMindDockInjectedElement(element: HTMLElement): boolean {
   return !!element.closest(
-    "#minddock-focus-threads-root, #minddock-agile-bar-root, #minddock-source-actions-root, #minddock-source-filters-root"
+    "#minddock-focus-threads-root, #minddock-agile-bar-root, #minddock-source-actions-root, #minddock-source-filters-root, #minddock-conversation-export-root"
   )
 }
 

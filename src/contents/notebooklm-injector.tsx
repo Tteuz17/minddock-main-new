@@ -4,11 +4,13 @@ import { createRoot, type Root } from "react-dom/client"
 import "~/styles/globals.css"
 import { getFolders, saveSnippet, createFolder, FOLDER_ICONS } from "~/services/highlight-storage"
 import { AgilePromptsBar } from "../../contents/notebooklm/AgilePromptsBar"
+import { ConversationExportMenu } from "../../contents/notebooklm/ConversationExportMenu"
 import { FocusThreadsBar } from "../../contents/notebooklm/FocusThreadsBar"
 import { SourceDownloadPanel } from "../../contents/notebooklm/SourceDownloadPanel"
 import { SourceFilterPanel } from "../../contents/notebooklm/SourceFilterPanel"
 import { ZettelButton } from "../../contents/notebooklm/ZettelButton"
 import {
+  resolveNotebookConfigureButton,
   SOURCE_FILTER_APPLY_END_EVENT,
   SOURCE_FILTER_APPLY_START_EVENT,
   SOURCE_DOWNLOAD_MODAL_STATE_EVENT,
@@ -23,11 +25,11 @@ export const config: PlasmoCSConfig = {
   run_at: "document_idle"
 }
 
-type InsertMode = "prepend" | "after"
+type InsertMode = "prepend" | "after" | "before"
 type DisplayMode = "contents" | "block"
 
 interface InjectionTarget {
-  key: "source-actions" | "source-filters"
+  key: "source-actions" | "source-filters" | "conversation-export"
   rootId: string
   insertMode: InsertMode
   display: DisplayMode
@@ -141,6 +143,14 @@ class InjectionErrorBoundary extends Component<InjectionErrorBoundaryProps, Inje
 
 const TARGETS: readonly InjectionTarget[] = [
   {
+    key: "conversation-export",
+    rootId: "minddock-conversation-export-root",
+    insertMode: "before",
+    display: "contents",
+    resolveHost: resolveNotebookConfigureButton,
+    render: () => <ConversationExportMenu />
+  },
+  {
     key: "source-actions",
     rootId: "minddock-source-actions-root",
     insertMode: "prepend",
@@ -244,6 +254,11 @@ function placeInjectionPoint(host: HTMLElement, rootElement: HTMLElement, insert
       return
     }
 
+    if (insertMode === "before") {
+      host.insertAdjacentElement("beforebegin", rootElement)
+      return
+    }
+
     host.insertAdjacentElement("afterend", rootElement)
   } catch (error) {
     console.debug("[MindDock] Failed to place injection point", {
@@ -257,6 +272,10 @@ function placeInjectionPoint(host: HTMLElement, rootElement: HTMLElement, insert
 function isPlacementValid(host: HTMLElement, rootElement: HTMLElement, insertMode: InsertMode): boolean {
   if (insertMode === "prepend") {
     return rootElement.parentElement === host
+  }
+
+  if (insertMode === "before") {
+    return host.previousElementSibling === rootElement
   }
 
   return host.nextElementSibling === rootElement

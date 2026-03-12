@@ -12,7 +12,8 @@ const HIDE_STYLE_ID = "minddock-global-visibility-override"
 const HIDDEN_CSS = `
   #minddock-agile-bar-root,
   #minddock-source-actions-root,
-  #minddock-source-filters-root {
+  #minddock-source-filters-root,
+  #minddock-conversation-export-root {
     opacity: 0 !important;
     pointer-events: none !important;
     transform: scale(0.96) !important;
