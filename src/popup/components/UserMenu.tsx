@@ -43,9 +43,9 @@ export function UserMenu() {
 
   return (
     <div className="pointer-events-none absolute bottom-3 left-3 right-3 z-20">
-      <div className="rounded-[26px] border border-white/[0.05] bg-[linear-gradient(180deg,#060606_0%,#090a0d_40%,#050505_100%)] p-2.5 shadow-[0_24px_50px_rgba(0,0,0,0.38)] backdrop-blur-2xl">
+      <div className="rounded-[22px] border border-white/[0.05] bg-[linear-gradient(180deg,#060606_0%,#090a0d_40%,#050505_100%)] p-1.5 shadow-[0_18px_40px_rgba(0,0,0,0.34)] backdrop-blur-2xl">
         <div
-          className="pointer-events-auto relative overflow-hidden rounded-[22px] border border-white/[0.08] px-3 py-2.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_10px_24px_rgba(0,0,0,0.24)]"
+          className="pointer-events-auto relative overflow-hidden rounded-[18px] border border-white/[0.08] px-2.5 py-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_8px_20px_rgba(0,0,0,0.2)]"
           style={{
             backgroundImage: `url(${profileBackgroundSrc})`,
             backgroundPosition: "center bottom",
@@ -54,7 +54,7 @@ export function UserMenu() {
           <div className="pointer-events-none absolute inset-0 bg-black/35" />
 
           <div className="relative z-10 flex items-center gap-3">
-            <div className="flex h-[56px] w-[56px] shrink-0 items-center justify-center overflow-hidden rounded-[16px] bg-[#e7d7c4] shadow-[inset_0_1px_0_rgba(255,255,255,0.28)]">
+            <div className="flex h-[46px] w-[46px] shrink-0 items-center justify-center overflow-hidden rounded-[14px] bg-[#e7d7c4] shadow-[inset_0_1px_0_rgba(255,255,255,0.28)]">
               {user.avatarUrl ? (
                 <img
                   src={user.avatarUrl}
@@ -62,7 +62,7 @@ export function UserMenu() {
                   className="h-full w-full object-cover"
                 />
               ) : (
-                <span className="text-[18px] font-semibold tracking-[-0.03em] text-zinc-900">
+                <span className="text-[16px] font-semibold tracking-[-0.03em] text-zinc-900">
                   {initials}
                 </span>
               )}
@@ -70,20 +70,20 @@ export function UserMenu() {
 
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-1.5">
-                <span className="truncate text-[15px] font-semibold tracking-[-0.02em] text-white">
+                <span className="truncate text-[14px] font-semibold tracking-[-0.02em] text-white">
                   {displayName}
                 </span>
-                <span className="inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full bg-[#facc15]">
-                  <span className="h-1.5 w-1.5 rounded-full bg-white" />
+                <span className="inline-flex h-3 w-3 shrink-0 items-center justify-center rounded-full bg-[#facc15]">
+                  <span className="h-1 w-1 rounded-full bg-white" />
                 </span>
               </div>
 
-              <p className="mt-0.5 truncate text-[10px] text-zinc-300">
+              <p className="mt-0.5 truncate text-[9px] text-zinc-300">
                 MindDock {planName}
               </p>
 
-              <div className="mt-1.5 flex items-center gap-1.5 text-[10px] text-white">
-                <Star size={12} strokeWidth={2} className="fill-[#facc15] text-[#facc15]" />
+              <div className="mt-1 flex items-center gap-1.5 text-[9px] text-white">
+                <Star size={11} strokeWidth={2} className="fill-[#facc15] text-[#facc15]" />
                 <span>5 (35)</span>
               </div>
             </div>
@@ -92,8 +92,8 @@ export function UserMenu() {
               <DropdownMenuTrigger asChild>
                 <button
                   type="button"
-                  className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-white/[0.14] bg-white/[0.06] text-white backdrop-blur-xl hover:bg-white/[0.1]">
-                  <ArrowUp size={15} strokeWidth={2} />
+                  className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-white/[0.14] bg-white/[0.06] text-white backdrop-blur-xl hover:bg-white/[0.1]">
+                  <ArrowUp size={14} strokeWidth={2} />
                 </button>
               </DropdownMenuTrigger>
 

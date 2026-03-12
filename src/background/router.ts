@@ -1,9 +1,10 @@
 import { authManager } from "./auth-manager"
 import { storageManager } from "./storage-manager"
 import { subscriptionManager } from "./subscription"
+import { renderPdfBase64ViaOffscreen } from "./services/offscreen-pdf-service"
 import { aiService } from "~/services/ai-service"
 import { exportService } from "~/services/export-service"
-import { NotebookLMService } from "~/services/NotebookLMService"
+import { NotebookLMService, type SyncVerificationResult } from "~/services/NotebookLMService"
 import { zettelkastenService } from "~/services/zettelkasten"
 import { threadService } from "~/services/thread-service"
 import { STORAGE_KEYS } from "~/lib/constants"
@@ -27,6 +28,10 @@ import {
   normalizeAccountEmail,
   normalizeAuthUser
 } from "~/lib/notebook-account-scope"
+import {
+  resolveConversationAliasKeys,
+  resolveConversationPrimaryKey
+} from "~/lib/conversation-resync-identity"
 
 type MessageSender = chrome.runtime.MessageSender
 type CaptureSourceKind = "chat" | "doc"
@@ -38,9 +43,11 @@ type Handler = (
 
 const IMPORT_LIMIT_DISABLED = false
 const RESYNC_TOTAL_BUDGET_MS = 90_000
+const RESYNC_TOTAL_BUDGET_SECONDS = Math.ceil(RESYNC_TOTAL_BUDGET_MS / 1000)
 const RESYNC_PROGRESS_EVENT = "MINDDOCK_RESYNC_PROGRESS"
 const RESYNC_SUCCESS_EVENT = "MINDDOCK_RESYNC_SUCCESS"
 const RESYNC_FLOW_VERSION = "resync-v6"
+const GDOC_SYNC_STEP_DELAY_MS = 320
 const BLOCKED_NOTEBOOK_TITLE_KEYS = new Set([
   "conversa",
   "conversas",
@@ -98,6 +105,12 @@ function normalizeCaptureSourceKind(value: unknown): CaptureSourceKind {
     return "doc"
   }
   return "chat"
+}
+
+function sleep(timeoutMs: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, Math.max(0, timeoutMs))
+  })
 }
 
 function extractGoogleDocIdFromValue(value: unknown): string {
@@ -177,6 +190,7 @@ class MessageRouter {
     this.register(MESSAGE_ACTIONS.CMD_GET_NOTEBOOK_SOURCES, this.handleGetNotebookSources)
     this.register(MESSAGE_ACTIONS.CMD_GET_SOURCE_CONTENTS, this.handleGetSourceContents)
     this.register(MESSAGE_ACTIONS.CMD_REFRESH_GDOC_SOURCES, this.handleRefreshGDocSources)
+    this.register(MESSAGE_ACTIONS.CMD_DELETE_NOTEBOOK_SOURCES, this.handleDeleteNotebookSources)
     this.register(MESSAGE_ACTIONS.CMD_SYNC_ALL_GDOCS, this.handleRefreshGDocSources)
     this.register(this.backgroundSyncAction, this.handleSyncNotebooks)
 
@@ -208,6 +222,7 @@ class MessageRouter {
     this.register(MESSAGE_ACTIONS.THREAD_MESSAGES, this.handleThreadMessages)
     this.register(MESSAGE_ACTIONS.THREAD_SAVE_MESSAGES, this.handleThreadSaveMessages)
     this.register(MESSAGE_ACTIONS.OPEN_SIDEPANEL, this.handleOpenSidePanel)
+    this.register(MESSAGE_ACTIONS.CMD_RENDER_PDF_OFFSCREEN, this.handleRenderPdfOffscreen)
   }
 
   private register(command: string, handler: Handler): void {
@@ -357,7 +372,7 @@ class MessageRouter {
       return "RESYNC_INSERT_INVALID"
     }
 
-    if (/TIMEOUT|45s|RESYNC_ABORTED/i.test(normalizedMessage)) {
+    if (/TIMEOUT|\d+s|RESYNC_ABORTED/i.test(normalizedMessage)) {
       return "RESYNC_TIMEOUT"
     }
 
@@ -761,24 +776,364 @@ class MessageRouter {
   }
 
   private async handleGetNotebookSources(payload: unknown): Promise<StandardResponse> {
-    void payload
-    return this.fail(
-      "Leitura de fontes via background foi desativada. Use o content script para sincronizar dados do NotebookLM."
-    )
+    const data = (payload as { notebookId?: string }) ?? {}
+    const notebookId = String(data.notebookId ?? "").trim()
+
+    if (!notebookId) {
+      return this.fail("notebookId obrigatorio para listar fontes do notebook.")
+    }
+
+    try {
+      const service = new NotebookLMService()
+      const sources = await service.listSources(notebookId)
+
+      return this.ok({
+        sources: sources.map((source) => ({
+          id: source.id,
+          title: source.title,
+          url: source.docReference ?? undefined,
+          isGDoc: source.isGDoc === true,
+          type: source.isGDoc === true ? "gdoc" : "text"
+        }))
+      })
+    } catch (error) {
+      return this.fail(
+        error instanceof Error ? error.message : "Falha ao listar fontes do notebook."
+      )
+    }
   }
 
   private async handleGetSourceContents(payload: unknown): Promise<StandardResponse> {
-    void payload
-    return this.fail(
-      "Leitura de conteudo de fontes via background foi desativada. Use o content script para sincronizar dados do NotebookLM."
-    )
+    const data = (payload as { notebookId?: string; sourceIds?: string[] }) ?? {}
+    const notebookId = String(data.notebookId ?? "").trim()
+    const sourceIds = Array.isArray(data.sourceIds)
+      ? data.sourceIds.map((id) => String(id ?? "").trim()).filter(Boolean)
+      : []
+
+    if (!notebookId) {
+      return this.fail("notebookId obrigatorio para buscar conteudo de fontes.")
+    }
+
+    if (sourceIds.length === 0) {
+      return this.fail("sourceIds obrigatorio para buscar conteudo de fontes.")
+    }
+
+    try {
+      const service = new NotebookLMService()
+      const result = await service.getSourcesContent(notebookId, sourceIds)
+
+      return this.ok({
+        sourceSnippets: result.sourceSnippets,
+        failedSourceIds: result.failedSourceIds
+      })
+    } catch (error) {
+      return this.fail(
+        error instanceof Error ? error.message : "Falha ao buscar conteudo das fontes."
+      )
+    }
   }
 
   private async handleRefreshGDocSources(payload: unknown): Promise<StandardResponse> {
-    void payload
-    return this.fail(
-      "Sincronizacao GDoc via background foi desativada. Use o content script para sincronizar dados do NotebookLM."
+    const data =
+      payload && typeof payload === "object" && !Array.isArray(payload)
+        ? (payload as {
+            notebookId?: unknown
+            gdocSources?: Array<{
+              title?: unknown
+              docReference?: unknown
+              sourceUrl?: unknown
+              sourceId?: unknown
+            }>
+          })
+        : {}
+
+    const notebookId = String(data.notebookId ?? "").trim()
+    console.debug("[DIAG] notebookId recebido:", notebookId || "(vazio)")
+
+    if (!notebookId) {
+      return this.fail("notebookId obrigatorio para sincronizar Google Docs.")
+    }
+
+    const service = new NotebookLMService()
+    const listedSources = await service.listSources(notebookId)
+
+    console.debug(
+      "[DIAG] fontes listadas:",
+      listedSources.map((s) => ({
+        id: s.id,
+        title: s.title,
+        isGDoc: s.isGDoc,
+        gDocId: s.gDocId ?? null
+      }))
     )
+
+    const gdocSources = listedSources.filter((s) => s.isGDoc === true)
+    const staticSources = listedSources.filter((s) => s.isGDoc !== true)
+    console.debug(`[DIAG] GDocs detectados: ${gdocSources.length} | Estaticos: ${staticSources.length}`)
+
+    if (listedSources.length === 0) {
+      return this.ok({
+        syncedCount: 0,
+        total: 0,
+        failedSourceTitleList: [],
+        syncedSourceTitleList: [],
+        refreshedSourceIds: [],
+        skippedSourceTitleList: [],
+        message: "Nenhuma fonte detectada para atualizar.",
+      })
+    }
+
+    const results: SyncVerificationResult[] = []
+
+    for (let index = 0; index < listedSources.length; index += 1) {
+      const source = listedSources[index]
+      const sourceId = String(source.id ?? "").trim()
+      if (!sourceId) {
+        continue
+      }
+
+      console.debug(
+        `[DIAG] sync [${index + 1}/${listedSources.length}] "${source.title}" | isGDoc:${source.isGDoc} | id:${sourceId}`
+      )
+
+      const result = await service.syncGoogleDocSourceBySourceIdVerified(
+        notebookId,
+        sourceId,
+        String(source.title ?? "").trim() || sourceId,
+        source.isGDoc === true
+      )
+
+      console.debug(`[DIAG] resultado "${source.title}":`, {
+        accepted: result.accepted,
+        changed: result.changed,
+        skipReason: result.skipReason ?? null,
+      })
+
+      results.push(result)
+
+      if (source.isGDoc === true && index < listedSources.length - 1) {
+        await sleep(300)
+      }
+    }
+
+    const synced = results.filter((result) => result.changed)
+    const skipped = results.filter((result) => Boolean(result.skipReason))
+    const failed = results.filter((result) => !result.accepted && !result.skipReason)
+
+    console.debug("[DIAG] resultado final:", {
+      synced: synced.length,
+      skipped: skipped.length,
+      failed: failed.length,
+      total: results.length,
+    })
+
+    return this.ok({
+      syncedCount: synced.length,
+      total: results.length,
+      syncedSourceTitleList: synced.map((result) => result.title),
+      skippedSourceTitleList: skipped.map((result) => `${result.title} (${result.skipReason})`),
+      failedSourceTitleList: failed.map((result) => result.title),
+      refreshedSourceIds: synced.map((result) => result.sourceId),
+      message:
+        synced.length > 0
+          ? `${synced.length} fonte(s) sincronizada(s).`
+          : skipped.length > 0
+            ? "Fontes sem vinculo Google Docs ativo."
+            : "Nenhuma mudanca detectada.",
+    })
+  }
+
+  private async handleDeleteNotebookSources(payload: unknown): Promise<StandardResponse> {
+    const data =
+      payload && typeof payload === "object" && !Array.isArray(payload)
+        ? (payload as {
+            notebookId?: unknown
+            sourceIds?: unknown[]
+            sources?: Array<{
+              sourceId?: unknown
+              backendId?: unknown
+              sourceTitle?: unknown
+              rowIndex?: unknown
+            }>
+          })
+        : {}
+
+    const notebookId = String(data.notebookId ?? "").trim()
+    const requestedSourceIds = Array.isArray(data.sourceIds)
+      ? data.sourceIds.map((id) => String(id ?? "").trim()).filter(Boolean)
+      : []
+    const rawCandidates = Array.isArray(data.sources) ? data.sources : []
+    if (!notebookId) {
+      return this.fail("notebookId obrigatorio para excluir fontes.")
+    }
+    if (requestedSourceIds.length === 0 && rawCandidates.length === 0) {
+      return this.fail("Nenhuma fonte selecionada para exclusao.")
+    }
+
+    try {
+      const service = new NotebookLMService()
+      const listedSources = await service.listSources(notebookId)
+      if (listedSources.length === 0) {
+        return this.ok({
+          deletedCount: 0,
+          total: rawCandidates.length,
+          deletedCandidateIndexList: [],
+          deletedSourceIdList: [],
+          deletedSourceTitleList: [],
+          skippedSourceTitleList: rawCandidates.map((candidate) =>
+            String(candidate?.sourceTitle ?? "").trim() || "Fonte sem titulo"
+          ),
+          failedSourceTitleList: [],
+          message: "Nenhuma fonte do caderno foi encontrada."
+        })
+      }
+
+      const sourceById = new Map<string, (typeof listedSources)[number]>()
+      const sourceIdsByTitleKey = new Map<string, string[]>()
+      for (const source of listedSources) {
+        const sourceId = String(source.id ?? "").trim()
+        if (!sourceId) {
+          continue
+        }
+        sourceById.set(sourceId, source)
+        const titleKey = normalizeNotebookTitleKey(String(source.title ?? ""))
+        if (!titleKey) {
+          continue
+        }
+        const current = sourceIdsByTitleKey.get(titleKey) ?? []
+        current.push(sourceId)
+        sourceIdsByTitleKey.set(titleKey, current)
+      }
+
+      const resolvedTargets: Array<{
+        candidateIndex: number
+        sourceId: string
+        title: string
+      }> = []
+      const skippedSourceTitleList: string[] = []
+      const seenSourceIds = new Set<string>()
+
+      for (const requestedSourceId of requestedSourceIds) {
+        if (!requestedSourceId) {
+          continue
+        }
+        if (!sourceById.has(requestedSourceId)) {
+          skippedSourceTitleList.push(requestedSourceId)
+          continue
+        }
+        if (seenSourceIds.has(requestedSourceId)) {
+          continue
+        }
+        seenSourceIds.add(requestedSourceId)
+        resolvedTargets.push({
+          candidateIndex: -1,
+          sourceId: requestedSourceId,
+          title: String(sourceById.get(requestedSourceId)?.title ?? requestedSourceId).trim()
+        })
+      }
+
+      for (let index = 0; index < rawCandidates.length; index += 1) {
+        const candidate = rawCandidates[index]
+        const sourceTitle = String(candidate?.sourceTitle ?? "").trim() || "Fonte sem titulo"
+        const backendId = String(candidate?.backendId ?? "").trim()
+        const sourceIdCandidate = String(candidate?.sourceId ?? "").trim()
+        const rowIndexRaw =
+          candidate && typeof candidate === "object" ? Number((candidate as { rowIndex?: unknown }).rowIndex) : NaN
+        const rowIndex = Number.isInteger(rowIndexRaw) ? rowIndexRaw : -1
+        const titleKey = normalizeNotebookTitleKey(
+          sourceTitle
+            .replace(/\u2026+$/gu, "")
+            .replace(/\.{3,}$/gu, "")
+            .trim()
+        )
+
+        let resolvedSourceId = ""
+        if (backendId && sourceById.has(backendId)) {
+          resolvedSourceId = backendId
+        } else if (sourceIdCandidate && sourceById.has(sourceIdCandidate)) {
+          resolvedSourceId = sourceIdCandidate
+        } else if (rowIndex >= 0 && rowIndex < listedSources.length) {
+          resolvedSourceId = String(listedSources[rowIndex]?.id ?? "").trim()
+        } else if (titleKey) {
+          const titleMatches = sourceIdsByTitleKey.get(titleKey) ?? []
+          if (titleMatches.length === 1) {
+            resolvedSourceId = titleMatches[0]
+          } else {
+            const fuzzyMatches = listedSources
+              .filter((source) => {
+                const listedTitleKey = normalizeNotebookTitleKey(String(source.title ?? ""))
+                return (
+                  listedTitleKey.length > 0 &&
+                  (listedTitleKey.includes(titleKey) || titleKey.includes(listedTitleKey))
+                )
+              })
+              .map((source) => String(source.id ?? "").trim())
+              .filter(Boolean)
+            if (fuzzyMatches.length === 1) {
+              resolvedSourceId = fuzzyMatches[0]
+            }
+          }
+        }
+
+        if (!resolvedSourceId) {
+          skippedSourceTitleList.push(sourceTitle)
+          continue
+        }
+
+        if (seenSourceIds.has(resolvedSourceId)) {
+          continue
+        }
+        seenSourceIds.add(resolvedSourceId)
+        resolvedTargets.push({
+          candidateIndex: index,
+          sourceId: resolvedSourceId,
+          title: String(sourceById.get(resolvedSourceId)?.title ?? sourceTitle).trim() || sourceTitle
+        })
+      }
+
+      const deletedCandidateIndexList: number[] = []
+      const deletedSourceIdList: string[] = []
+      const deletedSourceTitleList: string[] = []
+      const failedSourceTitleList: string[] = []
+
+      for (const target of resolvedTargets) {
+        try {
+          await service.deleteSource(notebookId, target.sourceId)
+          deletedCandidateIndexList.push(target.candidateIndex)
+          deletedSourceIdList.push(target.sourceId)
+          deletedSourceTitleList.push(target.title)
+        } catch (error) {
+          console.warn("[MindDock] Falha ao excluir fonte selecionada.", {
+            notebookId,
+            sourceId: target.sourceId,
+            title: target.title,
+            error
+          })
+          failedSourceTitleList.push(target.title)
+        }
+      }
+
+      const deletedCount = deletedSourceIdList.length
+      const total = rawCandidates.length > 0 ? rawCandidates.length : requestedSourceIds.length
+
+      return this.ok({
+        deletedCount,
+        total,
+        deletedCandidateIndexList,
+        deletedSourceIdList,
+        deletedSourceTitleList,
+        skippedSourceTitleList,
+        failedSourceTitleList,
+        message:
+          deletedCount > 0
+            ? `${deletedCount} fonte(s) excluida(s).`
+            : skippedSourceTitleList.length > 0
+              ? "Nao foi possivel mapear as fontes selecionadas para exclusao."
+              : "Nenhuma fonte foi excluida."
+      })
+    } catch (error) {
+      return this.fail(error instanceof Error ? error.message : "Falha ao excluir fontes selecionadas.")
+    }
   }
 
   // Legacy auth command preserved for popup flow that still uses OAuth Google.
@@ -865,10 +1220,99 @@ class MessageRouter {
   }
 
   private async handleSyncGdoc(payload: unknown): Promise<StandardResponse> {
-    void payload
-    return this.fail(
-      "Sync de GDoc via background foi desativado. Use o content script para acionar operacoes no NotebookLM."
-    )
+    const data =
+      payload && typeof payload === "object" && !Array.isArray(payload)
+        ? (payload as {
+            notebookId?: unknown
+            sourceId?: unknown
+            url?: unknown
+            docReference?: unknown
+            title?: unknown
+          })
+        : {}
+
+    try {
+      const service = new NotebookLMService()
+      const resolvedNotebookId = await this.resolvePreferredNotebookId(
+        String(data.notebookId ?? "").trim() || undefined,
+        true
+      )
+
+      const sourceId = String(data.sourceId ?? "").trim()
+      if (sourceId) {
+        await service.syncGoogleDocSourceBySourceId(resolvedNotebookId, sourceId)
+        return this.ok({
+          success: true,
+          notebookId: resolvedNotebookId,
+          syncedCount: 1,
+          total: 1
+        })
+      }
+
+      const docReference = String(data.docReference ?? data.url ?? "").trim()
+      const docId = extractGoogleDocIdFromValue(docReference)
+      if (!docId) {
+        return this.fail("Nao foi possivel identificar o ID do Google Docs para sincronizacao.")
+      }
+
+      const gdocSources = (await service.listSources(resolvedNotebookId)).filter((source) => {
+        if (source.isGDoc !== true) {
+          return false
+        }
+        const listedDocId = extractGoogleDocIdFromValue(source.gDocId ?? source.docReference)
+        return listedDocId === docId
+      })
+
+      if (gdocSources.length === 0) {
+        const requestedTitle = String(data.title ?? "").trim() || "Google Doc"
+        const sourceIdCreated = await service.addGoogleDocSource(resolvedNotebookId, requestedTitle, docId)
+        return this.ok({
+          success: true,
+          notebookId: resolvedNotebookId,
+          sourceId: sourceIdCreated,
+          syncedCount: 1,
+          total: 1,
+          mode: "created"
+        })
+      }
+
+      let syncedCount = 0
+      const failedSourceIds: string[] = []
+
+      for (let index = 0; index < gdocSources.length; index += 1) {
+        const listedSource = gdocSources[index]
+        const listedSourceId = String(listedSource.id ?? "").trim()
+        if (!listedSourceId) {
+          continue
+        }
+        try {
+          await service.syncGoogleDocSourceBySourceId(resolvedNotebookId, listedSourceId)
+          syncedCount += 1
+        } catch (error) {
+          console.warn("[MindDock] Falha ao sincronizar GDoc via MINDDOCK_SYNC_GDOC.", {
+            notebookId: resolvedNotebookId,
+            listedSourceId,
+            error
+          })
+          failedSourceIds.push(listedSourceId)
+        }
+
+        if (index < gdocSources.length - 1) {
+          await sleep(GDOC_SYNC_STEP_DELAY_MS)
+        }
+      }
+
+      return this.ok({
+        success: true,
+        notebookId: resolvedNotebookId,
+        syncedCount,
+        total: gdocSources.length,
+        failedSourceIds,
+        mode: "synced-existing"
+      })
+    } catch (error) {
+      return this.fail(error instanceof Error ? error.message : "Falha ao sincronizar Google Docs.")
+    }
   }
 
   private async handleProtocolAppendSource(payload: unknown): Promise<StandardResponse> {
@@ -1150,14 +1594,14 @@ class MessageRouter {
       if (requestedResync && Date.now() >= resyncDeadlineTs) {
         return this.fail(
           "RESYNC_TIMEOUT",
-          this.buildResyncErrorPayload(
-            resolvedNotebookId,
-            targetSourceToSwap,
-            resyncStartTs,
-            "Re-sync excedeu o limite de 45s durante a fase de validacao."
+            this.buildResyncErrorPayload(
+              resolvedNotebookId,
+              targetSourceToSwap,
+              resyncStartTs,
+              `Re-sync excedeu o limite de ${RESYNC_TOTAL_BUDGET_SECONDS}s durante a fase de validacao.`
+            )
           )
-        )
-      }
+        }
 
       let sourceId = ""
       if (requestedResync && targetSourceToSwap) {
@@ -1170,7 +1614,7 @@ class MessageRouter {
               resolvedNotebookId,
               targetSourceToSwap,
               resyncStartTs,
-              "Re-sync excedeu o limite de 45s antes de concluir a criacao da nova fonte."
+              `Re-sync excedeu o limite de ${RESYNC_TOTAL_BUDGET_SECONDS}s antes de concluir a criacao da nova fonte.`
             )
           )
         }
@@ -1227,12 +1671,71 @@ class MessageRouter {
               }
             ),
             remainingForCreateMs,
-            "Re-sync excedeu o limite de 45s ao criar a nova fonte."
+            `Re-sync excedeu o limite de ${RESYNC_TOTAL_BUDGET_SECONDS}s ao criar a nova fonte.`
           )
           sourceId = String(strictReplaceResult.newSourceId ?? "").trim()
           swappedExisting =
             strictReplaceResult.wasReplaced === true || strictReplaceResult.updatedInPlace === true
           updatedInPlace = strictReplaceResult.updatedInPlace === true
+
+          if (updatedInPlace && sourceId) {
+            this.emitResyncProgress(
+              capturedFromUrl,
+              "polling",
+              undefined,
+              undefined,
+              "confirming_updated_content"
+            )
+
+            let updateInPlaceConfirmed = false
+            const verifyDeadlineTs = Date.now() + 14_000
+
+            for (let verifyAttempt = 0; verifyAttempt < 4; verifyAttempt += 1) {
+              const remainingForVerifyMs = verifyDeadlineTs - Date.now()
+              if (remainingForVerifyMs <= 450) {
+                break
+              }
+
+              try {
+                const verifyOperation = service.sourceContainsExpectedContent(sourceId, content)
+                updateInPlaceConfirmed = await this.withTimeout(
+                  verifyOperation,
+                  Math.min(4_500, Math.max(800, remainingForVerifyMs)),
+                  "RESYNC_UPDATE_IN_PLACE_VERIFY_TIMEOUT"
+                )
+              } catch {
+                updateInPlaceConfirmed = false
+              }
+
+              if (updateInPlaceConfirmed) {
+                break
+              }
+
+              await new Promise((resolve) => setTimeout(resolve, 650))
+            }
+
+            if (!updateInPlaceConfirmed) {
+              downgradedFromResync = true
+              this.emitResyncProgress(
+                capturedFromUrl,
+                "uploading",
+                undefined,
+                undefined,
+                "update_in_place_unverified_fallback_new_insert"
+              )
+              console.warn(
+                "[ROUTER] update in-place nao confirmou novo conteudo; fallback para nova captura (insert).",
+                {
+                  notebookId: resolvedNotebookId,
+                  targetSourceToSwap,
+                  sourceId
+                }
+              )
+              sourceId = await service.insertSource(resolvedNotebookId, title, content, "NEW")
+              swappedExisting = false
+              updatedInPlace = false
+            }
+          }
         } catch (strictReplaceError) {
           const strictReplaceMessage =
             strictReplaceError instanceof Error
@@ -1276,6 +1779,210 @@ class MessageRouter {
       } else {
         sourceId = await service.insertSource(resolvedNotebookId, title, content, "NEW")
       }
+
+      // When re-sync falls back to a new insert, enforce old-source cleanup so we don't
+      // silently leave duplicated entries in NotebookLM.
+      if (
+        requestedResync &&
+        targetSourceToSwap &&
+        sourceId &&
+        String(sourceId ?? "").trim() !== String(targetSourceToSwap ?? "").trim() &&
+        !updatedInPlace
+      ) {
+        this.emitResyncProgress(
+          capturedFromUrl,
+          "polling",
+          undefined,
+          undefined,
+          "finalizing_replace_cleanup"
+        )
+
+        let oldSourceRemoved = false
+        let lastCleanupError = ""
+
+        for (let cleanupAttempt = 1; cleanupAttempt <= 2; cleanupAttempt += 1) {
+          try {
+            await this.withTimeout(
+              service.deleteSource(resolvedNotebookId, targetSourceToSwap),
+              14_000,
+              "RESYNC_FINAL_DELETE_TIMEOUT"
+            )
+            oldSourceRemoved = true
+            break
+          } catch (cleanupError) {
+            lastCleanupError =
+              cleanupError instanceof Error ? cleanupError.message : String(cleanupError ?? "")
+
+            // Verify if source is actually still present before deciding to fail.
+            try {
+              const sourcesAfterCleanup = await this.withTimeout(
+                service.listSources(resolvedNotebookId),
+                5_000,
+                "RESYNC_FINAL_DELETE_LIST_TIMEOUT"
+              )
+              const stillExists = sourcesAfterCleanup.some(
+                (source) =>
+                  String(source.id ?? "").trim() === String(targetSourceToSwap ?? "").trim()
+              )
+              if (!stillExists) {
+                oldSourceRemoved = true
+                break
+              }
+            } catch {
+              // best-effort verification only
+            }
+          }
+        }
+
+        if (!oldSourceRemoved) {
+          // Best effort rollback to avoid ending with duplicate sources.
+          try {
+            await this.withTimeout(
+              service.optimisticDeleteSource(resolvedNotebookId, sourceId, {
+                maxTotalMs: 5_500
+              }),
+              8_000,
+              "RESYNC_ROLLBACK_TIMEOUT"
+            )
+          } catch {
+            // no-op; we still return a deterministic error
+          }
+
+          return this.fail(
+            "RESYNC_DELETE_FAILED",
+            this.buildResyncErrorPayload(
+              resolvedNotebookId,
+              targetSourceToSwap,
+              resyncStartTs,
+              `Nao foi possivel remover a fonte antiga apos insert de fallback. oldSourceId=${targetSourceToSwap}; newSourceId=${sourceId}; detail=${lastCleanupError || "cleanup_unconfirmed"}`
+            )
+          )
+        }
+      }
+
+      // Final guard: in re-sync, keep only one source for the same title.
+      if (requestedResync && sourceId) {
+        const normalizedTargetSourceId = String(sourceId ?? "").trim()
+        const normalizedTitleKey = normalizeNotebookTitleKey(title)
+
+        if (normalizedTargetSourceId && normalizedTitleKey) {
+          this.emitResyncProgress(
+            capturedFromUrl,
+            "polling",
+            undefined,
+            undefined,
+            "deduping_same_title_sources"
+          )
+
+          let duplicateSourceIds: string[] = []
+          try {
+            const listedSources = await this.withTimeout(
+              service.listSources(resolvedNotebookId),
+              8_000,
+              "RESYNC_DEDUPE_LIST_TIMEOUT"
+            )
+
+            duplicateSourceIds = listedSources
+              .map((source) => ({
+                id: String(source.id ?? "").trim(),
+                titleKey: normalizeNotebookTitleKey(String(source.title ?? ""))
+              }))
+              .filter(
+                (entry) =>
+                  entry.id &&
+                  entry.id !== normalizedTargetSourceId &&
+                  entry.titleKey &&
+                  entry.titleKey === normalizedTitleKey
+              )
+              .map((entry) => entry.id)
+          } catch (dedupeListError) {
+            const detail =
+              dedupeListError instanceof Error
+                ? dedupeListError.message
+                : String(dedupeListError ?? "dedupe_list_failed")
+            return this.fail(
+              "RESYNC_DELETE_FAILED",
+              this.buildResyncErrorPayload(
+                resolvedNotebookId,
+                normalizedTargetSourceId,
+                resyncStartTs,
+                `Falha ao listar fontes para deduplicacao final: ${detail}`
+              )
+            )
+          }
+
+          if (duplicateSourceIds.length > 0) {
+            for (const duplicateSourceId of duplicateSourceIds) {
+              try {
+                await this.withTimeout(
+                  service.deleteSource(resolvedNotebookId, duplicateSourceId),
+                  14_000,
+                  "RESYNC_DEDUPE_DELETE_TIMEOUT"
+                )
+              } catch (dedupeDeleteError) {
+                const detail =
+                  dedupeDeleteError instanceof Error
+                    ? dedupeDeleteError.message
+                    : String(dedupeDeleteError ?? "dedupe_delete_failed")
+                return this.fail(
+                  "RESYNC_DELETE_FAILED",
+                  this.buildResyncErrorPayload(
+                    resolvedNotebookId,
+                    duplicateSourceId,
+                    resyncStartTs,
+                    `Nao foi possivel remover fonte duplicada apos re-sync. duplicateSourceId=${duplicateSourceId}; keptSourceId=${normalizedTargetSourceId}; detail=${detail}`
+                  )
+                )
+              }
+            }
+
+            try {
+              const postCleanupSources = await this.withTimeout(
+                service.listSources(resolvedNotebookId),
+                8_000,
+                "RESYNC_DEDUPE_RECHECK_TIMEOUT"
+              )
+              const stillDuplicated = postCleanupSources.some((source) => {
+                const listedId = String(source.id ?? "").trim()
+                const listedTitleKey = normalizeNotebookTitleKey(String(source.title ?? ""))
+                return (
+                  listedId &&
+                  listedId !== normalizedTargetSourceId &&
+                  listedTitleKey &&
+                  listedTitleKey === normalizedTitleKey
+                )
+              })
+
+              if (stillDuplicated) {
+                return this.fail(
+                  "RESYNC_DELETE_FAILED",
+                  this.buildResyncErrorPayload(
+                    resolvedNotebookId,
+                    normalizedTargetSourceId,
+                    resyncStartTs,
+                    "Deduplicacao final nao confirmou remocao completa das fontes antigas."
+                  )
+                )
+              }
+            } catch (dedupeRecheckError) {
+              const detail =
+                dedupeRecheckError instanceof Error
+                  ? dedupeRecheckError.message
+                  : String(dedupeRecheckError ?? "dedupe_recheck_failed")
+              return this.fail(
+                "RESYNC_DELETE_FAILED",
+                this.buildResyncErrorPayload(
+                  resolvedNotebookId,
+                  normalizedTargetSourceId,
+                  resyncStartTs,
+                  `Falha ao confirmar deduplicacao final: ${detail}`
+                )
+              )
+            }
+          }
+        }
+      }
+
       if (!String(sourceId ?? "").trim()) {
         return this.fail("NotebookLM nao confirmou a criacao da fonte. Nenhum sourceId foi retornado.")
       }
@@ -1352,15 +2059,23 @@ class MessageRouter {
     if (!canCallAI) {
       return this.fail("Limite de chamadas de IA atingido para hoje.")
     }
-    const improved = await aiService.improvePrompt(prompt)
-    await storageManager.incrementUsage("aiCalls")
-    return this.ok({ improved })
+    
+    // TODO: Descomentar quando tiver a chave da API do Claude
+    // const improved = await aiService.improvePrompt(prompt)
+    // await storageManager.incrementUsage("aiCalls")
+    // return this.ok({ improved })
+    
+    return this.fail("Funcionalidade de melhoria de prompts temporariamente desabilitada. Configure PLASMO_PUBLIC_CLAUDE_API_KEY no .env para ativar.")
   }
 
   private async handlePromptOptions(payload: unknown): Promise<StandardResponse> {
     const { prompt } = payload as { prompt: string }
-    const options = await aiService.generatePromptOptions(prompt)
-    return this.ok({ options })
+    
+    // TODO: Descomentar quando tiver a chave da API do Claude
+    // const options = await aiService.generatePromptOptions(prompt)
+    // return this.ok({ options })
+    
+    return this.fail("Funcionalidade de opcoes de prompt temporariamente desabilitada. Configure PLASMO_PUBLIC_CLAUDE_API_KEY no .env para ativar.")
   }
 
   // ─── Focus Threads ─────────────────────────────────────────────────────────
@@ -1463,15 +2178,18 @@ class MessageRouter {
     if (!canUseZettel) {
       return this.fail("Zettelkasten requer plano Thinker ou superior.")
     }
-    const notes = await aiService.atomizeContent(content)
-    const user = await authManager.getCurrentUser()
-    if (!user) {
-      return this.fail("Nao autenticado.")
-    }
-
-    await zettelkastenService.saveAtomicNotes(user.id, notes)
-    await storageManager.incrementUsage("aiCalls")
-    return this.ok({ count: notes.length })
+    
+    // TODO: Descomentar quando tiver a chave da API do Claude
+    // const notes = await aiService.atomizeContent(content)
+    // const user = await authManager.getCurrentUser()
+    // if (!user) {
+    //   return this.fail("Nao autenticado.")
+    // }
+    // await zettelkastenService.saveAtomicNotes(user.id, notes)
+    // await storageManager.incrementUsage("aiCalls")
+    // return this.ok({ count: notes.length })
+    
+    return this.fail("Funcionalidade de atomizacao temporariamente desabilitada. Configure PLASMO_PUBLIC_CLAUDE_API_KEY no .env para ativar.")
   }
 
   private async handleExportSources(payload: unknown): Promise<StandardResponse> {
@@ -1491,23 +2209,49 @@ class MessageRouter {
     return this.ok(result)
   }
 
+  private async handleRenderPdfOffscreen(payload: unknown): Promise<StandardResponse> {
+    const text = String((payload as { text?: unknown })?.text ?? "")
+    if (!text.trim()) {
+      return this.fail("Texto obrigatorio para gerar PDF.")
+    }
+
+    try {
+      const base64 = await renderPdfBase64ViaOffscreen(text)
+      return this.ok({ base64 })
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error ? error.message : "Falha ao gerar PDF no pipeline offscreen."
+      return this.fail(errorMessage)
+    }
+  }
+
   private async handleHighlightSnipe(payload: unknown): Promise<StandardResponse> {
-    const { content, text, title, notebookId } = payload as {
+    const { content, text, title, notebookId, url } = payload as {
       content: string
       text?: string
       title: string
       notebookId?: string
+      url?: string
     }
     const sourceContent = content || text || ""
     if (!sourceContent.trim()) {
       return this.fail("Conteudo vazio para captura.")
     }
 
-    void notebookId
-    void title
-    return this.fail(
-      "Captura de selecao via background foi desativada. Use o content script para acionar operacoes no NotebookLM."
-    )
+    const normalizedNotebookId = String(notebookId ?? "").trim()
+    const normalizedTitle =
+      String(title ?? "").trim() ||
+      `Selecao Web - ${new Date().toLocaleDateString("pt-BR")}`
+
+    return this.handleImportAIChat({
+      platform: "WEB",
+      conversationTitle: normalizedTitle,
+      content: sourceContent,
+      sourceKind: "chat",
+      capturedAt: new Date().toISOString(),
+      notebookId: normalizedNotebookId || undefined,
+      url: String(url ?? "").trim()
+    })
   }
 
   private async handleAtomizePreview(payload: unknown): Promise<StandardResponse> {
@@ -1515,8 +2259,12 @@ class MessageRouter {
     if (!content?.trim()) {
       return this.fail("Conteudo vazio para atomizacao.")
     }
-    const notes = await aiService.atomizeContent(content)
-    return this.ok({ notes })
+    
+    // TODO: Descomentar quando tiver a chave da API do Claude
+    // const notes = await aiService.atomizeContent(content)
+    // return this.ok({ notes })
+    
+    return this.fail("Funcionalidade de atomizacao temporariamente desabilitada. Configure PLASMO_PUBLIC_CLAUDE_API_KEY no .env para ativar.")
   }
 
   private async handleSaveAtomicNotes(payload: unknown): Promise<StandardResponse> {
@@ -1541,24 +2289,30 @@ class MessageRouter {
   }
 
   private normalizeChatSourceBindingKey(url: string, notebookId: string): string | null {
+    const keys = this.normalizeChatSourceBindingKeys(url, notebookId)
+    return keys[0] ?? null
+  }
+
+  private normalizeChatSourceBindingKeys(url: string, notebookId: string): string[] {
     const normalizedNotebookId = String(notebookId ?? "").trim()
     const rawUrl = String(url ?? "").trim()
 
     if (!normalizedNotebookId || !rawUrl) {
-      return null
+      return []
     }
 
-    try {
-      const parsed = new URL(rawUrl)
-      const normalizedPath = parsed.pathname.replace(/\/+$/u, "") || "/"
-      return `${parsed.origin}${normalizedPath}::${normalizedNotebookId}`
-    } catch {
-      const normalizedUrl = rawUrl.split("#")[0].split("?")[0].trim()
-      if (!normalizedUrl) {
-        return null
-      }
-      return `${normalizedUrl}::${normalizedNotebookId}`
-    }
+    const aliases = resolveConversationAliasKeys(rawUrl)
+    const primary = resolveConversationPrimaryKey(rawUrl)
+    const identityKeys = [primary, ...aliases]
+
+    return Array.from(
+      new Set(
+        identityKeys
+          .map((entry) => String(entry ?? "").trim())
+          .filter(Boolean)
+          .map((entry) => `${entry}::${normalizedNotebookId}`)
+      )
+    )
   }
 
   private async readChatSourceBindingsMap(): Promise<Record<string, ChatSourceBindingRecord>> {
@@ -1628,18 +2382,34 @@ class MessageRouter {
     url: string,
     notebookId: string
   ): Promise<ChatSourceBindingRecord | null> {
-    const key = this.normalizeChatSourceBindingKey(url, notebookId)
-    if (!key) {
+    const keys = this.normalizeChatSourceBindingKeys(url, notebookId)
+    if (keys.length === 0) {
       return null
     }
 
     const bindings = await this.readChatSourceBindingsMap()
-    const binding = bindings[key]
-    if (!binding?.sourceId) {
+    let selectedBinding: ChatSourceBindingRecord | null = null
+    let selectedUpdatedAt = -1
+
+    for (const key of keys) {
+      const binding = bindings[key]
+      if (!binding?.sourceId) {
+        continue
+      }
+
+      const parsedTime = Date.parse(binding.updatedAt)
+      const timeScore = Number.isFinite(parsedTime) ? parsedTime : 0
+      if (!selectedBinding || timeScore >= selectedUpdatedAt) {
+        selectedBinding = binding
+        selectedUpdatedAt = timeScore
+      }
+    }
+
+    if (!selectedBinding?.sourceId) {
       return null
     }
 
-    return binding
+    return selectedBinding
   }
 
   private async forceDeleteSourceForResync(
@@ -1668,8 +2438,8 @@ class MessageRouter {
     sourceTitle: string,
     lastSyncHash?: string
   ): Promise<void> {
-    const key = this.normalizeChatSourceBindingKey(url, notebookId)
-    if (!key) {
+    const keys = this.normalizeChatSourceBindingKeys(url, notebookId)
+    if (keys.length === 0) {
       return
     }
 
@@ -1680,11 +2450,14 @@ class MessageRouter {
 
     const bindings = await this.readChatSourceBindingsMap()
     const normalizedLastSyncHash = String(lastSyncHash ?? "").trim()
-    bindings[key] = {
+    const nextRecord: ChatSourceBindingRecord = {
       sourceId: normalizedSourceId,
       sourceTitle: String(sourceTitle ?? "").trim(),
       lastSyncHash: normalizedLastSyncHash || undefined,
       updatedAt: new Date().toISOString()
+    }
+    for (const key of keys) {
+      bindings[key] = nextRecord
     }
 
     await this.writeChatSourceBindingsMap(bindings)

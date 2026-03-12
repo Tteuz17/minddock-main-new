@@ -38,8 +38,8 @@ export function QuickActions() {
     },
     {
       icon: <Download size={16} strokeWidth={1.5} />,
-      label: "Exportar fontes",
-      description: "Selecione um notebook e exporte suas fontes em MD, PDF ou JSON",
+      label: "Download de fontes",
+      description: "Selecione um notebook e baixe suas fontes em MD, TXT ou PDF",
       onClick: () => chrome.tabs.create({ url: URLS.NOTEBOOKLM })
     },
     {

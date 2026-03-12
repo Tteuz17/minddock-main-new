@@ -100,7 +100,6 @@ export function ZettelHub({ onBack }: ZettelHubProps) {
               <span>{tab.label}</span>
               {isActive && (
                 <motion.div
-                  layoutId="zettel-tab-indicator"
                   className="absolute -bottom-1 left-2 right-2 h-[2px] rounded-full bg-action"
                   transition={{ type: "spring", stiffness: 400, damping: 30 }}
                 />

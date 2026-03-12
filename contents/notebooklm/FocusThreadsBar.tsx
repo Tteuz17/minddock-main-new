@@ -859,7 +859,7 @@ export function FocusThreadsBar() {
   const activeThread = threads.find((thread) => thread.id === activeId)
 
   return (
-    <>
+    <div style={{ display: "contents" }}>
       <div className="flex flex-col">
         <div className="flex items-center gap-1">
           {isLoadingThreads ? (
@@ -951,7 +951,7 @@ export function FocusThreadsBar() {
           )}
         </div>
 
-        <AnimatePresence>
+        <AnimatePresence mode="wait">
           {historyOpen && activeThread && (
             <motion.div
               key="dock-history"
@@ -1102,7 +1102,7 @@ export function FocusThreadsBar() {
         </AnimatePresence>
       </div>
 
-      <AnimatePresence>
+      <AnimatePresence mode="wait">
         {showCreateModal && (
           <>
             <motion.div
@@ -1294,6 +1294,6 @@ export function FocusThreadsBar() {
           </>
         )}
       </AnimatePresence>
-    </>
+    </div>
   )
 }

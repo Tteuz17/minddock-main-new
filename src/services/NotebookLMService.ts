@@ -54,6 +54,9 @@ interface NotebookLMAuthTokens {
 interface NotebookSourceSummary {
   id: string
   title: string
+  gDocId?: string
+  docReference?: string
+  isGDoc?: boolean
 }
 
 interface SourceSnapshotEntry {
@@ -135,6 +138,15 @@ interface EnsureSourceSlotAvailableOptions {
 interface EnsureSourceSlotAvailableResult {
   cleared: boolean
   authErrorDetected: boolean
+}
+
+export interface SyncVerificationResult {
+  sourceId: string
+  title: string
+  accepted: boolean
+  changed: boolean
+  isGDoc: boolean
+  skipReason?: string
 }
 
 type VerifyAndClearTitlePathOptions = EnsureSourceSlotAvailableOptions
@@ -309,9 +321,15 @@ export class NotebookLMService {
     normalizedNotebookId: string,
     normalizedSourceId: string
   ): unknown[][] {
+    const sourceEntry = [[normalizedSourceId]]
     const sourceIds = [normalizedSourceId]
 
     return [
+      [sourceEntry, [2]],
+      [sourceEntry],
+      [[normalizedSourceId], [2]],
+      [[normalizedSourceId]],
+      [normalizedNotebookId, [[normalizedSourceId]], [2]],
       [sourceIds, [2]],
       [sourceIds],
       [normalizedNotebookId, sourceIds, [2]],
@@ -1033,6 +1051,7 @@ export class NotebookLMService {
     upstreamUrl.searchParams.set("bl", blToken)
     upstreamUrl.searchParams.set("_reqid", this.nextRequestId())
     upstreamUrl.searchParams.set("rt", "c")
+    upstreamUrl.searchParams.set("authuser", "0")
 
     const normalizedAuthUser = normalizeAuthUser(authUser)
     if (normalizedAuthUser) {
@@ -1459,6 +1478,12 @@ export class NotebookLMService {
       throw new Error("NotebookLM rejeitou o payload de Google Docs.")
     }
 
+    for (const segment of parsedSegments) {
+      if (this.payloadIndicatesRpcFailure(segment)) {
+        throw new Error("NotebookLM rejeitou o payload de Google Docs.")
+      }
+    }
+
     try {
       const rpcPayload = this.parseBatchExecutePayload(sanitizedResponse, SYNC_GDOC_RPC_ID)
       if (this.payloadIndicatesRpcFailure(rpcPayload)) {
@@ -1473,7 +1498,7 @@ export class NotebookLMService {
       }
     } catch {
       // Some NotebookLM variants omit a parseable rpc payload for FLmJqe.
-      // If at least one JSON segment exists, defer final validation to listSources.
+      // If no explicit failure was detected in parsed segments, treat as accepted.
     }
   }
 
@@ -1834,6 +1859,38 @@ export class NotebookLMService {
     return this.resolveRowsFromPayload(payload)
   }
 
+  private resolveGoogleDocMetadataFromRow(
+    row: unknown[],
+    _knownSourceId = ""
+  ): { isGDoc: boolean; gDocId?: string; docReference?: string } {
+    const segment2 = Array.isArray(row[2]) ? (row[2] as unknown[]) : null
+    if (!segment2) {
+      return { isGDoc: false }
+    }
+
+    const segment20 = Array.isArray(segment2[0]) ? (segment2[0] as unknown[]) : null
+    if (!segment20) {
+      return { isGDoc: false }
+    }
+
+    const gDocIdRaw = segment20[0]
+    const gDocId = gDocIdRaw ? String(gDocIdRaw).trim() : null
+    const isValidDriveId =
+      Boolean(gDocId) &&
+      String(gDocId).length >= 25 &&
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(String(gDocId))
+
+    if (!isValidDriveId || !gDocId) {
+      return { isGDoc: false }
+    }
+
+    return {
+      isGDoc: true,
+      gDocId,
+      docReference: `https://docs.google.com/document/d/${gDocId}/edit`
+    }
+  }
+
   private validateRpcResponse(rpcId: string, responseText: string): string {
     const sanitizedResponse = this.stripXssiPrefix(responseText)
     if (!sanitizedResponse) {
@@ -1968,23 +2025,68 @@ export class NotebookLMService {
       throw new Error("notebookId obrigatorio para listar fontes.")
     }
 
-    // Fresh read directly from NotebookLM RPC (no local cache).
     const payload = await this.executeRpcPayload(LIST_SOURCES_RPC_ID, [normalizedNotebookId, null, [2]])
     const rows = this.resolveSourceRows(payload)
     const sourceMap = new Map<string, NotebookSourceSummary>()
 
+    let rowIndex = -1
     for (const row of rows) {
+      rowIndex += 1
+      // sourceId: sempre do UUID em row[0][0]. row[2] pode conter gDocId.
       const row0 = Array.isArray(row[0]) ? (row[0] as unknown[]) : null
-      const sourceId = this.pickString(row0?.[0], row[0], row[2], row[3])
-      const title = this.pickString(row[1], row[3], row[5])
+      const sourceId = row0?.[0] ? String(row0[0]).trim() : null
+      const title = row[1] ? String(row[1]).trim() : null
 
       if (!sourceId || !title) {
+        console.debug("[listSources] pulando row sem sourceId ou titulo", {
+          row0,
+          row1: row[1]
+        })
         continue
       }
 
+      // gDocId: para fontes Google Docs, vem em row[2][0][0].
+      const segment2 = Array.isArray(row[2]) ? (row[2] as unknown[]) : null
+      const segment20 = segment2 && Array.isArray(segment2[0]) ? (segment2[0] as unknown[]) : null
+      const segment200 = segment20 && segment20.length > 0 ? segment20[0] : null
+      const gDocIdRaw = segment20?.[0] ? String(segment20[0]).trim() : null
+      const isValidGDocId =
+        Boolean(gDocIdRaw) &&
+        String(gDocIdRaw).length >= 25 &&
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(String(gDocIdRaw)) &&
+        String(gDocIdRaw) !== sourceId
+      const gDocId = isValidGDocId && gDocIdRaw ? gDocIdRaw : undefined
+      const isGDoc = Boolean(gDocId)
+      const docReference = isGDoc ? `https://docs.google.com/document/d/${gDocId}/edit` : undefined
+
+      const previous = sourceMap.get(sourceId)
       sourceMap.set(sourceId, {
         id: sourceId,
-        title
+        title: title || previous?.title || sourceId,
+        gDocId: gDocId ?? previous?.gDocId,
+        docReference: docReference ?? previous?.docReference,
+        isGDoc: isGDoc || previous?.isGDoc === true
+      })
+
+      console.debug("[listSources]", {
+        sourceId,
+        title,
+        isGDoc,
+        gDocId: gDocId ?? null
+      })
+
+      // TEMP-DEBUG: remover apos validar o parsing real do rLM1Ne.
+      console.debug("[listSources raw]", {
+        rowIndex,
+        sourceId,
+        title,
+        row0,
+        row1: row[1],
+        row2: row[2],
+        row2_0: segment2?.[0] ?? null,
+        row2_0_0: segment200,
+        gDocIdRaw,
+        isValidGDocId
       })
     }
 
@@ -2683,10 +2785,25 @@ export class NotebookLMService {
   }
 
   private logResyncDiagnostics(diag: ResyncDiagnostics): void {
+    const hasRecoverableFallback =
+      diag.updateInPlaceAttempted === true &&
+      diag.updateInPlaceSucceeded === true &&
+      String(diag.rpcError ?? "").toLowerCase().includes("delete")
+
+    const hasFailure =
+      diag.updateInPlaceSucceeded === false ||
+      (diag.existsInListAfterDelete === true && diag.updateInPlaceSucceeded !== true)
+
+    const logger: (...args: unknown[]) => void = hasFailure
+      ? console.error
+      : hasRecoverableFallback
+      ? console.warn
+      : console.log
+
     try {
-      console.error("[RESYNC_DIAGNOSTICS]", JSON.stringify(diag))
+      logger("[RESYNC_DIAGNOSTICS]", JSON.stringify(diag))
     } catch {
-      console.error("[RESYNC_DIAGNOSTICS]", diag)
+      logger("[RESYNC_DIAGNOSTICS]", diag)
     }
   }
 
@@ -2845,9 +2962,7 @@ export class NotebookLMService {
             diag.updateInPlaceSucceeded = true
             diag.updateInPlaceError = null
             diag.existsInListAfterDelete = true
-            diag.rpcError =
-              diag.rpcError ??
-              "DELETE_FAILED_BUT_UPDATED_IN_PLACE: delete nao confirmado, update in-place aplicado."
+            diag.rpcError = "DELETE_NOT_CONFIRMED_UPDATED_IN_PLACE"
             flushDiagnostics()
             return {
               newSourceId: targetSourceId,
@@ -3062,6 +3177,126 @@ export class NotebookLMService {
 
   async addSource(notebookId: string, title: string, content: string): Promise<string> {
     return this.insertSource(notebookId, title, content)
+  }
+
+  async syncGoogleDocSource(notebookId: string, title: string, docReference: string): Promise<void> {
+    const normalizedNotebookId = String(notebookId ?? "").trim()
+    const normalizedTitle = String(title ?? "").trim() || `Documento ${new Date().toISOString()}`
+    const normalizedDocId = this.extractGoogleDocId(docReference)
+
+    if (!normalizedNotebookId) {
+      throw new Error("notebookId obrigatorio para sincronizar Google Docs.")
+    }
+
+    if (!normalizedDocId) {
+      throw new Error("docId obrigatorio para sincronizar Google Docs.")
+    }
+
+    const payloadCandidates = this.buildSyncGoogleDocPayloadCandidates(
+      normalizedNotebookId,
+      normalizedDocId,
+      normalizedTitle
+    )
+    const sourcePathCandidates = [`/notebook/${normalizedNotebookId}`, DEFAULT_SOURCE_PATH]
+    let lastError: Error | null = null
+
+    for (const sourcePath of sourcePathCandidates) {
+      for (const payloadCandidate of payloadCandidates) {
+        try {
+          const responseText = await this.executeRpc(SYNC_GDOC_RPC_ID, payloadCandidate, sourcePath)
+          this.assertSyncGoogleDocResponseAccepted(responseText)
+          return
+        } catch (error) {
+          lastError =
+            error instanceof Error
+              ? error
+              : new Error("Falha inesperada ao sincronizar Google Docs no NotebookLM.")
+        }
+      }
+    }
+
+    if (lastError) {
+      throw lastError
+    }
+
+    throw new Error("Falha ao sincronizar Google Docs no NotebookLM.")
+  }
+
+  async syncGoogleDocSourceBySourceId(notebookId: string, sourceId: string): Promise<void> {
+    const normalizedNotebookId = String(notebookId ?? "").trim()
+    const normalizedSourceId = String(sourceId ?? "").trim()
+
+    if (!normalizedNotebookId) {
+      throw new Error("notebookId obrigatorio para sincronizar Google Docs.")
+    }
+
+    if (!normalizedSourceId) {
+      throw new Error("sourceId obrigatorio para sincronizar Google Docs.")
+    }
+
+    const payloadCandidates: unknown[][] = [
+      [null, [normalizedSourceId], [2]],
+      [[normalizedSourceId], [2]],
+      [normalizedSourceId, [2]],
+      [null, [normalizedSourceId]],
+      [[normalizedSourceId]]
+    ]
+    const sourcePathCandidates = [`/notebook/${normalizedNotebookId}`, DEFAULT_SOURCE_PATH]
+    let lastError: Error | null = null
+
+    for (const sourcePath of sourcePathCandidates) {
+      for (const payloadCandidate of payloadCandidates) {
+        try {
+          const responseText = await this.executeRpc(SYNC_GDOC_RPC_ID, payloadCandidate, sourcePath)
+          this.assertSyncGoogleDocResponseAccepted(responseText)
+          return
+        } catch (error) {
+          lastError =
+            error instanceof Error
+              ? error
+              : new Error("Falha inesperada ao sincronizar Google Docs no NotebookLM.")
+        }
+      }
+    }
+
+    if (lastError) {
+      throw lastError
+    }
+
+    throw new Error("Falha ao sincronizar Google Docs no NotebookLM.")
+  }
+
+  async syncGoogleDocSourceBySourceIdVerified(
+    notebookId: string,
+    sourceId: string,
+    title: string,
+    isGDoc: boolean
+  ): Promise<SyncVerificationResult> {
+    const base: SyncVerificationResult = {
+      sourceId: String(sourceId ?? "").trim(),
+      title: String(title ?? "").trim() || sourceId,
+      accepted: false,
+      changed: false,
+      isGDoc: isGDoc === true,
+    }
+
+    console.debug(`[DIAG syncVerified] "${title}" | isGDoc:${isGDoc} | sourceId:${sourceId}`)
+
+    if (!isGDoc) {
+      console.debug(`[DIAG syncVerified] PULOU "${title}" - sem vinculo GDoc`)
+      return { ...base, skipReason: "sem_gdocid - snapshot estatico" }
+    }
+
+    try {
+      console.debug(`[DIAG syncVerified] chamando FLmJqe para "${title}" sourceId:${sourceId}`)
+      await this.syncGoogleDocSourceBySourceId(notebookId, base.sourceId)
+      console.debug(`[DIAG syncVerified] FLmJqe OK para "${title}"`)
+      return { ...base, accepted: true, changed: true }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      console.debug(`[DIAG syncVerified] FLmJqe FALHOU para "${title}":`, message)
+      return { ...base, skipReason: `sync_falhou: ${message}` }
+    }
   }
 
   async addGoogleDocSource(notebookId: string, title: string, docReference: string): Promise<string> {
@@ -3282,7 +3517,7 @@ export class NotebookLMService {
 
     if (sawAcceptedRpc) {
       if (allowUnverifiedSuccess) {
-        console.warn(
+        console.log(
           "[MindDock] NotebookLM aceitou RPC de update, mas a leitura de confirmacao ainda nao refletiu mudanca."
         )
         return normalizedSourceId
@@ -3301,5 +3536,64 @@ export class NotebookLMService {
     }
 
     throw new Error("NotebookLM nao confirmou atualizacao da fonte existente.")
+  }
+
+  /**
+   * Busca o conteúdo de múltiplas fontes do NotebookLM.
+   * Retorna um mapa sourceId -> array de snippets de texto.
+   */
+  async getSourcesContent(
+    notebookId: string,
+    sourceIds: string[]
+  ): Promise<{
+    sourceSnippets: Record<string, string[]>
+    failedSourceIds: string[]
+  }> {
+    const normalizedNotebookId = String(notebookId ?? "").trim()
+    if (!normalizedNotebookId) {
+      throw new Error("notebookId obrigatorio para buscar conteudo de fontes.")
+    }
+
+    const normalizedSourceIds = sourceIds
+      .map((id) => String(id ?? "").trim())
+      .filter(Boolean)
+
+    if (normalizedSourceIds.length === 0) {
+      return {
+        sourceSnippets: {},
+        failedSourceIds: []
+      }
+    }
+
+    const sourceSnippets: Record<string, string[]> = {}
+    const failedSourceIds: string[] = []
+
+    // Busca conteúdo de cada fonte individualmente
+    for (const sourceId of normalizedSourceIds) {
+      try {
+        const content = await this.getSourceContentSnapshot(sourceId)
+        
+        // Divide o conteúdo em snippets (parágrafos)
+        const snippets = content
+          .split(/\n\n+/)
+          .map((snippet) => snippet.trim())
+          .filter((snippet) => snippet.length > 0)
+
+        if (snippets.length > 0) {
+          sourceSnippets[sourceId] = snippets
+        } else {
+          // Se não tem snippets, retorna o conteúdo completo
+          sourceSnippets[sourceId] = [content]
+        }
+      } catch (error) {
+        console.warn(`[MindDock] Falha ao buscar conteudo da fonte ${sourceId}:`, error)
+        failedSourceIds.push(sourceId)
+      }
+    }
+
+    return {
+      sourceSnippets,
+      failedSourceIds
+    }
   }
 }

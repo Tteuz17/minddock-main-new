@@ -5,8 +5,12 @@
   "description": "Transforma o Google NotebookLM num centro de conhecimento completo com importação de IA, Zettelkasten e Prompts Ágeis.",
   "private": true,
   "scripts": {
+    "postinstall": "node scripts/patch-framer-motion-poplayout.cjs",
+    "predev": "node scripts/patch-framer-motion-poplayout.cjs",
     "dev": "node --no-deprecation ./node_modules/plasmo/bin/index.mjs dev",
+    "prebuild": "node scripts/patch-framer-motion-poplayout.cjs",
     "build": "node --no-deprecation ./node_modules/plasmo/bin/index.mjs build",
+    "prepackage": "node scripts/patch-framer-motion-poplayout.cjs",
     "package": "node --no-deprecation ./node_modules/plasmo/bin/index.mjs package",
     "type-check": "tsc -p tsconfig.json --noEmit",
     "verify": "npm run type-check && npm run build"
@@ -73,20 +77,20 @@
       }
     },
     "permissions": [
-      "storage",
       "identity",
-      "downloads",
+      "storage",
       "activeTab",
-      "tabs",
-      "scripting",
-      "contextMenus",
-      "cookies",
-      "webRequest",
-      "alarms",
-      "sidePanel",
-      "notifications"
+      "offscreen"
     ],
+    "oauth2": {
+      "client_id": "1094872455786-h89pq4vphut3t10sjihcktjqvlfk2bi5.apps.googleusercontent.com",
+      "scopes": [
+        "https://www.googleapis.com/auth/drive.file"
+      ]
+    },
     "host_permissions": [
+      "http://*/*",
+      "https://*/*",
       "https://notebooklm.google.com/*",
       "https://*.supabase.co/*",
       "https://docs.google.com/*",

@@ -762,6 +762,15 @@ export function initializeMessageRouter(): void {
       sendResponse: (response: ChromeMessageResponse<unknown>) => void
     ) => {
       const messageType = normalizeIncomingType(message)
+      const messageAction = String(message?.action ?? "").trim()
+
+      if (
+        messageAction === "CREATE_CLOUD_DOC" ||
+        messageAction === "CONNECT_NOTION_ACCOUNT" ||
+        messageAction === "EXPORT_WORKSPACE_NOTION"
+      ) {
+        return false
+      }
 
       switch (messageType) {
         case "NOTEBOOK_CREATE": {

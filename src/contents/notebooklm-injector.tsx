@@ -1,13 +1,20 @@
 import type { PlasmoCSConfig } from "plasmo"
+import { Component, isValidElement, type ErrorInfo, type ReactNode } from "react"
 import { createRoot, type Root } from "react-dom/client"
 import "~/styles/globals.css"
 import { getFolders, saveSnippet, createFolder, FOLDER_ICONS } from "~/services/highlight-storage"
 import { AgilePromptsBar } from "../../contents/notebooklm/AgilePromptsBar"
+import { ConversationExportMenu } from "../../contents/notebooklm/ConversationExportMenu"
 import { FocusThreadsBar } from "../../contents/notebooklm/FocusThreadsBar"
 import { SourceDownloadPanel } from "../../contents/notebooklm/SourceDownloadPanel"
 import { SourceFilterPanel } from "../../contents/notebooklm/SourceFilterPanel"
 import { ZettelButton } from "../../contents/notebooklm/ZettelButton"
+import "~/content/features/VoiceInput/voiceInputInjector"
 import {
+  resolveNotebookConfigureButton,
+  SOURCE_FILTER_APPLY_END_EVENT,
+  SOURCE_FILTER_APPLY_START_EVENT,
+  SOURCE_DOWNLOAD_MODAL_STATE_EVENT,
   getDeepRoots,
   isVisible,
   resolveSourceActionsHost,
@@ -19,11 +26,11 @@ export const config: PlasmoCSConfig = {
   run_at: "document_idle"
 }
 
-type InsertMode = "prepend" | "after"
+type InsertMode = "prepend" | "after" | "before"
 type DisplayMode = "contents" | "block"
 
 interface InjectionTarget {
-  key: "source-actions" | "source-filters"
+  key: "source-actions" | "source-filters" | "conversation-export"
   rootId: string
   insertMode: InsertMode
   display: DisplayMode
@@ -34,13 +41,125 @@ interface InjectionTarget {
 interface MountedRootRecord {
   root: Root
   host: HTMLElement
+  container: HTMLElement
 }
 
 interface NotebooklmInjectorGlobalState {
   cleanup?: (() => void) | null
 }
 
+interface InjectionErrorBoundaryProps {
+  targetKey: string
+  children: ReactNode
+}
+
+interface InjectionErrorBoundaryState {
+  hasError: boolean
+}
+
+function normalizeBoundaryError(error: unknown): {
+  name: string
+  message: string
+  stack: string
+} {
+  if (error instanceof Error) {
+    return {
+      name: error.name || "Error",
+      message: error.message || "Unknown error",
+      stack: typeof error.stack === "string" ? error.stack : ""
+    }
+  }
+
+  if (error && typeof error === "object") {
+    const record = error as Record<string, unknown>
+    return {
+      name: String(record.name ?? "UnknownError"),
+      message: String(record.message ?? "[object Object]"),
+      stack: String(record.stack ?? "")
+    }
+  }
+
+  return {
+    name: "UnknownError",
+    message: String(error ?? "Unknown error"),
+    stack: ""
+  }
+}
+
+function isIgnorableBoundaryError(error: unknown): boolean {
+  const normalized = normalizeBoundaryError(error)
+  const merged = `${normalized.name} ${normalized.message}`.toLowerCase()
+  if (merged.includes("domexception")) {
+    return true
+  }
+  if (merged.includes("extension context invalidated")) {
+    return true
+  }
+  if (merged.includes("receiving end does not exist")) {
+    return true
+  }
+  if (merged.includes("message channel closed")) {
+    return true
+  }
+  if (merged.includes("failed to execute") && merged.includes("insertrule")) {
+    return true
+  }
+  if (merged.includes("failed to execute") && merged.includes("getrangeat")) {
+    return true
+  }
+  return false
+}
+
+class InjectionErrorBoundary extends Component<InjectionErrorBoundaryProps, InjectionErrorBoundaryState> {
+  state: InjectionErrorBoundaryState = { hasError: false }
+
+  static getDerivedStateFromError(error: unknown): InjectionErrorBoundaryState | null {
+    if (isIgnorableBoundaryError(error)) {
+      return null
+    }
+    return { hasError: true }
+  }
+
+  componentDidCatch(error: unknown, errorInfo: ErrorInfo): void {
+    const normalized = normalizeBoundaryError(error)
+    if (isIgnorableBoundaryError(error)) {
+      console.warn(
+        `[MindDock] NotebookLM target render warning [${this.props.targetKey}] ${normalized.name}: ${normalized.message}`,
+        {
+          stack: normalized.stack,
+          componentStack: errorInfo.componentStack
+        }
+      )
+      return
+    }
+
+    console.error(
+      `[MindDock] NotebookLM target render failed [${this.props.targetKey}] ${normalized.name}: ${normalized.message}`,
+      {
+        stack: normalized.stack,
+        componentStack: errorInfo.componentStack
+      }
+    )
+  }
+
+  render(): ReactNode {
+    if (this.state.hasError) {
+      return null
+    }
+
+    return this.props.children
+  }
+}
+
 const TARGETS: readonly InjectionTarget[] = [
+  {
+    key: "conversation-export",
+    rootId: "minddock-conversation-export-root",
+    insertMode: "before",
+    display: "contents",
+    resolveHost: resolveNotebookConfigureButton,
+    render: () => <ConversationExportMenu />
+  },
   {
     key: "source-actions",
     rootId: "minddock-source-actions-root",
@@ -68,6 +187,10 @@ let refreshTimer: number | null = null
 let agilePositionTimer: number | null = null
 let focusThreadsPositionTimer: number | null = null
 let zettelObserver: MutationObserver | null = null
+let sourceFilterApplyDepth = 0
+let sourceFilterApplyLockUntil = 0
+let isSourceDownloadModalOpen = false
+const ENABLE_NOTEBOOK_HIGHLIGHT_CLIPPER = false
 const INJECTOR_GLOBAL_KEY = "__MINDDOCK_NOTEBOOKLM_INJECTOR_STATE__"
 
 function resolveGlobalState(): NotebooklmInjectorGlobalState {
@@ -123,6 +246,9 @@ function mountTargets(): void {
     syncInjectionPresentation(rootElement, target.display)
     if (!isPlacementValid(host, rootElement, target.insertMode)) {
       placeInjectionPoint(host, rootElement, target.insertMode)
+      if (!isPlacementValid(host, rootElement, target.insertMode)) {
+        continue
+      }
     }
 
     mountRoot(target, rootElement, host)
@@ -132,17 +258,34 @@ function mountTargets(): void {
 }
 
 function placeInjectionPoint(host: HTMLElement, rootElement: HTMLElement, insertMode: InsertMode): void {
-  if (insertMode === "prepend") {
-    host.prepend(rootElement)
-    return
-  }
+  try {
+    if (insertMode === "prepend") {
+      host.prepend(rootElement)
+      return
+    }
 
-  host.insertAdjacentElement("afterend", rootElement)
+    if (insertMode === "before") {
+      host.insertAdjacentElement("beforebegin", rootElement)
+      return
+    }
+
+    host.insertAdjacentElement("afterend", rootElement)
+  } catch (error) {
+    console.debug("[MindDock] Failed to place injection point", {
+      rootId: rootElement.id,
+      insertMode,
+      error
+    })
+  }
 }
 
 function isPlacementValid(host: HTMLElement, rootElement: HTMLElement, insertMode: InsertMode): boolean {
   if (insertMode === "prepend") {
     return rootElement.parentElement === host
+  }
+
+  if (insertMode === "before") {
+    return host.previousElementSibling === rootElement
   }
 
   return host.nextElementSibling === rootElement
@@ -159,31 +302,126 @@ function syncInjectionPresentation(rootElement: HTMLElement, display: DisplayMod
 
 function mountRoot(target: InjectionTarget, rootElement: HTMLElement, host: HTMLElement): void {
   const mounted = mountedRoots.get(target.key)
-  if (mounted && mounted.host !== host) {
+  if (mounted && (mounted.host !== host || mounted.container !== rootElement)) {
     mounted.root.unmount()
     mountedRoots.delete(target.key)
   }
 
   const active = mountedRoots.get(target.key)
   if (active) {
-    active.root.render(target.render())
     return
   }
 
   const root = createRoot(rootElement)
-  root.render(target.render())
-  mountedRoots.set(target.key, { root, host })
+  root.render(
+    <InjectionErrorBoundary targetKey={target.key}>
+      {renderSafely(target.key, target.render)}
+    </InjectionErrorBoundary>
+  )
+  mountedRoots.set(target.key, { root, host, container: rootElement })
+}
+
+function renderSafely(targetKey: string, renderFn: () => ReactNode): ReactNode {
+  try {
+    const node = renderFn()
+    if (!isValidElement(node)) {
+      console.error("[MindDock] Invalid React node returned from render function", {
+        targetKey,
+        nodeType: typeof node,
+        node
+      })
+      return null
+    }
+
+    const elementType = node.type as unknown
+    const hasValidType =
+      typeof elementType === "string" ||
+      typeof elementType === "function" ||
+      typeof elementType === "symbol" ||
+      (typeof elementType === "object" && elementType !== null)
+
+    if (!hasValidType) {
+      console.error("[MindDock] Invalid React element type detected", {
+        targetKey,
+        elementType
+      })
+      return null
+    }
+
+    return node
+  } catch (error) {
+    console.error("[MindDock] Failed to create React node", { targetKey, error })
+    return null
+  }
 }
 
 function cleanupDetachedRoots(): void {
   for (const [key, mounted] of mountedRoots.entries()) {
-    if (mounted.host.isConnected) {
+    if (mounted.host.isConnected && mounted.container.isConnected) {
       continue
     }
 
     mounted.root.unmount()
     mountedRoots.delete(key)
   }
+}
+
+function isSourceFilterApplyLocked(): boolean {
+  return sourceFilterApplyDepth > 0 || Date.now() < sourceFilterApplyLockUntil
+}
+
+function onSourceFilterApplyStart(): void {
+  sourceFilterApplyDepth += 1
+  sourceFilterApplyLockUntil = Date.now() + 1200
+}
+
+function onSourceFilterApplyEnd(): void {
+  sourceFilterApplyDepth = Math.max(0, sourceFilterApplyDepth - 1)
+  sourceFilterApplyLockUntil = Date.now() + 320
+}
+
+function onSourceDownloadModalState(event: Event): void {
+  const custom = event as CustomEvent<{ isOpen?: boolean }>
+  isSourceDownloadModalOpen = custom.detail?.isOpen === true
+  if (!isSourceDownloadModalOpen) {
+    scheduleRefresh()
+  }
+}
+
+function shouldSkipRefreshForMutations(mutations: MutationRecord[]): boolean {
+  if (isSourceDownloadModalOpen) {
+    return true
+  }
+
+  if (isSourceFilterApplyLocked()) {
+    return true
+  }
+
+  const ignoredRootSelector =
+    "#minddock-source-actions-root, #minddock-source-filters-root, [data-minddock-target], [data-minddock-source-overlay='true'], section[role='dialog'][aria-modal='true'][aria-label='Download de fontes'], [data-minddock-source-toast='true']"
+
+  const allInsideMindDockRoots = mutations.every((record) => {
+    const target = record.target instanceof Element ? record.target : null
+    if (!target) {
+      return false
+    }
+
+    if (target.closest(ignoredRootSelector)) {
+      return true
+    }
+
+    const added = Array.from(record.addedNodes).filter((node): node is Element => node instanceof Element)
+    const removed = Array.from(record.removedNodes).filter((node): node is Element => node instanceof Element)
+    const allNodes = [...added, ...removed]
+
+    if (allNodes.length === 0) {
+      return false
+    }
+
+    return allNodes.every((node) => node.closest(ignoredRootSelector))
+  })
+
+  return allInsideMindDockRoots
 }
 
 // ─── Agile Bar ────────────────────────────────────────────────────────────────
@@ -203,14 +441,22 @@ function mountAgileBar(): void {
 
   const mounted = mountedRoots.get("agile-bar")
   if (mounted) {
-    mounted.root.render(<AgilePromptsBar />)
+    mounted.root.render(
+      <InjectionErrorBoundary targetKey="agile-bar">
+        {renderSafely("agile-bar", () => <AgilePromptsBar />)}
+      </InjectionErrorBoundary>
+    )
     updateAgileBarPosition()
     return
   }
 
   const root = createRoot(rootElement)
-  root.render(<AgilePromptsBar />)
-  mountedRoots.set("agile-bar", { root, host: rootElement })
+  root.render(
+    <InjectionErrorBoundary targetKey="agile-bar">
+      {renderSafely("agile-bar", () => <AgilePromptsBar />)}
+    </InjectionErrorBoundary>
+  )
+  mountedRoots.set("agile-bar", { root, host: rootElement, container: rootElement })
   updateAgileBarPosition()
 }
 
@@ -311,14 +557,22 @@ function mountFocusThreadsBar(): void {
 
   const mounted = mountedRoots.get("focus-threads")
   if (mounted) {
-    mounted.root.render(<FocusThreadsBar />)
+    mounted.root.render(
+      <InjectionErrorBoundary targetKey="focus-threads">
+        {renderSafely("focus-threads", () => <FocusThreadsBar />)}
+      </InjectionErrorBoundary>
+    )
     updateFocusThreadsBarPosition()
     return
   }
 
   const root = createRoot(rootElement)
-  root.render(<FocusThreadsBar />)
-  mountedRoots.set("focus-threads", { root, host: rootElement })
+  root.render(
+    <InjectionErrorBoundary targetKey="focus-threads">
+      {renderSafely("focus-threads", () => <FocusThreadsBar />)}
+    </InjectionErrorBoundary>
+  )
+  mountedRoots.set("focus-threads", { root, host: rootElement, container: rootElement })
   updateFocusThreadsBarPosition()
 }
 
@@ -358,7 +612,11 @@ function injectZettelButtons(): void {
     buttonHost.style.marginLeft = "8px"
 
     const root = createRoot(buttonHost)
-    root.render(<ZettelButton content={node.textContent ?? ""} />)
+    root.render(
+      <InjectionErrorBoundary targetKey="zettel-button">
+        {renderSafely("zettel-button", () => <ZettelButton content={node.textContent ?? ""} />)}
+      </InjectionErrorBoundary>
+    )
     node.appendChild(buttonHost)
   })
 }
@@ -891,22 +1149,69 @@ function renderCreateForm(
   setTimeout(() => input.focus(), 50)
 }
 
+function isNodeInsideMindDockUi(node: Node | null): boolean {
+  if (!node) {
+    return false
+  }
+
+  const selector =
+    "#minddock-source-actions-root, #minddock-source-filters-root, [data-minddock-target], [role='dialog'][aria-modal='true']"
+
+  if (node instanceof Element) {
+    return !!node.closest(selector)
+  }
+
+  let parent = node.parentElement
+  while (parent) {
+    if (parent.matches(selector) || parent.closest(selector)) {
+      return true
+    }
+    parent = parent.parentElement
+  }
+
+  return false
+}
+
 function onHighlightMouseUp(e: MouseEvent) {
-  const panel = document.getElementById(CLIPPER_PANEL_ID)
-  if (panel && panel.contains(e.target as Node)) return
+  try {
+    const target = e.target instanceof Node ? e.target : null
+    const panel = document.getElementById(CLIPPER_PANEL_ID)
+    if (panel && target && panel.contains(target)) {
+      return
+    }
 
-  const selection = window.getSelection()
-  const text = selection?.toString().trim() ?? ""
+    // Disable highlight clipper while user interacts with MindDock overlays/modals.
+    if (isNodeInsideMindDockUi(target)) {
+      return
+    }
+    if (document.querySelector("section[role='dialog'][aria-modal='true'][aria-label='Download de fontes']")) {
+      return
+    }
 
-  if (text.length >= 15) {
-    const range = selection!.getRangeAt(0)
+    const selection = window.getSelection()
+    const text = selection?.toString().trim() ?? ""
+    if (isNodeInsideMindDockUi(selection?.anchorNode ?? null) || isNodeInsideMindDockUi(selection?.focusNode ?? null)) {
+      return
+    }
+    if (!selection || selection.rangeCount <= 0 || text.length < 15) {
+      if (clipperHideTimer) clearTimeout(clipperHideTimer)
+      clipperHideTimer = setTimeout(() => {
+        if ((window.getSelection()?.toString().trim() ?? "").length < 15) removeClipperPanel()
+      }, 160)
+      return
+    }
+
+    const range = selection.getRangeAt(0)
     const rect = range.getBoundingClientRect()
-    void showClipperPanel(rect.left + rect.width / 2, rect.top, text)
-  } else {
-    if (clipperHideTimer) clearTimeout(clipperHideTimer)
-    clipperHideTimer = setTimeout(() => {
-      if ((window.getSelection()?.toString().trim() ?? "").length < 15) removeClipperPanel()
-    }, 160)
+    if (rect.width <= 0 && rect.height <= 0) {
+      return
+    }
+
+    void showClipperPanel(rect.left + rect.width / 2, rect.top, text).catch((error) => {
+      console.debug("[MindDock] Highlight clipper panel failed", error)
+    })
+  } catch (error) {
+    console.debug("[MindDock] Ignoring highlight mouseup error", error)
   }
 }
 
@@ -926,6 +1231,14 @@ function refreshUi(): void {
 }
 
 function scheduleRefresh(): void {
+  if (isSourceDownloadModalOpen) {
+    return
+  }
+
+  if (isSourceFilterApplyLocked()) {
+    return
+  }
+
   if (refreshTimer !== null) {
     window.clearTimeout(refreshTimer)
   }
@@ -942,7 +1255,10 @@ function startObservers(): void {
   }
 
   if (!domObserver) {
-    domObserver = new MutationObserver(() => {
+    domObserver = new MutationObserver((mutations) => {
+      if (shouldSkipRefreshForMutations(mutations)) {
+        return
+      }
       scheduleRefresh()
     })
 
@@ -974,10 +1290,15 @@ function startObservers(): void {
   window.addEventListener("resize", updateAgileBarPosition)
   window.addEventListener("scroll", updateAgileBarPosition, true)
   window.addEventListener("resize", updateFocusThreadsBarPosition)
+  window.addEventListener(SOURCE_FILTER_APPLY_START_EVENT, onSourceFilterApplyStart as EventListener)
+  window.addEventListener(SOURCE_FILTER_APPLY_END_EVENT, onSourceFilterApplyEnd as EventListener)
+  window.addEventListener(SOURCE_DOWNLOAD_MODAL_STATE_EVENT, onSourceDownloadModalState as EventListener)
 
-  document.addEventListener("mouseup", onHighlightMouseUp)
-  document.addEventListener("keydown", onHighlightKeyDown)
-  document.addEventListener("scroll", removeClipperPanel, { passive: true, capture: true })
+  if (ENABLE_NOTEBOOK_HIGHLIGHT_CLIPPER) {
+    document.addEventListener("mouseup", onHighlightMouseUp)
+    document.addEventListener("keydown", onHighlightKeyDown)
+    document.addEventListener("scroll", removeClipperPanel, { passive: true, capture: true })
+  }
 }
 
 function cleanup(): void {
@@ -1002,13 +1323,22 @@ function cleanup(): void {
     focusThreadsPositionTimer = null
   }
 
+  sourceFilterApplyDepth = 0
+  sourceFilterApplyLockUntil = 0
+
   window.removeEventListener("resize", updateAgileBarPosition)
   window.removeEventListener("scroll", updateAgileBarPosition, true)
   window.removeEventListener("resize", updateFocusThreadsBarPosition)
+  window.removeEventListener(SOURCE_FILTER_APPLY_START_EVENT, onSourceFilterApplyStart as EventListener)
+  window.removeEventListener(SOURCE_FILTER_APPLY_END_EVENT, onSourceFilterApplyEnd as EventListener)
+  window.removeEventListener(SOURCE_DOWNLOAD_MODAL_STATE_EVENT, onSourceDownloadModalState as EventListener)
+  isSourceDownloadModalOpen = false
 
-  document.removeEventListener("mouseup", onHighlightMouseUp)
-  document.removeEventListener("keydown", onHighlightKeyDown)
-  document.removeEventListener("scroll", removeClipperPanel, true)
+  if (ENABLE_NOTEBOOK_HIGHLIGHT_CLIPPER) {
+    document.removeEventListener("mouseup", onHighlightMouseUp)
+    document.removeEventListener("keydown", onHighlightKeyDown)
+    document.removeEventListener("scroll", removeClipperPanel, true)
+  }
   removeClipperPanel()
 
   window.removeEventListener("pagehide", cleanup)
@@ -1049,4 +1379,8 @@ bootstrap()
 window.addEventListener("pagehide", cleanup)
 window.addEventListener("beforeunload", cleanup)
 
-export {}
+function NotebooklmInjectorEntrypoint() {
+  return null
+}
+
+export default NotebooklmInjectorEntrypoint
