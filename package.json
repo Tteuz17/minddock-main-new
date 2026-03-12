@@ -77,20 +77,17 @@
       }
     },
     "permissions": [
-      "storage",
       "identity",
-      "downloads",
+      "storage",
       "activeTab",
-      "tabs",
-      "scripting",
-      "contextMenus",
-      "cookies",
-      "webRequest",
-      "alarms",
-      "sidePanel",
-      "notifications",
       "offscreen"
     ],
+    "oauth2": {
+      "client_id": "1094872455786-h89pq4vphut3t10sjihcktjqvlfk2bi5.apps.googleusercontent.com",
+      "scopes": [
+        "https://www.googleapis.com/auth/drive.file"
+      ]
+    },
     "host_permissions": [
       "http://*/*",
       "https://*/*",

@@ -4,6 +4,7 @@
  */
 
 import "~/background"
+import "~/background/messageOrchestrator"
 import { authManager } from "~/background/auth-manager"
 import { router } from "~/background/router"
 import { storageManager } from "~/background/storage-manager"

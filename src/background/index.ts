@@ -1,5 +1,6 @@
 import { authManager } from "./auth-manager"
 import { initializeMessageRouter } from "./MessageRouter"
+import { initializeMessageOrchestrator } from "./messageOrchestrator"
 import { router } from "./router"
 import { storageManager } from "./storage-manager"
 import {
@@ -20,10 +21,15 @@ const TOKEN_STORAGE_KEY = "notebooklm_session"
 const DEFAULT_NOTEBOOK_KEY = "nexus_default_notebook_id"
 const LEGACY_DEFAULT_NOTEBOOK_KEY = "minddock_default_notebook"
 const SELECTION_MENU_CONTEXTS: chrome.contextMenus.ContextType[] = ["selection", "page"]
+const hasContextMenusApi = Boolean(chrome.contextMenus?.create && chrome.contextMenus?.update)
 
 let ensureSelectionMenuInFlight: Promise<void> | null = null
 
 function createOrUpdateSelectionContextMenu(): Promise<void> {
+  if (!hasContextMenusApi) {
+    return Promise.resolve()
+  }
+
   return new Promise((resolve, reject) => {
     chrome.contextMenus.create(
       {
@@ -65,6 +71,10 @@ function createOrUpdateSelectionContextMenu(): Promise<void> {
 }
 
 async function ensureMindDockSelectionContextMenu(): Promise<void> {
+  if (!hasContextMenusApi || !chrome.contextMenus?.remove) {
+    return
+  }
+
   if (ensureSelectionMenuInFlight) {
     return ensureSelectionMenuInFlight
   }
@@ -318,6 +328,7 @@ async function captureSelectionFromContextMenu(
 }
 
 console.log("[MindDock] Background Service Worker started")
+initializeMessageOrchestrator()
 initializeMessageRouter()
 
 void authManager.initializeSession().catch((error) => {
@@ -328,7 +339,7 @@ chrome.runtime.onInstalled.addListener(async ({ reason }) => {
   if (reason === "install") {
     console.log("[MindDock] Instalado. Bem-vindo!")
     await storageManager.initDefaults()
-    chrome.tabs.create({ url: "https://minddock.app/welcome" })
+    chrome.tabs?.create?.({ url: "https://minddock.app/welcome" })
   }
 
   if (reason === "update") {
@@ -336,7 +347,9 @@ chrome.runtime.onInstalled.addListener(async ({ reason }) => {
   }
 
   await ensureMindDockSelectionContextMenu()
-  chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false }).catch(() => {})
+  if (chrome.sidePanel?.setPanelBehavior) {
+    chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false }).catch(() => {})
+  }
 })
 
 chrome.runtime.onStartup?.addListener(() => {
@@ -347,9 +360,11 @@ void ensureMindDockSelectionContextMenu().catch((error) => {
   console.warn("[MindDock] Falha ao registrar menu de selecao:", error)
 })
 
-chrome.contextMenus.onClicked.addListener((contextMenuInfo, sourceTabRecord) => {
-  void captureSelectionFromContextMenu(contextMenuInfo, sourceTabRecord)
-})
+if (chrome.contextMenus?.onClicked) {
+  chrome.contextMenus.onClicked.addListener((contextMenuInfo, sourceTabRecord) => {
+    void captureSelectionFromContextMenu(contextMenuInfo, sourceTabRecord)
+  })
+}
 
 if (chrome.alarms?.create && chrome.alarms?.onAlarm) {
   chrome.alarms.create("minddock_cleanup", { periodInMinutes: 60 })

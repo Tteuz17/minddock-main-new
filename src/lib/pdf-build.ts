@@ -9,6 +9,23 @@ const PDF_BODY_LINE_HEIGHT = 15
 const PDF_TITLE_LINE_HEIGHT = 19
 const PDF_TABLE_LINE_HEIGHT = 13
 const PDF_BLANK_LINE_HEIGHT = 9
+const PDF_CHAT_CARD_GAP = 10
+const PDF_CHAT_CARD_PADDING_X = 12
+const PDF_CHAT_CARD_PADDING_Y = 10
+const PDF_CHAT_HEADER_HEIGHT = 14
+const PDF_CHAT_CARD_MIN_HEIGHT = 58
+const PDF_CHAT_LEFT_BAR_WIDTH = 4
+
+interface ParsedChatPdfMessage {
+  role: "user" | "model"
+  content: string
+}
+
+interface ParsedChatPdfDocument {
+  title: string
+  exportedAt: string
+  messages: ParsedChatPdfMessage[]
+}
 
 export function buildPdfBytesFromText(text: string): Uint8Array {
   const pdf = new jsPDF({
@@ -18,9 +35,189 @@ export function buildPdfBytesFromText(text: string): Uint8Array {
   })
 
   const normalized = normalizePdfText(text)
+  const parsedChat = parseChatPdfDocument(normalized)
+  if (parsedChat) {
+    renderChatStyledPdf(pdf, parsedChat)
+  } else {
+    renderLegacyTextPdf(pdf, normalized)
+  }
+
+  return new Uint8Array(pdf.output("arraybuffer") as ArrayBuffer)
+}
+
+function parseChatPdfDocument(normalizedText: string): ParsedChatPdfDocument | null {
+  const lines = String(normalizedText ?? "").split("\n")
+  const messages: ParsedChatPdfMessage[] = []
+  let title = ""
+  let exportedAt = ""
+  let currentRole: ParsedChatPdfMessage["role"] | null = null
+  let currentLines: string[] = []
+
+  const flushCurrent = (): void => {
+    if (!currentRole) {
+      return
+    }
+    const content = currentLines
+      .join("\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim()
+    if (content) {
+      messages.push({
+        role: currentRole,
+        content
+      })
+    }
+    currentRole = null
+    currentLines = []
+  }
+
+  for (const rawLine of lines) {
+    const line = String(rawLine ?? "").trimEnd()
+    const trimmed = line.trim()
+
+    if (!title && /^#\s+/.test(trimmed)) {
+      title = trimmed.replace(/^#\s+/, "").trim()
+      continue
+    }
+
+    if (!exportedAt && /^exportado em:/i.test(trimmed)) {
+      exportedAt = trimmed.replace(/^exportado em:\s*/i, "").trim()
+      continue
+    }
+
+    const roleHeaderMatch = trimmed.match(/^##\s+(usuario|notebooklm)\s*$/i)
+    if (roleHeaderMatch) {
+      flushCurrent()
+      currentRole = roleHeaderMatch[1].toLowerCase() === "usuario" ? "user" : "model"
+      continue
+    }
+
+    if (/^---+$/.test(trimmed)) {
+      continue
+    }
+
+    if (currentRole) {
+      currentLines.push(line)
+    }
+  }
+
+  flushCurrent()
+
+  if (messages.length === 0) {
+    return null
+  }
+
+  return {
+    title: title || "NotebookLM",
+    exportedAt,
+    messages
+  }
+}
+
+function renderChatStyledPdf(pdf: jsPDF, doc: ParsedChatPdfDocument): void {
   const pageHeight = pdf.internal.pageSize.getHeight()
   const maxWidth = pdf.internal.pageSize.getWidth() - PDF_MARGIN_X * 2
-  const logicalLines = normalized.split("\n")
+  const cardWidth = maxWidth
+  let y = PDF_MARGIN_Y
+
+  const ensureSpace = (height: number): void => {
+    if (y + height <= pageHeight - PDF_MARGIN_Y) {
+      return
+    }
+    pdf.addPage()
+    y = PDF_MARGIN_Y
+  }
+
+  pdf.setTextColor(17, 24, 39)
+  pdf.setFont("helvetica", "bold")
+  pdf.setFontSize(22)
+  const titleLines = pdf.splitTextToSize(doc.title || "NotebookLM", maxWidth) as string[]
+  for (const line of titleLines) {
+    ensureSpace(24)
+    pdf.text(line, PDF_MARGIN_X, y)
+    y += 24
+  }
+
+  if (doc.exportedAt) {
+    pdf.setFont("helvetica", "normal")
+    pdf.setFontSize(10)
+    pdf.setTextColor(107, 114, 128)
+    ensureSpace(16)
+    pdf.text(`Exportado em: ${doc.exportedAt}`, PDF_MARGIN_X, y)
+    y += 20
+  } else {
+    y += 8
+  }
+
+  for (const message of doc.messages) {
+    const roleLabel = message.role === "user" ? "Usuario" : "NotebookLM"
+    const roleColor: [number, number, number] = message.role === "user" ? [96, 165, 250] : [52, 211, 153]
+    const contentWidth = cardWidth - PDF_CHAT_CARD_PADDING_X * 2 - PDF_CHAT_LEFT_BAR_WIDTH - 6
+
+    const contentLines: string[] = []
+    for (const paragraph of message.content.split("\n")) {
+      const trimmed = paragraph.trim()
+      if (!trimmed) {
+        contentLines.push("")
+        continue
+      }
+
+      const wrapped = pdf.splitTextToSize(trimmed, contentWidth) as string[]
+      for (const wrappedLine of wrapped) {
+        contentLines.push(String(wrappedLine))
+      }
+    }
+
+    const contentHeight = contentLines.reduce((height, line) => {
+      if (!line.trim()) {
+        return height + 7
+      }
+      return height + PDF_BODY_LINE_HEIGHT
+    }, 0)
+
+    const cardHeight = Math.max(
+      PDF_CHAT_CARD_MIN_HEIGHT,
+      PDF_CHAT_CARD_PADDING_Y * 2 + PDF_CHAT_HEADER_HEIGHT + 6 + contentHeight
+    )
+
+    ensureSpace(cardHeight)
+
+    const x = PDF_MARGIN_X
+    pdf.setFillColor(255, 255, 255)
+    pdf.setDrawColor(229, 231, 235)
+    pdf.setLineWidth(0.8)
+    pdf.roundedRect(x, y, cardWidth, cardHeight, 8, 8, "FD")
+
+    pdf.setFillColor(roleColor[0], roleColor[1], roleColor[2])
+    pdf.roundedRect(x + 0.8, y + 0.8, PDF_CHAT_LEFT_BAR_WIDTH, cardHeight - 1.6, 2, 2, "F")
+
+    pdf.setFont("helvetica", "bold")
+    pdf.setFontSize(12)
+    pdf.setTextColor(17, 24, 39)
+    let textY = y + PDF_CHAT_CARD_PADDING_Y + 10
+    pdf.text(roleLabel, x + PDF_CHAT_CARD_PADDING_X + PDF_CHAT_LEFT_BAR_WIDTH + 4, textY)
+    textY += 16
+
+    pdf.setFont("helvetica", "normal")
+    pdf.setFontSize(PDF_BODY_FONT_SIZE)
+    pdf.setTextColor(31, 41, 55)
+    for (const line of contentLines) {
+      if (!line.trim()) {
+        textY += 7
+        continue
+      }
+      pdf.text(line, x + PDF_CHAT_CARD_PADDING_X + PDF_CHAT_LEFT_BAR_WIDTH + 4, textY)
+      textY += PDF_BODY_LINE_HEIGHT
+    }
+
+    y += cardHeight + PDF_CHAT_CARD_GAP
+  }
+}
+
+function renderLegacyTextPdf(pdf: jsPDF, normalizedText: string): void {
+  const pageHeight = pdf.internal.pageSize.getHeight()
+  const maxWidth = pdf.internal.pageSize.getWidth() - PDF_MARGIN_X * 2
+  const logicalLines = normalizedText.split("\n")
   let y = PDF_MARGIN_Y
 
   for (let index = 0; index < logicalLines.length; index += 1) {
@@ -73,8 +270,6 @@ export function buildPdfBytesFromText(text: string): Uint8Array {
       y = PDF_MARGIN_Y
     }
   }
-
-  return new Uint8Array(pdf.output("arraybuffer") as ArrayBuffer)
 }
 
 function isPdfTitleLine(line: string, index: number): boolean {

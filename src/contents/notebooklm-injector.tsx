@@ -9,6 +9,7 @@ import { FocusThreadsBar } from "../../contents/notebooklm/FocusThreadsBar"
 import { SourceDownloadPanel } from "../../contents/notebooklm/SourceDownloadPanel"
 import { SourceFilterPanel } from "../../contents/notebooklm/SourceFilterPanel"
 import { ZettelButton } from "../../contents/notebooklm/ZettelButton"
+import "~/content/features/VoiceInput/voiceInputInjector"
 import {
   resolveNotebookConfigureButton,
   SOURCE_FILTER_APPLY_END_EVENT,
@@ -89,6 +90,15 @@ function isIgnorableBoundaryError(error: unknown): boolean {
   const normalized = normalizeBoundaryError(error)
   const merged = `${normalized.name} ${normalized.message}`.toLowerCase()
   if (merged.includes("domexception")) {
+    return true
+  }
+  if (merged.includes("extension context invalidated")) {
+    return true
+  }
+  if (merged.includes("receiving end does not exist")) {
+    return true
+  }
+  if (merged.includes("message channel closed")) {
     return true
   }
   if (merged.includes("failed to execute") && merged.includes("insertrule")) {

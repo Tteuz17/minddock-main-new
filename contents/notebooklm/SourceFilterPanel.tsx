@@ -69,6 +69,8 @@ const NATIVE_SOURCE_SEARCH_SELECTORS = [
 ] as const
 let filterRetryHandle: number | null = null
 let filterRetryAttempts = 0
+const SOURCE_ICON_TOKEN_ONLY_REGEX =
+  /^(more_vert|article|drive_pdf|drive_spreadsheet|drive_presentation|video_audio_call|video_youtube|image|description)$/u
 
 type SourceDetectedType = "PDF" | "YOUTUBE" | "GDOC" | "WEB" | "TEXT" | "AUDIO" | "IMAGE"
 type SourcePanelFilterType = "ALL" | SourceDetectedType
@@ -1133,17 +1135,39 @@ function resolveSourceTitleForSelectionRow(row: HTMLElement, index: number): str
     if (!normalized) {
       continue
     }
-    if (
-      /^(more_vert|article|drive_pdf|drive_spreadsheet|drive_presentation|video_audio_call|video_youtube|image|description)$/u.test(
-        normalized
-      )
-    ) {
+    if (SOURCE_ICON_TOKEN_ONLY_REGEX.test(normalized)) {
       continue
     }
     return line
   }
 
   return `Fonte ${index + 1}`
+}
+
+function resolveSemanticSourceTextForDetection(row: HTMLElement): string {
+  const extractedTitle = String(extractSourceTitle(row) ?? "").trim()
+  if (extractedTitle) {
+    const normalizedExtracted = normalizeSnapshotValue(extractedTitle)
+    if (normalizedExtracted && !SOURCE_ICON_TOKEN_ONLY_REGEX.test(normalizedExtracted)) {
+      return extractedTitle
+    }
+  }
+
+  const rawText = String(row.innerText || row.textContent || "")
+  const lines = rawText
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter(Boolean)
+
+  for (const line of lines) {
+    const normalized = normalizeSnapshotValue(line)
+    if (!normalized || SOURCE_ICON_TOKEN_ONLY_REGEX.test(normalized)) {
+      continue
+    }
+    return line
+  }
+
+  return extractedTitle || rawText.trim()
 }
 
 function resolveStableSourceSelectionId(row: HTMLElement, sourceTitle: string, index: number): string {
@@ -1552,6 +1576,7 @@ function collectRowContextSnapshot(row: HTMLElement): string {
 function detectSourceTypeFromRow(row: HTMLElement): SourceDetectedType {
   const html = normalizeSnapshotValue(row.innerHTML)
   const text = normalizeSnapshotValue(String(row.innerText || row.textContent || ""))
+  const semanticText = normalizeSnapshotValue(resolveSemanticSourceTextForDetection(row))
   const aria = normalizeSnapshotValue(row.getAttribute("aria-label"))
   const title = normalizeSnapshotValue(row.getAttribute("title"))
   const dataHints = normalizeSnapshotValue(
@@ -1623,7 +1648,17 @@ function detectSourceTypeFromRow(row: HTMLElement): SourceDetectedType {
   }
   
   // DETECÇÃO POR ÍCONE (primeira palavra do texto)
-  const firstWord = text.split(" ")[0]
+  const firstWord = String(text.split(" ")[0] ?? "").trim()
+  const textLeaningSnapshot = `${semanticText} ${rawTypeSignals} ${title}`.trim()
+  const hasTextSelectionSignal =
+    /\[?\s*(selecao|selecaoes|selection|selections)\s*\]?|\bcopied text\b|\bpasted text\b|\btexto\b|\btext\b/u.test(
+      textLeaningSnapshot
+    )
+  const hasConcreteImageSignal =
+    /(\.png(\?|$)|\.jpe?g(\?|$)|\.gif(\?|$)|\.webp(\?|$)|\.svg(\?|$)|\bimage\/(png|jpeg|gif|webp|svg)\b)/.test(
+      `${hrefSnapshot} ${mediaSnapshot} ${extractedUrl} ${rawTypeSignals}`
+    ) ||
+    row.querySelector("img[src*='.png'], img[src*='.jpg'], img[src*='.jpeg'], img[src*='.gif'], img[src*='.webp'], img[src*='.svg']") !== null
   
   // Google Workspace (Docs, Sheets, Slides)
   if (firstWord === "article") {
@@ -1645,6 +1680,9 @@ function detectSourceTypeFromRow(row: HTMLElement): SourceDetectedType {
   
   // Imagens
   if (firstWord === "image") {
+    if (hasTextSelectionSignal && !hasConcreteImageSignal) {
+      return "TEXT"
+    }
     return "IMAGE"
   }
   
@@ -1663,12 +1701,18 @@ function detectSourceTypeFromRow(row: HTMLElement): SourceDetectedType {
   // If the DOM exposes a direct type-like value, normalize it first.
   const normalizedFromRawType = normalizeRawSourceType(rawTypeSignals)
   if (normalizedFromRawType) {
+    if (normalizedFromRawType === "IMAGE" && !hasConcreteImageSignal) {
+      return "TEXT"
+    }
     return normalizedFromRawType
   }
 
   // Fallback priority pass on whole snapshot.
   const normalizedFromSnapshot = normalizeRawSourceType(fullSnapshot)
   if (normalizedFromSnapshot) {
+    if (normalizedFromSnapshot === "IMAGE" && !hasConcreteImageSignal) {
+      return "TEXT"
+    }
     return normalizedFromSnapshot
   }
 
