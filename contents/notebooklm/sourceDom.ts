@@ -51,6 +51,12 @@ declare global {
         textPreview: string
       }>
     }
+    __minddockConversationCaptureDebug?: {
+      mode: "pairs" | "primary" | "loose" | "aggregate" | "main" | "empty"
+      count: number
+      sample: string[]
+      at: string
+    }
   }
 }
 
@@ -1007,40 +1013,1014 @@ export function resolveNotebookConfigureButton(): HTMLElement | null {
  * Captura as mensagens visíveis no chat do NotebookLM.
  * Retorna array de {role, content} para salvar na thread ativa.
  */
-export function captureVisibleMessages(): Array<{ role: "user" | "assistant"; content: string }> {
-  const messages: Array<{ role: "user" | "assistant"; content: string }> = []
-
-  // Mensagens do assistente
-  const assistantNodes = queryDeepAll<HTMLElement>([
-    "[data-testid='response-text']",
-    "[data-testid='chat-message-assistant']",
-    ".response-container .message-content",
-  ])
-  for (const node of assistantNodes) {
-    const content = node.textContent?.trim()
-    if (content && content.length > 0) {
-      messages.push({ role: "assistant", content })
-    }
-  }
-
-  // Mensagens do usuário
-  const userNodes = queryDeepAll<HTMLElement>([
-    "[data-testid='user-query']",
-    "[data-testid='chat-message-user']",
-    "[data-testid='query-text']",
-    ".user-query-text",
-    ".query-container .query-text",
-  ])
-  for (const node of userNodes) {
-    const content = node.textContent?.trim()
-    if (content && content.length > 0) {
-      messages.push({ role: "user", content })
-    }
-  }
-
-  return messages
+interface CapturedVisibleMessageCandidate {
+  role: "user" | "assistant"
+  content: string
+  top: number
 }
 
+const MINDDOCK_ROOT_SELECTOR =
+  "#minddock-focus-threads-root, #minddock-agile-bar-root, #minddock-source-actions-root, #minddock-source-filters-root"
+
+const TURN_CONTAINER_SELECTORS = [
+  "conversational-turn",
+  "chat-turn",
+  "[data-testid*='conversation-turn']",
+  "[data-testid*='chat-turn']"
+] as const
+
+const TURN_PAIR_SELECTORS = [
+  ".chat-message-pair",
+  "[data-testid*='chat-message-pair']",
+  "[data-testid*='conversation-turn']",
+  "conversational-turn"
+] as const
+
+const USER_PAIR_CONTENT_SELECTORS = [
+  ".from-user-container .message-text-content",
+  "[data-testid='query-text']",
+  "[data-testid='user-query']",
+  ".query-container .query-text",
+  ".user-query-text",
+  "user-query"
+] as const
+
+const ASSISTANT_PAIR_CONTENT_SELECTORS = [
+  ".to-user-container .message-text-content",
+  "[data-testid='response-text']",
+  "[data-testid='chat-message-assistant'] [data-testid='response-text']",
+  ".response-container .message-content",
+  ".response-content",
+  "model-response"
+] as const
+
+const USER_MESSAGE_SELECTORS = [
+  "user-query .query-content",
+  "user-query .query-text",
+  "user-query markdown-renderer",
+  "user-query .markdown",
+  "user-query",
+  "[data-testid='user-query']",
+  "[data-testid='query-text']",
+  "[data-testid*='query-text']",
+  "[data-testid='chat-message-user']",
+  "[data-testid*='chat-message-user']",
+  "[data-testid='user-message']",
+  "[data-testid*='user-message']",
+  "[data-role='user']",
+  ".user-query-text",
+  ".query-container .query-text"
+] as const
+
+const ASSISTANT_MESSAGE_SELECTORS = [
+  "model-response .model-response-text",
+  "model-response .response-content",
+  "model-response message-content",
+  "model-response markdown-renderer",
+  "model-response .markdown",
+  "model-response",
+  "[data-testid='response-text']",
+  "[data-testid*='response-text']",
+  "[data-testid='chat-message-assistant']",
+  "[data-testid*='chat-message-assistant']",
+  "[data-testid='assistant-message']",
+  "[data-testid*='assistant-message']",
+  "[data-role='assistant']",
+  ".response-container .message-content"
+] as const
+
+const LOOSE_CONVERSATION_FALLBACK_SELECTORS = [
+  "main model-response",
+  "main [class*='model-response']",
+  "main [data-testid*='response']",
+  "main [class*='response']",
+  "main [class*='conversation'] [class*='message']",
+  "main article",
+  "main [class*='markdown']",
+  "main [data-testid*='markdown']"
+] as const
+
+const CONVERSATION_COMPOSER_SELECTORS = [
+  "textarea",
+  "div[contenteditable='true'][role='textbox']",
+  "div[contenteditable='true']",
+  "input[type='text']"
+] as const
+
+const CONVERSATION_UI_NOISE_TOKENS = [
+  "comece a digitar",
+  "start typing",
+  "search sources",
+  "pesquise novas fontes na web",
+  "selecionar todas as fontes",
+  "select all sources",
+  "source groups",
+  "saved views",
+  "visualizacoes da pesquisa"
+] as const
+
+const CONVERSATION_UI_EXACT_NOISE_LINES = [
+  "conversa",
+  "conversation",
+  "export",
+  "copy",
+  "share",
+  "compartilhar",
+  "configuracoes",
+  "settings",
+  "estudio",
+  "studio",
+  "resumo",
+  "mapa mental",
+  "teste"
+] as const
+
+function normalizeCapturedMessageText(value: string): string {
+  return String(value ?? "")
+    .replace(/\r/g, "")
+    .replace(/\u00a0/g, " ")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim()
+}
+
+function isInMindDockTree(element: HTMLElement): boolean {
+  return !!element.closest(MINDDOCK_ROOT_SELECTOR)
+}
+
+function isLikelyUiNoiseText(normalizedText: string, rawLength: number): boolean {
+  if (!normalizedText) {
+    return true
+  }
+
+  const isShort = rawLength < 220
+  if (isShort && CONVERSATION_UI_NOISE_TOKENS.some((token) => normalizedText.includes(token))) {
+    return true
+  }
+
+  if (isShort && CONVERSATION_UI_EXACT_NOISE_LINES.includes(normalizedText as (typeof CONVERSATION_UI_EXACT_NOISE_LINES)[number])) {
+    return true
+  }
+
+  return false
+}
+
+function resolveMessageText(node: HTMLElement): string {
+  const directText = normalizeCapturedMessageText(node.innerText || node.textContent || "")
+  if (directText.length >= 2) {
+    return directText
+  }
+
+  const nestedTextSelectors = [
+    "markdown-renderer",
+    ".markdown",
+    ".prose",
+    ".message-content",
+    ".response-content",
+    ".query-content",
+    ".query-text"
+  ] as const
+
+  let best = ""
+  for (const selector of nestedTextSelectors) {
+    for (const candidate of Array.from(node.querySelectorAll<HTMLElement>(selector))) {
+      if (!isVisible(candidate)) continue
+      const text = normalizeCapturedMessageText(candidate.innerText || candidate.textContent || "")
+      if (text.length > best.length) {
+        best = text
+      }
+    }
+  }
+
+  return best
+}
+
+function queryFirstVisibleDescendant(root: ParentNode, selectors: readonly string[]): HTMLElement | null {
+  for (const selector of selectors) {
+    for (const candidate of Array.from(root.querySelectorAll<HTMLElement>(selector))) {
+      if (isVisible(candidate)) {
+        return candidate
+      }
+    }
+  }
+
+  return null
+}
+
+function collectConversationPairCandidates(): CapturedVisibleMessageCandidate[] {
+  const output: CapturedVisibleMessageCandidate[] = []
+  const seenPairKeys = new Set<string>()
+
+  for (const pair of queryDeepAll<HTMLElement>(TURN_PAIR_SELECTORS)) {
+    if (!(pair instanceof HTMLElement) || !isVisible(pair) || isInMindDockTree(pair)) {
+      continue
+    }
+
+    if (
+      pair.closest(
+        "source-picker, .source-panel, #minddock-source-actions-root, #minddock-source-filters-root, [data-testid*='source-list'], [data-testid*='source-panel'], [class*='source-list'], [class*='studio-sidebar']"
+      )
+    ) {
+      continue
+    }
+
+    const pairRect = pair.getBoundingClientRect()
+    if (pairRect.width < 180 || pairRect.height < 18) {
+      continue
+    }
+
+    const userNode = queryFirstVisibleDescendant(pair, USER_PAIR_CONTENT_SELECTORS)
+    const assistantNode = queryFirstVisibleDescendant(pair, ASSISTANT_PAIR_CONTENT_SELECTORS)
+
+    const userContent = userNode ? resolveMessageText(userNode) : ""
+    const assistantContent = assistantNode ? resolveMessageText(assistantNode) : ""
+
+    if (assistantContent.length < 2 && userContent.length < 2) {
+      continue
+    }
+
+    const pairKey = normalize(`${userContent}\n${assistantContent}`).slice(0, 420)
+    if (!pairKey || seenPairKeys.has(pairKey)) {
+      continue
+    }
+    seenPairKeys.add(pairKey)
+
+    const baseTop = pairRect.top
+    if (userContent.length >= 2) {
+      output.push({
+        role: "user",
+        content: userContent,
+        top: userNode?.getBoundingClientRect().top ?? baseTop
+      })
+    }
+
+    if (assistantContent.length >= 2) {
+      output.push({
+        role: "assistant",
+        content: assistantContent,
+        top: assistantNode?.getBoundingClientRect().top ?? baseTop + 0.1
+      })
+    }
+  }
+
+  return output
+}
+
+function collectConversationTurnCandidates(): CapturedVisibleMessageCandidate[] {
+  const results: CapturedVisibleMessageCandidate[] = []
+
+  for (const turn of queryDeepAll<HTMLElement>(TURN_CONTAINER_SELECTORS)) {
+    if (!isVisible(turn) || isInMindDockTree(turn)) {
+      continue
+    }
+
+    const userNode =
+      turn.matches("user-query") ? turn : queryFirstVisibleDescendant(turn, USER_MESSAGE_SELECTORS)
+    const assistantNode =
+      turn.matches("model-response")
+        ? turn
+        : queryFirstVisibleDescendant(turn, ASSISTANT_MESSAGE_SELECTORS)
+
+    if (userNode) {
+      const content = resolveMessageText(userNode)
+      if (content.length >= 2) {
+        results.push({
+          role: "user",
+          content,
+          top: userNode.getBoundingClientRect().top
+        })
+      }
+    }
+
+    if (assistantNode) {
+      const content = resolveMessageText(assistantNode)
+      if (content.length >= 2) {
+        results.push({
+          role: "assistant",
+          content,
+          top: assistantNode.getBoundingClientRect().top
+        })
+      }
+    }
+  }
+
+  return results
+}
+
+function collectRoleCandidates(
+  role: "user" | "assistant",
+  selectors: readonly string[]
+): CapturedVisibleMessageCandidate[] {
+  const results: CapturedVisibleMessageCandidate[] = []
+  const seenNodes = new Set<HTMLElement>()
+
+  for (const node of queryDeepAll<HTMLElement>(selectors)) {
+    if (seenNodes.has(node)) {
+      continue
+    }
+    seenNodes.add(node)
+
+    if (!isVisible(node) || isInMindDockTree(node)) {
+      continue
+    }
+
+    const content = resolveMessageText(node)
+    if (content.length < 2) {
+      continue
+    }
+
+    results.push({
+      role,
+      content,
+      top: node.getBoundingClientRect().top
+    })
+  }
+
+  return results
+}
+
+function compactCapturedCandidates(
+  input: CapturedVisibleMessageCandidate[]
+): Array<{ role: "user" | "assistant"; content: string }> {
+  const sorted = [...input].sort((left, right) => left.top - right.top)
+  const seen = new Set<string>()
+  const output: Array<{ role: "user" | "assistant"; content: string }> = []
+
+  for (const candidate of sorted) {
+    const content = normalizeCapturedMessageText(candidate.content)
+    if (content.length < 2) {
+      continue
+    }
+
+    const dedupeKey = `${candidate.role}:${normalize(content).slice(0, 280)}`
+    if (!dedupeKey || seen.has(dedupeKey)) {
+      continue
+    }
+
+    const last = output[output.length - 1]
+    if (last && last.role === candidate.role && normalize(last.content) === normalize(content)) {
+      continue
+    }
+
+    seen.add(dedupeKey)
+    output.push({ role: candidate.role, content })
+  }
+
+  return output
+}
+
+function collectLooseConversationFallbackCandidates(): CapturedVisibleMessageCandidate[] {
+  const results: CapturedVisibleMessageCandidate[] = []
+  const seenNodes = new Set<HTMLElement>()
+
+  for (const node of queryDeepAll<HTMLElement>(LOOSE_CONVERSATION_FALLBACK_SELECTORS)) {
+    if (seenNodes.has(node)) {
+      continue
+    }
+    seenNodes.add(node)
+
+    if (!isVisible(node) || isInMindDockTree(node)) {
+      continue
+    }
+
+    const rect = node.getBoundingClientRect()
+    if (rect.width < 220 || rect.height < 42) {
+      continue
+    }
+
+    // Ignore elements inside side panels when selectors are too generic.
+    if (
+      node.closest(
+        "source-picker, .source-panel, #minddock-source-actions-root, #minddock-source-filters-root, [data-testid*='source-list'], [data-testid*='source-panel'], [class*='source-list'], [class*='studio-sidebar']"
+      )
+    ) {
+      continue
+    }
+
+    const content = resolveMessageText(node)
+    if (content.length < 120) {
+      continue
+    }
+
+    const normalizedContent = normalize(content)
+    if (isLikelyUiNoiseText(normalizedContent, content.length)) {
+      continue
+    }
+
+    results.push({
+      role: "assistant",
+      content,
+      top: rect.top
+    })
+  }
+
+  return results
+}
+
+function resolveConversationContainerFromComposer(): HTMLElement | null {
+  const composer = queryDeepFirstVisible<HTMLElement>(CONVERSATION_COMPOSER_SELECTORS)
+  if (composer) {
+    const anchored =
+      composer.closest<HTMLElement>(
+        "chat-panel-v2, chat-panel, [data-testid*='conversation'], [class*='conversation-panel'], main, [role='main']"
+      ) ?? composer.parentElement
+
+    if (anchored && isVisible(anchored)) {
+      return anchored
+    }
+  }
+
+  return queryDeepFirstVisible<HTMLElement>(["chat-panel-v2", "chat-panel", "main", "[role='main']"])
+}
+
+function collectReadableConversationBlocks(container: HTMLElement): string[] {
+  const blocks = Array.from(
+    container.querySelectorAll<HTMLElement>(
+      "model-response, user-query, markdown-renderer, [data-testid*='response'], [data-testid*='query'], p, li, blockquote, pre, article"
+    )
+  )
+  const seen = new Set<string>()
+  const records: Array<{ top: number; text: string }> = []
+
+  for (const block of blocks) {
+    if (!isVisible(block) || isInMindDockTree(block)) {
+      continue
+    }
+
+    if (
+      block.closest(
+        "source-picker, .source-panel, #minddock-source-actions-root, #minddock-source-filters-root, [data-testid*='source-list'], [data-testid*='source-panel'], [class*='source-list'], [class*='studio-sidebar']"
+      )
+    ) {
+      continue
+    }
+
+    const rect = block.getBoundingClientRect()
+    if (rect.width < 170 || rect.height < 14) {
+      continue
+    }
+
+    const text = normalizeCapturedMessageText(block.innerText || block.textContent || "")
+    if (text.length < 48) {
+      continue
+    }
+
+    const normalizedText = normalize(text)
+    if (isLikelyUiNoiseText(normalizedText, text.length)) {
+      continue
+    }
+
+    const dedupeKey = normalizedText.slice(0, 220)
+    if (!dedupeKey || seen.has(dedupeKey)) {
+      continue
+    }
+    seen.add(dedupeKey)
+
+    records.push({ top: rect.top, text })
+  }
+
+  return records
+    .sort((left, right) => left.top - right.top)
+    .map((record) => record.text)
+    .slice(0, 42)
+}
+
+function collectIntroFromConversationContainer(beforeTop: number): string {
+  if (!Number.isFinite(beforeTop)) {
+    return ""
+  }
+
+  const container = resolveConversationContainerFromComposer()
+  if (!container) {
+    return ""
+  }
+
+  const composer = queryDeepFirstVisible<HTMLElement>(CONVERSATION_COMPOSER_SELECTORS)
+  const composerRect = composer?.getBoundingClientRect() ?? null
+  const laneLeft = composerRect ? composerRect.left - 120 : window.innerWidth * 0.28
+  const laneRight = composerRect ? composerRect.right + 120 : window.innerWidth * 0.97
+
+  const introSelectors = [
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "[data-testid*='title']",
+    "[data-testid*='heading']",
+    "[data-testid*='intro']",
+    "markdown-renderer",
+    "article",
+    "p",
+    "li",
+    "blockquote",
+    "pre",
+    "section",
+    "div[class*='intro']",
+    "div[class*='summary']",
+    "div[class*='title']",
+    "div[class*='heading']",
+    "span[class*='intro']",
+    "span[class*='title']"
+  ] as const
+
+  const records: Array<{ top: number; text: string }> = []
+  const seen = new Set<string>()
+
+  for (const candidate of Array.from(container.querySelectorAll<HTMLElement>(introSelectors.join(", ")))) {
+    if (!isVisible(candidate) || isInMindDockTree(candidate)) {
+      continue
+    }
+
+    if (
+      candidate.closest(
+        "user-query, source-picker, .source-panel, [data-testid*='source-list'], [class*='source-list'], [class*='studio-sidebar'], #minddock-source-actions-root, #minddock-source-filters-root"
+      )
+    ) {
+      continue
+    }
+
+    const rect = candidate.getBoundingClientRect()
+    if (rect.width < 160 || rect.height < 12) {
+      continue
+    }
+
+    if (rect.bottom >= beforeTop - 4) {
+      continue
+    }
+
+    if (rect.right < laneLeft || rect.left > laneRight) {
+      continue
+    }
+
+    const text = normalizeCapturedMessageText(candidate.innerText || candidate.textContent || "")
+    if (text.length < 2) {
+      continue
+    }
+
+    const tagName = candidate.tagName.toLowerCase()
+    if ((tagName === "div" || tagName === "span") && text.length < 24) {
+      continue
+    }
+
+    const normalizedText = normalize(text)
+    if (
+      isLikelyUiNoiseText(normalizedText, text.length) ||
+      CONVERSATION_UI_EXACT_NOISE_LINES.includes(
+        normalizedText as (typeof CONVERSATION_UI_EXACT_NOISE_LINES)[number]
+      )
+    ) {
+      continue
+    }
+
+    const dedupeKey = normalizedText.slice(0, 240)
+    if (!dedupeKey || seen.has(dedupeKey)) {
+      continue
+    }
+
+    seen.add(dedupeKey)
+    records.push({ top: rect.top, text })
+  }
+
+  const intro = normalizeCapturedMessageText(
+    records
+      .sort((left, right) => left.top - right.top)
+      .map((record) => record.text)
+      .slice(0, 14)
+      .join("\n\n")
+  )
+
+  return intro.length >= 18 ? intro : ""
+}
+
+function isIntroSourceMetaLine(normalizedText: string): boolean {
+  return /^\d+\s*(fonte|fontes|source|sources)\b/.test(normalizedText)
+}
+
+function collectIntroFromDeepRoots(beforeTop: number): string {
+  if (!Number.isFinite(beforeTop)) {
+    return ""
+  }
+
+  const composer = queryDeepFirstVisible<HTMLElement>(CONVERSATION_COMPOSER_SELECTORS)
+  const composerRect = composer?.getBoundingClientRect() ?? null
+  const laneLeft = composerRect ? composerRect.left - 120 : window.innerWidth * 0.22
+  const laneRight = composerRect ? composerRect.right + 160 : window.innerWidth * 0.98
+
+  const introSelectors = [
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "[data-testid*='title']",
+    "[data-testid*='heading']",
+    "[data-testid*='intro']",
+    "[data-testid*='summary']",
+    "[data-testid*='source']",
+    "markdown-renderer",
+    "article",
+    "p",
+    "li",
+    "blockquote",
+    "pre",
+    "section",
+    "button",
+    "[role='button']",
+    "span[class*='title']",
+    "div[class*='title']",
+    "span[class*='summary']",
+    "div[class*='summary']",
+    "span[class*='intro']",
+    "div[class*='intro']"
+  ] as const
+
+  const records: Array<{ top: number; text: string }> = []
+  const seen = new Set<string>()
+
+  for (const candidate of queryDeepAll<HTMLElement>(introSelectors)) {
+    if (!isVisible(candidate) || isInMindDockTree(candidate)) {
+      continue
+    }
+
+    if (
+      candidate.closest(
+        "source-picker, .source-panel, [data-testid*='source-list'], [class*='source-list'], [class*='studio-sidebar'], #minddock-source-actions-root, #minddock-source-filters-root, #minddock-conversation-export-root, #minddock-focus-threads-root"
+      )
+    ) {
+      continue
+    }
+
+    const rect = candidate.getBoundingClientRect()
+    if (rect.bottom >= beforeTop - 2) {
+      continue
+    }
+
+    if (rect.right < laneLeft || rect.left > laneRight) {
+      continue
+    }
+
+    const text = normalizeCapturedMessageText(candidate.innerText || candidate.textContent || "")
+    if (!text) {
+      continue
+    }
+
+    const normalizedText = normalize(text)
+    const isMetaLine = isIntroSourceMetaLine(normalizedText)
+    if (!isMetaLine && text.length < 18) {
+      continue
+    }
+
+    if (!isMetaLine && rect.width < 140 && rect.height < 12) {
+      continue
+    }
+
+    if (
+      isLikelyUiNoiseText(normalizedText, text.length) ||
+      CONVERSATION_UI_EXACT_NOISE_LINES.includes(
+        normalizedText as (typeof CONVERSATION_UI_EXACT_NOISE_LINES)[number]
+      )
+    ) {
+      continue
+    }
+
+    const dedupeKey = normalizedText.slice(0, 240)
+    if (!dedupeKey || seen.has(dedupeKey)) {
+      continue
+    }
+
+    seen.add(dedupeKey)
+    records.push({ top: rect.top, text })
+  }
+
+  const intro = normalizeCapturedMessageText(
+    records
+      .sort((left, right) => left.top - right.top)
+      .map((record) => record.text)
+      .slice(0, 36)
+      .join("\n\n")
+  )
+
+  return intro.length >= 18 ? intro : ""
+}
+
+function captureAggregateConversationFallback(): Array<{ role: "user" | "assistant"; content: string }> {
+  const container = resolveConversationContainerFromComposer()
+  if (!container) {
+    return []
+  }
+
+  const pieces = collectReadableConversationBlocks(container)
+  if (pieces.length === 0) {
+    return []
+  }
+
+  const content = normalizeCapturedMessageText(pieces.join("\n\n"))
+  if (content.length < 140) {
+    return []
+  }
+
+  return [{ role: "assistant", content }]
+}
+
+function sanitizeConversationSnapshotText(rawValue: string): string {
+  const lines = String(rawValue ?? "")
+    .replace(/\r/g, "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+
+  const keptLines: string[] = []
+  const seen = new Set<string>()
+
+  for (const line of lines) {
+    const normalizedLine = normalize(line)
+    if (!normalizedLine) {
+      continue
+    }
+
+    if (isLikelyUiNoiseText(normalizedLine, line.length)) {
+      continue
+    }
+
+    if (CONVERSATION_UI_EXACT_NOISE_LINES.includes(normalizedLine as (typeof CONVERSATION_UI_EXACT_NOISE_LINES)[number])) {
+      continue
+    }
+
+    const dedupeKey = normalizedLine.slice(0, 220)
+    if (!dedupeKey || seen.has(dedupeKey)) {
+      continue
+    }
+    seen.add(dedupeKey)
+    keptLines.push(line)
+  }
+
+  return normalizeCapturedMessageText(keptLines.join("\n"))
+}
+
+function captureMainConversationSnapshotFallback(): Array<{ role: "user" | "assistant"; content: string }> {
+  const mainContainer = queryDeepFirstVisible<HTMLElement>([
+    "chat-panel-v2",
+    "chat-panel",
+    "main",
+    "[role='main']"
+  ])
+
+  if (!mainContainer) {
+    return []
+  }
+
+  const rawText = normalizeCapturedMessageText(mainContainer.innerText || mainContainer.textContent || "")
+  if (rawText.length < 180) {
+    return []
+  }
+
+  const sanitized = sanitizeConversationSnapshotText(rawText)
+  if (sanitized.length < 180) {
+    return []
+  }
+
+  return [{ role: "assistant", content: sanitized }]
+}
+
+function isMessageContentRedundant(
+  candidateContent: string,
+  existingMessages: Array<{ role: "user" | "assistant"; content: string }>
+): boolean {
+  const candidateNormalized = normalize(candidateContent)
+  if (!candidateNormalized) {
+    return true
+  }
+
+  const candidateHead = candidateNormalized.slice(0, 260)
+
+  for (const message of existingMessages) {
+    const messageNormalized = normalize(message.content)
+    if (!messageNormalized) {
+      continue
+    }
+
+    if (messageNormalized === candidateNormalized) {
+      return true
+    }
+
+    const messageHead = messageNormalized.slice(0, 260)
+    if (!candidateHead || !messageHead) {
+      continue
+    }
+
+    if (
+      candidateHead === messageHead ||
+      candidateHead.includes(messageHead) ||
+      messageHead.includes(candidateHead)
+    ) {
+      return true
+    }
+  }
+
+  return false
+}
+
+function collectIntroBeforeFirstUserFromSnapshot(
+  pairMessages: Array<{ role: "user" | "assistant"; content: string }>
+): string {
+  const firstUserMessage = pairMessages.find((message) => message.role === "user")?.content ?? ""
+  if (!firstUserMessage) {
+    return ""
+  }
+
+  const container =
+    resolveConversationContainerFromComposer() ??
+    queryDeepFirstVisible<HTMLElement>(["chat-panel-v2", "chat-panel", "main", "[role='main']"])
+
+  if (!container) {
+    return ""
+  }
+
+  const rawText = normalizeCapturedMessageText(container.innerText || container.textContent || "")
+  if (rawText.length < 140) {
+    return ""
+  }
+
+  const normalizedRaw = normalize(rawText)
+  const normalizedNeedle = normalize(firstUserMessage).slice(0, 96)
+  if (!normalizedNeedle || normalizedNeedle.length < 8) {
+    return ""
+  }
+
+  const needleIndex = normalizedRaw.indexOf(normalizedNeedle)
+  if (needleIndex <= 0) {
+    return ""
+  }
+
+  const introSlice = normalizedRaw.slice(0, needleIndex).trim()
+  if (introSlice.length < 18) {
+    return ""
+  }
+
+  const sanitized = sanitizeConversationSnapshotText(introSlice)
+  if (sanitized.length < 18) {
+    return ""
+  }
+
+  return sanitized
+}
+
+function mergeIntroIntoPairedCapture(
+  pairMessages: Array<{ role: "user" | "assistant"; content: string }>,
+  pairCandidates: CapturedVisibleMessageCandidate[]
+): Array<{ role: "user" | "assistant"; content: string }> {
+  if (pairMessages.length === 0 || pairCandidates.length === 0) {
+    return pairMessages
+  }
+
+  const firstPairTop = pairCandidates.reduce(
+    (best, candidate) => Math.min(best, candidate.top),
+    Number.POSITIVE_INFINITY
+  )
+
+  const firstUserTop = pairCandidates
+    .filter((candidate) => candidate.role === "user")
+    .reduce((best, candidate) => Math.min(best, candidate.top), Number.POSITIVE_INFINITY)
+
+  const introAnchorTop = Number.isFinite(firstUserTop) ? firstUserTop : firstPairTop
+
+  if (!Number.isFinite(introAnchorTop)) {
+    return pairMessages
+  }
+
+  const introMessages: Array<{ role: "assistant"; content: string }> = []
+  const introCandidatesByPriority = [
+    collectIntroFromDeepRoots(introAnchorTop),
+    collectIntroFromConversationContainer(introAnchorTop),
+    collectIntroBeforeFirstUserFromSnapshot(pairMessages)
+  ]
+
+  for (const introCandidate of introCandidatesByPriority) {
+    if (!introCandidate) {
+      continue
+    }
+
+    if (isMessageContentRedundant(introCandidate, [...introMessages, ...pairMessages])) {
+      continue
+    }
+
+    introMessages.push({
+      role: "assistant",
+      content: introCandidate
+    })
+    break
+  }
+
+  const introCandidates = collectLooseConversationFallbackCandidates()
+    .filter((candidate) => candidate.role === "assistant" && candidate.top < introAnchorTop - 4)
+    .sort((left, right) => left.top - right.top)
+
+  if (introCandidates.length === 0 && introMessages.length === 0) {
+    return pairMessages
+  }
+
+  for (const candidate of introCandidates) {
+    const content = normalizeCapturedMessageText(candidate.content)
+    if (content.length < 40) {
+      continue
+    }
+
+    const normalizedContent = normalize(content)
+    if (isLikelyUiNoiseText(normalizedContent, content.length)) {
+      continue
+    }
+
+    const alreadyExists = isMessageContentRedundant(content, [...introMessages, ...pairMessages])
+    if (alreadyExists) {
+      continue
+    }
+
+    introMessages.push({ role: "assistant", content })
+    if (introMessages.length >= 2) {
+      break
+    }
+  }
+
+  if (introMessages.length === 0) {
+    return pairMessages
+  }
+
+  return [...introMessages, ...pairMessages]
+}
+
+export function captureVisibleMessages(): Array<{ role: "user" | "assistant"; content: string }> {
+  const pairCandidates = collectConversationPairCandidates()
+  const fromPairs = compactCapturedCandidates(pairCandidates)
+  if (fromPairs.length > 0) {
+    const mergedWithIntro = mergeIntroIntoPairedCapture(fromPairs, pairCandidates)
+    window.__minddockConversationCaptureDebug = {
+      mode: "pairs",
+      count: mergedWithIntro.length,
+      sample: mergedWithIntro.slice(0, 2).map((item) => item.content.slice(0, 120)),
+      at: new Date().toISOString()
+    }
+    return mergedWithIntro
+  }
+
+  const fromTurns = collectConversationTurnCandidates()
+  const fromStandalone = [
+    ...collectRoleCandidates("user", USER_MESSAGE_SELECTORS),
+    ...collectRoleCandidates("assistant", ASSISTANT_MESSAGE_SELECTORS)
+  ]
+
+  const primaryCapture = compactCapturedCandidates([...fromTurns, ...fromStandalone])
+  if (primaryCapture.length > 0) {
+    window.__minddockConversationCaptureDebug = {
+      mode: "primary",
+      count: primaryCapture.length,
+      sample: primaryCapture.slice(0, 2).map((item) => item.content.slice(0, 120)),
+      at: new Date().toISOString()
+    }
+    return primaryCapture
+  }
+
+  const looseCapture = compactCapturedCandidates(collectLooseConversationFallbackCandidates())
+  if (looseCapture.length > 0) {
+    window.__minddockConversationCaptureDebug = {
+      mode: "loose",
+      count: looseCapture.length,
+      sample: looseCapture.slice(0, 2).map((item) => item.content.slice(0, 120)),
+      at: new Date().toISOString()
+    }
+    return looseCapture
+  }
+
+  const aggregateCapture = captureAggregateConversationFallback()
+  if (aggregateCapture.length > 0) {
+    window.__minddockConversationCaptureDebug = {
+      mode: "aggregate",
+      count: aggregateCapture.length,
+      sample: aggregateCapture.slice(0, 2).map((item) => item.content.slice(0, 120)),
+      at: new Date().toISOString()
+    }
+    return aggregateCapture
+  }
+
+  const mainCapture = captureMainConversationSnapshotFallback()
+  if (mainCapture.length > 0) {
+    window.__minddockConversationCaptureDebug = {
+      mode: "main",
+      count: mainCapture.length,
+      sample: mainCapture.slice(0, 2).map((item) => item.content.slice(0, 120)),
+      at: new Date().toISOString()
+    }
+    return mainCapture
+  }
+
+  window.__minddockConversationCaptureDebug = {
+    mode: "empty",
+    count: 0,
+    sample: [],
+    at: new Date().toISOString()
+  }
+
+  return []
+}
 function resolveConversationLabel(): HTMLElement | null {
   const labels = ["Conversa", "Conversation", "Chat"]
 
@@ -1159,41 +2139,770 @@ function isMindDockInjectedElement(element: HTMLElement): boolean {
   )
 }
 
-function isLikelyNativeConversationTrigger(
+function resolveConversationTriggerSnapshot(candidate: HTMLElement): string {
+  return normalize(
+    [
+      candidate.innerText,
+      candidate.textContent,
+      candidate.getAttribute("aria-label"),
+      candidate.getAttribute("title"),
+      candidate.getAttribute("data-testid"),
+      candidate.getAttribute("data-tooltip"),
+      candidate.className,
+      candidate.id
+    ]
+      .map((value) => String(value ?? "").trim())
+      .filter(Boolean)
+      .join(" ")
+  )
+}
+
+function isDisabledConversationAction(candidate: HTMLElement): boolean {
+  if (candidate instanceof HTMLButtonElement && candidate.disabled) {
+    return true
+  }
+
+  const ariaDisabled = normalize(String(candidate.getAttribute("aria-disabled") ?? ""))
+  if (ariaDisabled === "true") {
+    return true
+  }
+
+  const disabledAttr = candidate.getAttribute("disabled")
+  return disabledAttr !== null
+}
+
+function resolveClickableConversationActionTarget(candidate: HTMLElement): HTMLElement | null {
+  if (!candidate || !isVisible(candidate)) {
+    return null
+  }
+
+  const directClickableSelector = "button, [role='menuitem'], [role='button'], a, li, mat-menu-item"
+  if (candidate.matches(directClickableSelector)) {
+    return isDisabledConversationAction(candidate) ? null : candidate
+  }
+
+  const ancestor = candidate.closest<HTMLElement>(directClickableSelector)
+  if (ancestor && isVisible(ancestor) && !isDisabledConversationAction(ancestor)) {
+    return ancestor
+  }
+
+  const descendant = candidate.querySelector<HTMLElement>(directClickableSelector)
+  if (descendant && isVisible(descendant) && !isDisabledConversationAction(descendant)) {
+    return descendant
+  }
+
+  return null
+}
+
+function scoreNativeConversationTrigger(
   candidate: HTMLElement,
   labelRect?: DOMRect
-): boolean {
+): number {
+  if (!isVisible(candidate) || isMindDockInjectedElement(candidate)) {
+    return -1
+  }
+
+  const text = normalize(String(candidate.textContent ?? "").trim())
+  const snapshot = resolveConversationTriggerSnapshot(candidate)
+  const rect = candidate.getBoundingClientRect()
+  if (rect.width < 12 || rect.height < 12) {
+    return -1
+  }
+
+  if (rect.top > Math.max(260, window.innerHeight * 0.42)) {
+    return -1
+  }
+
+  const blockedTokens = [
+    "minddock",
+    "delete",
+    "remove",
+    "trash",
+    "rename",
+    "settings",
+    "config",
+    "share",
+    "export",
+    "help",
+    "profile",
+    "upgrade",
+    "billing",
+    "plan",
+    "menu"
+  ]
+  if (blockedTokens.some((token) => snapshot.includes(token))) {
+    return -1
+  }
+
+  let score = -1
+
+  const strongLabels = [
+    "new conversation",
+    "new chat",
+    "create conversation",
+    "create chat",
+    "nova conversa",
+    "novo chat",
+    "criar conversa",
+    "criar chat",
+    "new thread",
+    "nova thread"
+  ]
+  for (const label of strongLabels) {
+    if (snapshot.includes(label)) {
+      score = Math.max(score, 260 - label.length)
+    }
+  }
+
+  const isCompact = rect.width <= 44 && rect.height <= 44
+  const hasAddToken = /\b(add|plus|novo|nova|new|create|criar)\b/u.test(snapshot)
+  const hasConversationToken = /\b(conversation|conversa|chat|thread)\b/u.test(snapshot)
+
+  if (text === "+" || text === "add" || text === "plus") {
+    score = Math.max(score, 150)
+  }
+
+  if (hasAddToken && hasConversationToken) {
+    score = Math.max(score, 190)
+  }
+
+  if (isCompact && hasAddToken) {
+    score = Math.max(score, 120)
+  }
+
+  if (labelRect) {
+    const nearLabel =
+      rect.left >= labelRect.right - 12 &&
+      rect.left <= labelRect.right + 96 &&
+      Math.abs(rect.top - labelRect.top) <= 30
+
+    if (nearLabel && isCompact) {
+      score = Math.max(score, 170)
+    } else if (nearLabel) {
+      score = Math.max(score, 145)
+    }
+  }
+
+  if (score < 0) {
+    return -1
+  }
+
+  if (candidate.tagName === "BUTTON") {
+    score += 10
+  }
+
+  if (candidate.closest("header, .panel-title-row, [data-testid='conversation-header']")) {
+    score += 8
+  }
+
+  return score
+}
+
+function pickBestConversationTriggerCandidate(
+  candidates: HTMLElement[],
+  labelRect?: DOMRect
+): HTMLElement | null {
+  let bestCandidate: HTMLElement | null = null
+  let bestScore = -1
+
+  for (const candidate of candidates) {
+    const score = scoreNativeConversationTrigger(candidate, labelRect)
+    if (score > bestScore) {
+      bestScore = score
+      bestCandidate = candidate
+    }
+  }
+
+  return bestCandidate
+}
+
+function matchesNewConversationAction(candidate: HTMLElement): boolean {
   if (!isVisible(candidate) || isMindDockInjectedElement(candidate)) {
     return false
   }
 
-  const text = String(candidate.textContent ?? "").trim()
-  const aria = String(candidate.getAttribute("aria-label") ?? candidate.getAttribute("title") ?? "")
-    .trim()
-    .toLowerCase()
+  const snapshot = resolveConversationTriggerSnapshot(candidate)
+  if (!snapshot) {
+    return false
+  }
+
+  const newConversationTokens = [
+    "new conversation",
+    "new chat",
+    "create conversation",
+    "create chat",
+    "nova conversa",
+    "novo chat",
+    "criar conversa",
+    "criar chat",
+    "new thread",
+    "nova thread"
+  ]
+
+  return newConversationTokens.some((token) => snapshot.includes(token))
+}
+
+function isLikelyHeaderOverflowMenuButton(candidate: HTMLElement, labelRect?: DOMRect): boolean {
+  if (!isVisible(candidate) || isMindDockInjectedElement(candidate)) {
+    return false
+  }
+
   const rect = candidate.getBoundingClientRect()
+  if (rect.top > Math.max(220, window.innerHeight * 0.35)) {
+    return false
+  }
+
+  const snapshot = resolveConversationTriggerSnapshot(candidate)
+  const hasMenuToken =
+    snapshot.includes("more") ||
+    snapshot.includes("mais") ||
+    snapshot.includes("menu") ||
+    snapshot.includes("options") ||
+    snapshot.includes("opcoes")
+  const hasPopupMenu = normalize(String(candidate.getAttribute("aria-haspopup") ?? "")) === "menu"
+  const rawLabel = String(candidate.innerText || candidate.textContent || "").trim()
+  const isDotsGlyph =
+    rawLabel === "..." ||
+    rawLabel === "…" ||
+    rawLabel === "⋮" ||
+    rawLabel === "︙" ||
+    rawLabel === "⋯"
+  const isCompact = rect.width <= 48 && rect.height <= 48
+
+  if (!hasMenuToken && !hasPopupMenu) {
+    const permissiveIconMatch = isDotsGlyph || (snapshot.length <= 3 && isCompact)
+    if (!permissiveIconMatch) {
+      return false
+    }
+  }
+
+  if (!labelRect) {
+    return true
+  }
+
+  const isOnSameHeaderRow = Math.abs(rect.top - labelRect.top) <= 40
+  const isToTheRightOfConversationLabel = rect.left >= labelRect.right - 10
+  if (!isOnSameHeaderRow || !isToTheRightOfConversationLabel) {
+    return false
+  }
+
+  if (hasMenuToken || hasPopupMenu) {
+    return true
+  }
+
+  return rect.left >= window.innerWidth * 0.45
+}
+
+function tryTriggerFromOverflowMenu(labelRect?: DOMRect): boolean {
+  const menuButtons = queryDeepAll<HTMLElement>([
+    "button",
+    "[role='button']",
+    "[aria-haspopup='menu']",
+    "[data-testid*='menu']",
+    "[aria-label*='more' i]",
+    "[aria-label*='mais' i]"
+  ]).filter((candidate) => isLikelyHeaderOverflowMenuButton(candidate, labelRect))
+
+  const menuButton = menuButtons[0]
+  if (!menuButton) {
+    return false
+  }
+
+  clickElement(menuButton)
+
+  const menuScopes = queryDeepAll<HTMLElement>([
+    "[role='menu']",
+    "[role='listbox']",
+    "[aria-modal='true']",
+    "[data-testid*='menu']",
+    "mat-menu-panel"
+  ]).filter((scope) => isVisible(scope))
+
+  for (const scope of menuScopes) {
+    const candidates = Array.from(
+      scope.querySelectorAll<HTMLElement>("button, [role='menuitem'], [role='button'], li, a, span, div")
+    ).filter((candidate) => matchesNewConversationAction(candidate))
+
+    if (candidates[0]) {
+      return clickElement(candidates[0])
+    }
+  }
+
+  const globalCandidates = queryDeepAll<HTMLElement>([
+    "button",
+    "[role='menuitem']",
+    "[role='button']",
+    "li",
+    "a",
+    "span",
+    "div"
+  ]).filter((candidate) => matchesNewConversationAction(candidate))
+
+  if (globalCandidates[0]) {
+    return clickElement(globalCandidates[0])
+  }
+
+  return false
+}
+
+const CONVERSATION_ACTION_SELECTORS = [
+  "button",
+  "[role='menuitem']",
+  "[role='button']",
+  "a",
+  "li",
+  "span",
+  "div"
+] as const
+
+const CONVERSATION_MENU_SCOPE_SELECTORS = [
+  "[role='menu']",
+  "[role='listbox']",
+  "[aria-modal='true']",
+  "[data-testid*='menu']",
+  "mat-menu-panel",
+  ".cdk-overlay-pane",
+  ".cdk-overlay-container"
+] as const
+
+function collectConversationActionCandidates(root?: ParentNode): HTMLElement[] {
+  const candidates = root
+    ? queryDeepAll<HTMLElement>(CONVERSATION_ACTION_SELECTORS, root)
+    : queryDeepAll<HTMLElement>(CONVERSATION_ACTION_SELECTORS)
+
+  return candidates.filter((candidate) => isVisible(candidate) && !isMindDockInjectedElement(candidate))
+}
+
+function isDeleteLikeSnapshot(snapshot: string): boolean {
+  return /(^|[\s:;,.()[\]{}"'`-])(delete|clear|remove|erase|excluir|apagar|limpar)\b/u.test(snapshot)
+}
+
+function isConversationLikeSnapshot(snapshot: string): boolean {
+  return /\b(conversation|conversa|chat|thread|history|historico)\b/u.test(snapshot)
+}
+
+function hasDangerousDeleteTarget(snapshot: string): boolean {
+  return /\b(notebook|caderno|workspace|source|fonte|arquivo|file|conta|account|profile|perfil|dock|minddock)\b/u.test(
+    snapshot
+  )
+}
+
+function matchesDeleteConversationHistoryAction(candidate: HTMLElement): boolean {
+  if (!isVisible(candidate) || isMindDockInjectedElement(candidate)) {
+    return false
+  }
+
+  const snapshot = resolveConversationTriggerSnapshot(candidate)
+  if (!snapshot) {
+    return false
+  }
+
+  const strongLabels = [
+    "delete conversation history",
+    "clear conversation history",
+    "delete chat history",
+    "clear chat history",
+    "excluir historico de conversa",
+    "excluir historico de conversas",
+    "apagar historico de conversa",
+    "limpar historico de conversa",
+    "limpar historico de conversas",
+    "historico de conversa"
+  ]
+
+  if (strongLabels.some((label) => snapshot.includes(label))) {
+    return true
+  }
+
+  if (!isDeleteLikeSnapshot(snapshot) || !isConversationLikeSnapshot(snapshot)) {
+    return false
+  }
+
+  if (hasDangerousDeleteTarget(snapshot)) {
+    return false
+  }
+
+  return true
+}
+
+function scoreDeleteConversationHistoryCandidate(candidate: HTMLElement, labelRect?: DOMRect): number {
+  const target = resolveClickableConversationActionTarget(candidate)
+  if (!target) {
+    return -1
+  }
+
+  if (!matchesDeleteConversationHistoryAction(candidate) && !matchesDeleteConversationHistoryAction(target)) {
+    return -1
+  }
+
+  const snapshot = resolveConversationTriggerSnapshot(target) || resolveConversationTriggerSnapshot(candidate)
+
+  const rect = target.getBoundingClientRect()
+  let score = 0
+
+  if (snapshot.includes("delete conversation history") || snapshot.includes("excluir historico de conversa")) {
+    score += 360
+  } else if (snapshot.includes("clear conversation history") || snapshot.includes("limpar historico de conversa")) {
+    score += 340
+  } else if (snapshot.includes("history") || snapshot.includes("historico")) {
+    score += 180
+  } else {
+    score += 120
+  }
+
+  if (target.closest("[role='menu'], [role='listbox'], [data-testid*='menu'], mat-menu-panel")) {
+    score += 80
+  }
+
+  if (labelRect) {
+    score += Math.max(0, 120 - Math.abs(rect.top - labelRect.top) * 2)
+    score += Math.max(0, 120 - Math.abs(rect.left - labelRect.right) * 0.6)
+  }
+
+  if (target.tagName === "BUTTON" || target.getAttribute("role") === "menuitem") {
+    score += 14
+  }
+
+  return score
+}
+
+function pickDeleteConversationHistoryCandidate(
+  candidates: HTMLElement[],
+  labelRect?: DOMRect
+): HTMLElement | null {
+  let best: HTMLElement | null = null
+  let bestScore = -1
+
+  for (const candidate of candidates) {
+    const score = scoreDeleteConversationHistoryCandidate(candidate, labelRect)
+    if (score > bestScore) {
+      best = candidate
+      bestScore = score
+    }
+  }
+
+  return best
+}
+
+function findDeleteConversationHistoryActionInOpenMenus(labelRect?: DOMRect): HTMLElement | null {
+  const scopedCandidates: HTMLElement[] = []
+  for (const scope of queryDeepAll<HTMLElement>(CONVERSATION_MENU_SCOPE_SELECTORS)) {
+    if (!isVisible(scope)) {
+      continue
+    }
+    scopedCandidates.push(...collectConversationActionCandidates(scope))
+  }
+
+  return pickDeleteConversationHistoryCandidate(scopedCandidates, labelRect)
+}
+
+function resolveConversationOverflowMenuButton(labelRect?: DOMRect): HTMLElement | null {
+  const candidates = queryDeepAll<HTMLElement>([
+    "button",
+    "[role='button']",
+    "[aria-haspopup='menu']",
+    "[data-testid*='menu']",
+    "[aria-label*='more' i]",
+    "[aria-label*='mais' i]",
+    "[title*='more' i]",
+    "[title*='mais' i]"
+  ]).filter((candidate) => isLikelyHeaderOverflowMenuButton(candidate, labelRect))
+
+  if (candidates.length === 0) {
+    return null
+  }
+
+  const sorted = [...candidates].sort((left, right) => {
+    const leftRect = left.getBoundingClientRect()
+    const rightRect = right.getBoundingClientRect()
+
+    if (!labelRect) {
+      return leftRect.top - rightRect.top
+    }
+
+    const leftDistance =
+      Math.abs(leftRect.top - labelRect.top) + Math.abs(leftRect.left - labelRect.right)
+    const rightDistance =
+      Math.abs(rightRect.top - labelRect.top) + Math.abs(rightRect.left - labelRect.right)
+
+    return leftDistance - rightDistance
+  })
+
+  return sorted[0] ?? null
+}
+
+function resolveStudioLabel(): HTMLElement | null {
+  const labels = ["Studio", "Estudio", "Estúdio"]
+
+  for (const root of getDeepRoots()) {
+    const candidates = Array.from(
+      "querySelectorAll" in root
+        ? (root as Document | ShadowRoot).querySelectorAll<HTMLElement>("span, div, h2, h3, button, a")
+        : []
+    )
+
+    for (const candidate of candidates) {
+      if (!isVisible(candidate) || isMindDockInjectedElement(candidate)) {
+        continue
+      }
+
+      const text = String(candidate.innerText || candidate.textContent || "").trim()
+      if (!labels.some((label) => text === label)) {
+        continue
+      }
+
+      const rect = candidate.getBoundingClientRect()
+      if (rect.top > 260 || rect.left < window.innerWidth * 0.45) {
+        continue
+      }
+
+      return candidate
+    }
+  }
+
+  return null
+}
+
+function resolveStudioOverflowMenuButton(): HTMLElement | null {
+  const studioLabel = resolveStudioLabel()
+  const studioRect = studioLabel?.getBoundingClientRect()
+  if (!studioRect) {
+    return null
+  }
+
+  const candidates = queryDeepAll<HTMLElement>([
+    "button",
+    "[role='button']",
+    "[aria-haspopup='menu']",
+    "[data-testid*='menu']",
+    "[aria-label*='more' i]",
+    "[aria-label*='mais' i]",
+    "[title*='more' i]",
+    "[title*='mais' i]"
+  ]).filter((candidate) => {
+    if (!isVisible(candidate) || isMindDockInjectedElement(candidate)) {
+      return false
+    }
+
+    const rect = candidate.getBoundingClientRect()
+    const snapshot = resolveConversationTriggerSnapshot(candidate)
+    const rawLabel = String(candidate.innerText || candidate.textContent || "").trim()
+    const isDotsGlyph =
+      rawLabel === "..." ||
+      rawLabel === "…" ||
+      rawLabel === "⋮" ||
+      rawLabel === "︙" ||
+      rawLabel === "⋯"
+    const hasMenuToken =
+      snapshot.includes("more") ||
+      snapshot.includes("mais") ||
+      snapshot.includes("menu") ||
+      snapshot.includes("options") ||
+      snapshot.includes("opcoes")
+    const hasPopupMenu = normalize(String(candidate.getAttribute("aria-haspopup") ?? "")) === "menu"
+    const nearStudioRow = Math.abs(rect.top - studioRect.top) <= 44
+    const nearStudioColumn = rect.right >= studioRect.left - 90 && rect.left <= studioRect.left + 20
+    const compact = rect.width <= 54 && rect.height <= 54
+
+    if (!nearStudioRow || !nearStudioColumn || !compact) {
+      return false
+    }
+
+    return hasMenuToken || hasPopupMenu || isDotsGlyph || snapshot.length <= 3
+  })
+
+  if (candidates.length === 0) {
+    return null
+  }
+
+  const sorted = [...candidates].sort((left, right) => {
+    const leftRect = left.getBoundingClientRect()
+    const rightRect = right.getBoundingClientRect()
+    const leftDistance =
+      Math.abs(leftRect.top - studioRect.top) + Math.abs(leftRect.left - (studioRect.left - 28))
+    const rightDistance =
+      Math.abs(rightRect.top - studioRect.top) + Math.abs(rightRect.left - (studioRect.left - 28))
+    return leftDistance - rightDistance
+  })
+
+  return sorted[0] ?? null
+}
+
+function findDeleteConversationHistoryAction(labelRect?: DOMRect): HTMLElement | null {
+  const scopedCandidates: HTMLElement[] = []
+  for (const scope of queryDeepAll<HTMLElement>(CONVERSATION_MENU_SCOPE_SELECTORS)) {
+    if (!isVisible(scope)) {
+      continue
+    }
+    scopedCandidates.push(...collectConversationActionCandidates(scope))
+  }
+
+  const scopedPick = pickDeleteConversationHistoryCandidate(scopedCandidates, labelRect)
+  if (scopedPick) {
+    return scopedPick
+  }
+
+  return pickDeleteConversationHistoryCandidate(collectConversationActionCandidates(), labelRect)
+}
+
+function matchesDeleteConversationHistoryConfirm(candidate: HTMLElement): boolean {
+  if (!isVisible(candidate) || isMindDockInjectedElement(candidate)) {
+    return false
+  }
+
+  const snapshot = resolveConversationTriggerSnapshot(candidate)
+  if (!snapshot) {
+    return false
+  }
+
+  if (/\b(cancel|cancelar|close|fechar|back|voltar|no)\b/u.test(snapshot)) {
+    return false
+  }
 
   if (
-    text === "+" ||
-    aria.includes("new conversation") ||
-    aria.includes("new chat") ||
-    aria.includes("nova conversa") ||
-    aria.includes("novo chat")
+    snapshot.includes("delete conversation history") ||
+    snapshot.includes("clear conversation history") ||
+    snapshot.includes("excluir historico de conversa") ||
+    snapshot.includes("excluir historico de conversas") ||
+    snapshot.includes("limpar historico de conversa")
   ) {
     return true
   }
 
-  if (!labelRect) {
-    return false
+  return isDeleteLikeSnapshot(snapshot) && !hasDangerousDeleteTarget(snapshot)
+}
+
+function pickDeleteConversationHistoryConfirmCandidate(candidates: HTMLElement[]): HTMLElement | null {
+  let best: HTMLElement | null = null
+  let bestScore = -1
+
+  for (const candidate of candidates) {
+    if (!matchesDeleteConversationHistoryConfirm(candidate)) {
+      continue
+    }
+
+    const snapshot = resolveConversationTriggerSnapshot(candidate)
+    let score = 80
+
+    if (snapshot === "delete" || snapshot === "excluir" || snapshot === "apagar") {
+      score += 200
+    }
+    if (snapshot.includes("delete conversation history") || snapshot.includes("excluir historico de conversa")) {
+      score += 260
+    }
+    if (candidate.closest("[role='dialog'], dialog, [aria-modal='true']")) {
+      score += 90
+    }
+    if (candidate.tagName === "BUTTON") {
+      score += 18
+    }
+
+    if (score > bestScore) {
+      bestScore = score
+      best = candidate
+    }
   }
 
-  const isCompact = rect.width <= 32 && rect.height <= 32
-  const isRightNextToLabel =
-    rect.left >= labelRect.right - 6 &&
-    rect.left <= labelRect.right + 44 &&
-    Math.abs(rect.top - labelRect.top) <= 16
+  return best
+}
 
-  return isCompact && isRightNextToLabel
+async function waitForConversationResetAfterDelete(
+  beforeMessages: Array<{ role: "user" | "assistant"; content: string }>,
+  timeoutMs = 7000
+): Promise<boolean> {
+  const beforeMessageCount = beforeMessages.length
+  const beforeHasUserMessages = beforeMessages.some((message) => message.role === "user")
+  const anchorSnippets = Array.from(
+    new Set(
+      beforeMessages
+        .map((message) => normalize(message.content).slice(0, 120))
+        .filter((snippet) => snippet.length >= 18)
+        .slice(0, 8)
+    )
+  )
+  const timeoutAt = Date.now() + timeoutMs
+
+  while (Date.now() < timeoutAt) {
+    const currentCapture = captureVisibleMessages()
+    const currentCount = currentCapture.length
+    const currentHasUserMessages = currentCapture.some((message) => message.role === "user")
+    const currentSnapshot = normalize(currentCapture.map((message) => message.content).join("\n\n"))
+    const currentMainSnapshot = normalize(
+      captureMainConversationSnapshotFallback()
+        .map((item) => item.content)
+        .join("\n\n")
+    )
+    const stillHasAnyAnchor =
+      anchorSnippets.length > 0 &&
+      anchorSnippets.some(
+        (anchor) => currentSnapshot.includes(anchor) || (currentMainSnapshot.length > 0 && currentMainSnapshot.includes(anchor))
+      )
+
+    if (currentCount === 0) {
+      return true
+    }
+
+    if (beforeHasUserMessages && !currentHasUserMessages && !stillHasAnyAnchor) {
+      return true
+    }
+
+    if (!beforeHasUserMessages && beforeMessageCount >= 2 && currentCount <= 1 && !stillHasAnyAnchor) {
+      return true
+    }
+
+    await wait(120)
+  }
+
+  return false
+}
+
+export async function triggerNotebookDeleteConversationHistory(): Promise<boolean> {
+  const label = resolveConversationLabel()
+  const labelRect = label?.getBoundingClientRect()
+  const beforeMessages = captureVisibleMessages()
+
+  for (let attempt = 0; attempt < 1; attempt += 1) {
+    let triggeredDeleteAction = false
+    const menuButton = resolveStudioOverflowMenuButton() ?? resolveConversationOverflowMenuButton(labelRect)
+    if (menuButton) {
+      clickElement(menuButton)
+
+      const timeoutAt = Date.now() + 1200
+      while (Date.now() < timeoutAt) {
+        const menuAction = findDeleteConversationHistoryActionInOpenMenus(labelRect)
+        if (menuAction) {
+          const menuActionTarget = resolveClickableConversationActionTarget(menuAction) ?? menuAction
+          clickElement(menuActionTarget)
+          triggeredDeleteAction = true
+          const resetDetected = await waitForConversationResetAfterDelete(beforeMessages, 15000)
+          if (resetDetected) {
+            return true
+          }
+          break
+        }
+
+        await wait(80)
+      }
+    }
+
+    if (triggeredDeleteAction) {
+      return false
+    }
+
+    const directAction = findDeleteConversationHistoryAction(labelRect)
+    if (directAction) {
+      const directTarget = resolveClickableConversationActionTarget(directAction) ?? directAction
+      clickElement(directTarget)
+      const resetDetected = await waitForConversationResetAfterDelete(beforeMessages, 15000)
+      if (resetDetected) {
+        return true
+      }
+    }
+
+    await wait(120)
+  }
+
+  return false
 }
 
 export function triggerNotebookNewConversation(): boolean {
@@ -1202,52 +2911,75 @@ export function triggerNotebookNewConversation(): boolean {
   const headerHost = resolveConversationHeaderHost()
 
   if (headerHost) {
-    const directCandidates = Array.from(
-      headerHost.querySelectorAll<HTMLElement>("button, [role='button'], a, span, div")
+    const bestDirectCandidate = pickBestConversationTriggerCandidate(
+      Array.from(headerHost.querySelectorAll<HTMLElement>("button, [role='button'], a, span, div")),
+      labelRect
     )
 
-    for (const candidate of directCandidates) {
-      if (isLikelyNativeConversationTrigger(candidate, labelRect)) {
-        return clickElement(candidate)
-      }
+    if (bestDirectCandidate) {
+      return clickElement(bestDirectCandidate)
     }
   }
 
-  if (!label) {
-    return false
-  }
+  if (label) {
+    const row = label.parentElement ?? label
+    const siblingCandidates = Array.from(
+      row.querySelectorAll<HTMLElement>("button, [role='button'], a, span, div")
+    ).filter((candidate) => candidate !== label)
 
-  const row = label.parentElement ?? label
-  const siblingCandidates = Array.from(
-    row.querySelectorAll<HTMLElement>("button, [role='button'], a, span")
-  )
-
-  for (const candidate of siblingCandidates) {
-    if (candidate === label) continue
-
-    if (isLikelyNativeConversationTrigger(candidate, labelRect)) {
-      return clickElement(candidate)
+    const bestSiblingCandidate = pickBestConversationTriggerCandidate(siblingCandidates, labelRect)
+    if (bestSiblingCandidate) {
+      return clickElement(bestSiblingCandidate)
     }
-  }
 
-  const rowRect = row.getBoundingClientRect()
-  const nearbyInteractive = queryDeepAll<HTMLElement>(["button", "[role='button']", "a", "span", "div"]).filter(
-    (candidate) => {
-      if (!isLikelyNativeConversationTrigger(candidate, labelRect)) return false
+    const rowRect = row.getBoundingClientRect()
+    const nearbyInteractive = queryDeepAll<HTMLElement>([
+      "button",
+      "[role='button']",
+      "a",
+      "span[role='button']",
+      "div[role='button']"
+    ]).filter((candidate) => {
       const rect = candidate.getBoundingClientRect()
-      if (Math.abs(rect.top - rowRect.top) > 28) return false
-      if (rect.left < rowRect.right - 8 || rect.left > rowRect.right + 80) return false
+      if (Math.abs(rect.top - rowRect.top) > 36) return false
+      if (rect.left < rowRect.right - 16 || rect.left > rowRect.right + 128) return false
       return true
-    }
-  )
+    })
 
-  if (nearbyInteractive[0]) {
-    return clickElement(nearbyInteractive[0])
+    const bestNearbyCandidate = pickBestConversationTriggerCandidate(nearbyInteractive, labelRect)
+    if (bestNearbyCandidate) {
+      return clickElement(bestNearbyCandidate)
+    }
+  }
+
+  const globalCandidates = queryDeepAll<HTMLElement>([
+    "button",
+    "[role='button']",
+    "a[role='button']",
+    "span[role='button']",
+    "div[role='button']",
+    "[aria-label*='new' i]",
+    "[aria-label*='nova' i]",
+    "[aria-label*='novo' i]",
+    "[title*='new' i]",
+    "[title*='nova' i]",
+    "[title*='novo' i]",
+    "[data-testid*='new' i]",
+    "[data-testid*='conversation' i]",
+    "[data-testid*='chat' i]"
+  ]).filter((candidate) => candidate.getBoundingClientRect().top <= Math.max(260, window.innerHeight * 0.45))
+
+  const bestGlobalCandidate = pickBestConversationTriggerCandidate(globalCandidates, labelRect)
+  if (bestGlobalCandidate) {
+    return clickElement(bestGlobalCandidate)
+  }
+
+  if (tryTriggerFromOverflowMenu(labelRect)) {
+    return true
   }
 
   return false
 }
-
 const NOTEBOOK_CREATE_ACTION_SELECTORS = [
   "button",
   "[role='button']",

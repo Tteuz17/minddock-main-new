@@ -36,10 +36,10 @@ export function TimelineContent({
     },
   }
 
-  const variants = customVariants
-    ? typeof customVariants === "function" || "hidden" in customVariants
+  const variants: Variants = customVariants
+    ? "hidden" in customVariants
       ? (customVariants as Variants)
-      : { hidden: { opacity: 0, y: -20, filter: "blur(10px)" }, visible: customVariants(animationNum ?? 0) }
+      : ((customVariants as Record<number, Variants>)[animationNum] ?? defaultVariants)
     : defaultVariants
 
   return (

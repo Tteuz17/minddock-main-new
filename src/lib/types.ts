@@ -299,6 +299,8 @@ export interface Thread {
   userId: string
   notebookId: string
   name: string
+  topic?: string
+  icon?: string
   createdAt: string
   updatedAt: string
 }

@@ -3,6 +3,7 @@ import {
   normalizeAuthUser,
   resolveAuthUserFromUrl
 } from "~/lib/notebook-account-scope"
+import { getFromSecureStorage } from "~/lib/utils"
 
 const NOTEBOOKLM_BASE_URL = "https://notebooklm.google.com"
 const NOTEBOOKLM_BOOTSTRAP_URL = "https://notebooklm.google.com/?pageId=none"
@@ -455,13 +456,14 @@ export class NotebookLMService {
     }
 
     try {
+      const secureSession = await getFromSecureStorage<Record<string, unknown>>(TOKEN_STORAGE_KEY)
       const snapshot = await chrome.storage.local.get([FIXED_AUTH_USER_KEY, TOKEN_STORAGE_KEY])
       const fixedAuthUser = normalizeAuthUser(snapshot[FIXED_AUTH_USER_KEY])
       if (fixedAuthUser) {
         return fixedAuthUser
       }
 
-      const session = snapshot[TOKEN_STORAGE_KEY]
+      const session = secureSession ?? snapshot[TOKEN_STORAGE_KEY]
       if (session && typeof session === "object") {
         return normalizeAuthUser((session as { authUser?: unknown }).authUser)
       }
@@ -478,13 +480,14 @@ export class NotebookLMService {
     }
 
     try {
+      const secureSession = await getFromSecureStorage<Record<string, unknown>>(TOKEN_STORAGE_KEY)
       const snapshot = await chrome.storage.local.get([FIXED_ACCOUNT_EMAIL_KEY, TOKEN_STORAGE_KEY])
       const fixedAccountEmail = normalizeAccountEmail(snapshot[FIXED_ACCOUNT_EMAIL_KEY])
       if (fixedAccountEmail) {
         return fixedAccountEmail
       }
 
-      const session = snapshot[TOKEN_STORAGE_KEY]
+      const session = secureSession ?? snapshot[TOKEN_STORAGE_KEY]
       if (session && typeof session === "object") {
         return normalizeAccountEmail((session as { accountEmail?: unknown }).accountEmail)
       }
@@ -750,6 +753,12 @@ export class NotebookLMService {
     }
 
     try {
+      const [secureSessionValue, secureFixedAt, secureFixedBl] = await Promise.all([
+        getFromSecureStorage<Record<string, unknown>>(TOKEN_STORAGE_KEY),
+        getFromSecureStorage<string>(FIXED_AT_TOKEN_KEY),
+        getFromSecureStorage<string>(FIXED_BL_TOKEN_KEY)
+      ])
+
       const snapshot = await chrome.storage.local.get([
         TOKEN_STORAGE_KEY,
         FIXED_AT_TOKEN_KEY,
@@ -758,7 +767,7 @@ export class NotebookLMService {
         FIXED_ACCOUNT_EMAIL_KEY
       ])
 
-      const sessionValue = snapshot[TOKEN_STORAGE_KEY]
+      const sessionValue = secureSessionValue ?? snapshot[TOKEN_STORAGE_KEY]
       const sessionTokens =
         sessionValue && typeof sessionValue === "object"
           ? (sessionValue as {
@@ -787,8 +796,8 @@ export class NotebookLMService {
         }
       }
 
-      const fixedAt = this.decodeToken(String(snapshot[FIXED_AT_TOKEN_KEY] ?? ""))
-      const fixedBl = this.decodeToken(String(snapshot[FIXED_BL_TOKEN_KEY] ?? ""))
+      const fixedAt = this.decodeToken(String(secureFixedAt ?? snapshot[FIXED_AT_TOKEN_KEY] ?? ""))
+      const fixedBl = this.decodeToken(String(secureFixedBl ?? snapshot[FIXED_BL_TOKEN_KEY] ?? ""))
       if (!fixedAt || !fixedBl) {
         return null
       }

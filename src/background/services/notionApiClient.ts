@@ -15,7 +15,6 @@ interface NotionCreatePageResponse {
 export interface NotionApiBlock {
   object: "block"
   type: string
-  [key: string]: unknown
 }
 
 function buildNotionHeaders(token: string): HeadersInit {

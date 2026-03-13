@@ -1,3 +1,5 @@
+import { getFromSecureStorage, setInSecureStorage } from "~/lib/utils"
+
 export interface NotebookTokens {
   at: string
   bl: string
@@ -28,8 +30,9 @@ function normalizeTimestamp(value: unknown): number {
 
 export class TokenStorage {
   async saveTokens(tokens: Partial<NotebookTokens>): Promise<void> {
-    const snapshot = await chrome.storage.local.get(STORAGE_KEY)
-    const existingTokens = await this.normalizeStoredTokens(snapshot[STORAGE_KEY])
+    const existingTokens = await this.normalizeStoredTokens(
+      await getFromSecureStorage<NotebookTokens>(STORAGE_KEY)
+    )
 
     const nextAt = normalizeString(tokens.at) || existingTokens?.at || ""
     const nextBl = normalizeString(tokens.bl) || existingTokens?.bl || ""
@@ -42,20 +45,17 @@ export class TokenStorage {
       return
     }
 
-    await chrome.storage.local.set({
-      [STORAGE_KEY]: {
-        at: nextAt,
-        bl: nextBl,
-        accountEmail: nextAccountEmail,
-        authUser: nextAuthUser,
-        timestamp: Date.now()
-      }
+    await setInSecureStorage(STORAGE_KEY, {
+      at: nextAt,
+      bl: nextBl,
+      accountEmail: nextAccountEmail,
+      authUser: nextAuthUser,
+      timestamp: Date.now()
     })
   }
 
   async getTokens(): Promise<NotebookTokens | null> {
-    const snapshot = await chrome.storage.local.get(STORAGE_KEY)
-    return this.normalizeStoredTokens(snapshot[STORAGE_KEY])
+    return this.normalizeStoredTokens(await getFromSecureStorage<NotebookTokens>(STORAGE_KEY))
   }
 
   async hasValidTokens(): Promise<boolean> {

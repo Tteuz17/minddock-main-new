@@ -12,73 +12,59 @@ import { useRef, useState } from "react";
 const plans = [
   {
     name: "Free",
-    description: "For those who want to try the power of MindDock with NotebookLM.",
+    description: "Free forever with daily limits and local-first storage.",
     price: 0,
     yearlyPrice: 0,
     buttonText: "Get started free",
     buttonVariant: "outline" as const,
     includes: [
       "Included in Free:",
-      "3 Agile Prompts",
-      "MD and TXT export",
-      "Basic AI Capture",
-      "1 Focus Dock",
-      "Community support",
+      "Unlimited exports & imports (7/day each, forever)",
+      "Strict Local Storage (No Cloud Sync)",
+      "5 Daily social imports",
+      "5 Source View saves",
+      "Smart Search (Sources & Notebooks)",
+      "Highlight & Snipe (Pen mode with 3 daily saves)",
     ],
   },
   {
     name: "Pro",
-    description: "The best value for serious researchers and students.",
-    price: 2.99,
+    description: "Everything in Free, but with unlimited usage.",
+    price: 4.99,
     yearlyPrice: 24.99,
     buttonText: "Subscribe to Pro",
     buttonVariant: "default" as const,
     popular: true,
     includes: [
-      "Everything in Free, plus:",
-      "All 8 Agile Prompts",
-      "AI Capture (5+ AIs)",
-      "Smart Export (all formats)",
-      "Unlimited Focus Docks",
-      "Priority support",
+      "Everything in Free, but unlimited:",
+      "Unlimited exports & imports (no daily limits)",
+      "Strict Local Storage (No Cloud Sync)",
+      "Unlimited social imports",
+      "Unlimited Source View saves",
+      "Smart Search (Sources & Notebooks)",
+      "Highlight & Snipe (Pen mode with unlimited saves)",
     ],
   },
   {
     name: "Thinker",
-    description: "For researchers who need the full knowledge system.",
+    description: "Everything in Pro, plus Agile Prompts and a Prompt Library.",
     price: 7.99,
     yearlyPrice: 64.99,
     buttonText: "Subscribe to Thinker",
     buttonVariant: "outline" as const,
     includes: [
       "Everything in Pro, plus:",
-      "Full Zettelkasten",
-      "Interactive idea graph",
+      "Agile Prompts",
+      "Prompt Library (ready-to-use prompts)",
       "Wikilinks between notes",
       "Session history",
       "Advanced export",
     ],
   },
-  {
-    name: "Thinker Pro",
-    description: "For those who take knowledge seriously and need everything.",
-    price: 14.99,
-    yearlyPrice: 119.99,
-    buttonText: "Subscribe to Thinker Pro",
-    buttonVariant: "outline" as const,
-    includes: [
-      "Everything in Thinker, plus:",
-      "Custom AI prompts",
-      "Early access to features",
-      "Dedicated support",
-      "Multi-workspace",
-      "API access",
-    ],
-  },
 ];
 
 const PricingSwitch = ({ onSwitch }: { onSwitch: (value: string) => void }) => {
-  const [selected, setSelected] = useState("0");
+  const [selected, setSelected] = useState("1");
 
   const handleSwitch = (value: string) => {
     setSelected(value);
@@ -127,7 +113,7 @@ const PricingSwitch = ({ onSwitch }: { onSwitch: (value: string) => void }) => {
 };
 
 export default function PricingSection() {
-  const [isYearly, setIsYearly] = useState(false);
+  const [isYearly, setIsYearly] = useState(true);
   const pricingRef = useRef<HTMLDivElement>(null);
 
   const revealVariants = {
@@ -230,7 +216,7 @@ export default function PricingSection() {
       />
 
       {/* Cards */}
-      <div className="grid sm:grid-cols-2 lg:grid-cols-4 max-w-6xl gap-4 py-6 mx-auto px-4">
+      <div className="grid sm:grid-cols-2 lg:grid-cols-3 max-w-6xl gap-4 py-6 mx-auto px-4">
         {plans.map((plan, index) => (
           <TimelineContent
             key={plan.name}
@@ -246,6 +232,40 @@ export default function PricingSection() {
                   : "bg-gradient-to-r from-neutral-900 via-neutral-800 to-neutral-900 z-10"
               }`}
             >
+              {(() => {
+                const isThinkerPlan = plan.name === "Thinker";
+                const planDescription = isThinkerPlan
+                  ? isYearly
+                    ? "Everything in Pro, plus Focus Docks, Smart Video Import, Agile Prompts, and a Prompt Library."
+                    : "Everything in Pro, plus Agile Prompts and a Prompt Library."
+                  : plan.description;
+                const monthlyEquivalent = Number((plan.yearlyPrice / 12).toFixed(2));
+                const displayPrice = isYearly ? monthlyEquivalent : plan.price;
+
+                const planIncludes = isThinkerPlan
+                  ? isYearly
+                    ? [
+                        "Everything in Pro, plus:",
+                        "Focus Docks",
+                        "Smart Video Import",
+                        "Agile Prompts",
+                        "Prompt Library (ready-to-use prompts)",
+                        "Wikilinks between notes",
+                        "Session history",
+                        "Advanced export",
+                      ]
+                    : [
+                        "Everything in Pro, plus:",
+                        "Agile Prompts",
+                        "Prompt Library (ready-to-use prompts)",
+                        "Wikilinks between notes",
+                        "Session history",
+                        "Advanced export",
+                      ]
+                  : plan.includes;
+
+                return (
+                  <>
               <CardHeader className="text-left">
                 <div className="flex justify-between items-start">
                   <h3 className="text-2xl mb-2">{plan.name}</h3>
@@ -259,20 +279,23 @@ export default function PricingSection() {
                   <span className="text-3xl font-semibold">
                     $
                     <NumberFlow
-                      value={isYearly ? plan.yearlyPrice : plan.price}
+                      value={displayPrice}
                       className="text-3xl font-semibold"
                     />
                   </span>
-                  <span className="text-gray-300 ml-1 text-sm">
-                    /{isYearly ? "year" : "month"}
-                  </span>
+                  <span className="text-gray-300 ml-1 text-sm">/month</span>
                 </div>
                 {isYearly && plan.price > 0 && (
-                  <p className="text-[11px] text-yellow-400/80">
-                    Save ${((plan.price * 12) - plan.yearlyPrice).toFixed(2)}/year
-                  </p>
+                  <>
+                    <p className="text-[11px] text-yellow-400/80">
+                      Save ${((plan.price * 12) - plan.yearlyPrice).toFixed(2)}/year
+                    </p>
+                    <p className="text-[11px] text-gray-400/90">
+                      Billed annually at ${plan.yearlyPrice.toFixed(2)}/year
+                    </p>
+                  </>
                 )}
-                <p className="text-sm text-gray-400 mt-1">{plan.description}</p>
+                <p className="text-sm text-gray-400 mt-1">{planDescription}</p>
               </CardHeader>
 
               <CardContent className="pt-0">
@@ -287,9 +310,9 @@ export default function PricingSection() {
                 </button>
 
                 <div className="space-y-3 pt-4 border-t border-neutral-700">
-                  <h4 className="font-medium text-sm mb-3 text-white/70">{plan.includes[0]}</h4>
+                  <h4 className="font-medium text-sm mb-3 text-white/70">{planIncludes[0]}</h4>
                   <ul className="space-y-2">
-                    {plan.includes.slice(1).map((feature, featureIndex) => (
+                    {planIncludes.slice(1).map((feature, featureIndex) => (
                       <li key={featureIndex} className="flex items-center gap-2">
                         <span className="h-1.5 w-1.5 bg-yellow-400/60 rounded-full shrink-0" />
                         <span className="text-sm text-gray-300">{feature}</span>
@@ -298,6 +321,9 @@ export default function PricingSection() {
                   </ul>
                 </div>
               </CardContent>
+                  </>
+                );
+              })()}
             </Card>
           </TimelineContent>
         ))}

@@ -2,7 +2,13 @@ import type { PlasmoCSConfig } from "plasmo"
 import { Component, isValidElement, type ErrorInfo, type ReactNode } from "react"
 import { createRoot, type Root } from "react-dom/client"
 import "~/styles/globals.css"
-import { getFolders, saveSnippet, createFolder, FOLDER_ICONS } from "~/services/highlight-storage"
+import {
+  getFolders,
+  saveSnippet,
+  createFolder,
+  FOLDER_ICONS,
+  sanitizeFolderColor
+} from "~/services/highlight-storage"
 import { AgilePromptsBar } from "../../contents/notebooklm/AgilePromptsBar"
 import { ConversationExportMenu } from "../../contents/notebooklm/ConversationExportMenu"
 import { FocusThreadsBar } from "../../contents/notebooklm/FocusThreadsBar"
@@ -971,7 +977,7 @@ function renderClipperMain(
 
     const dot = document.createElement("span")
     dot.className = "md-clipper-card-dot"
-    dot.style.background = folder.color
+    dot.style.background = sanitizeFolderColor(folder.color)
     dot.style.flexShrink = "0"
 
     const name = document.createElement("span")
@@ -990,7 +996,18 @@ function renderClipperMain(
       panel.innerHTML = ""
       const saved = document.createElement("div")
       saved.className = "md-clipper-saved"
-      saved.innerHTML = `<span class="md-clipper-saved-icon">✓</span><span class="md-clipper-saved-text">Saved to ${folder.name}</span><span class="md-clipper-saved-sub">${folder.icon || "📌"} ${folder.name}</span>`
+      const savedIcon = document.createElement("span")
+      savedIcon.className = "md-clipper-saved-icon"
+      savedIcon.textContent = "✓"
+      const savedText = document.createElement("span")
+      savedText.className = "md-clipper-saved-text"
+      savedText.textContent = `Saved to ${folder.name}`
+      const savedSub = document.createElement("span")
+      savedSub.className = "md-clipper-saved-sub"
+      savedSub.textContent = `${folder.icon || "📌"} ${folder.name}`
+      saved.appendChild(savedIcon)
+      saved.appendChild(savedText)
+      saved.appendChild(savedSub)
       panel.appendChild(saved)
       setTimeout(removeClipperPanel, 1400)
     })
@@ -1004,7 +1021,11 @@ function renderClipperMain(
   const newBtn = document.createElement("button")
   newBtn.type = "button"
   newBtn.className = "md-clipper-new-btn"
-  newBtn.innerHTML = `<span style="font-size:13px">+</span> New folder`
+  const plusIcon = document.createElement("span")
+  plusIcon.style.fontSize = "13px"
+  plusIcon.textContent = "+"
+  newBtn.appendChild(plusIcon)
+  newBtn.appendChild(document.createTextNode(" New folder"))
   newBtn.addEventListener("mousedown", (e) => { e.preventDefault(); e.stopPropagation() })
   newBtn.addEventListener("click", (e) => {
     e.stopPropagation()
@@ -1127,7 +1148,18 @@ function renderCreateForm(
     panel.innerHTML = ""
     const saved = document.createElement("div")
     saved.className = "md-clipper-saved"
-    saved.innerHTML = `<span class="md-clipper-saved-icon">✓</span><span class="md-clipper-saved-text">Saved to ${folder.name}</span><span class="md-clipper-saved-sub">${selectedIcon} Folder created</span>`
+    const savedIcon2 = document.createElement("span")
+    savedIcon2.className = "md-clipper-saved-icon"
+    savedIcon2.textContent = "✓"
+    const savedText2 = document.createElement("span")
+    savedText2.className = "md-clipper-saved-text"
+    savedText2.textContent = `Saved to ${folder.name}`
+    const savedSub2 = document.createElement("span")
+    savedSub2.className = "md-clipper-saved-sub"
+    savedSub2.textContent = `${selectedIcon} Folder created`
+    saved.appendChild(savedIcon2)
+    saved.appendChild(savedText2)
+    saved.appendChild(savedSub2)
     panel.appendChild(saved)
     setTimeout(removeClipperPanel, 1400)
   })

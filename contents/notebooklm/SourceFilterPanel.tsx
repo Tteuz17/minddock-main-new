@@ -9,6 +9,7 @@ import {
   ListFilter,
   Music,
   RefreshCw,
+  Save,
   Search,
   SquareCheck,
   Trash2,
@@ -191,7 +192,7 @@ export function SourceFilterPanel() {
   const groupsMenuRef = useRef<HTMLDivElement | null>(null)
   const { activeFilters, setActiveFilters, handleToggleFilter } = useSourceFilterLogic()
   const notebookId = resolveNotebookIdFromRoute() ?? ""
-  const uiCopy = useMemo(() => resolveSourceFilterUiCopy(), [])
+  const uiCopy = useMemo(() => resolveSourceFilterUiCopy("en"), [])
   const deleteCopy = uiCopy.delete
 
   const notebookSavedGroups = useMemo(
@@ -752,13 +753,13 @@ export function SourceFilterPanel() {
             <button
               type="button"
               onClick={openSaveSelectionDialog}
-                className={[
-                  "ml-auto rounded-full border px-3.5 py-1.5 text-[11px] font-medium transition-colors",
-                  "mt-0 ml-6",
+              className={[
+                "ml-auto mt-0 ml-6 inline-flex items-center gap-1.5 rounded-full border px-3.5 py-1.5 text-[11px] font-semibold transition-colors",
                 isSaveSelectionDialogOpen
-                  ? "border-[#facc15]/45 bg-[#3a300b] text-[#fff3b8] hover:bg-[#46380d]"
-                  : "border-white/[0.06] bg-[#101216] text-white hover:bg-[#14171c]"
+                  ? "border-[#eab308] bg-[#eab308] text-[#120f08]"
+                  : "border-[#facc15] bg-[#facc15] text-[#120f08] hover:border-[#eab308] hover:bg-[#eab308]"
               ].join(" ")}>
+              <Save size={13} strokeWidth={1.9} className="text-[#120f08]" />
               {uiCopy.saveViewButton}
             </button>
           </div>

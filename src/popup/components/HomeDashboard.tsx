@@ -4,10 +4,10 @@ import {
   Check,
   ChevronDown,
   ArrowUpRight,
+  BookMarked,
   BookOpenText,
   Eye,
   EyeOff,
-  GitBranchPlus,
   Network,
   NotebookPen,
   RefreshCw,
@@ -335,36 +335,36 @@ export function HomeDashboard({ onOpenSidePanel, onOpenZettelHub }: HomeDashboar
 
   const cards = [
     {
-      title: "Modo Zettel",
-      note: "Criar nota atomica",
-      icon: NotebookPen,
+      title: "Prompt Library",
+      note: "Ready-to-use prompts for faster workflows.",
+      icon: BookMarked,
       accent: "rgba(250,204,21,0.18)",
       accentEdge: "rgba(250,204,21,0.24)",
+      onClick: () => chrome.tabs.create({ url: `${URLS.MINDDOCK_LANDING}/pricing` })
+    },
+    {
+      title: "Focus Dock",
+      note: "Isolated context tabs for each conversation flow.",
+      icon: Workflow,
+      accent: "rgba(59,130,246,0.16)",
+      accentEdge: "rgba(96,165,250,0.22)",
       onClick: () => onOpenZettelHub?.()
     },
     {
-      title: "Graph View",
-      note: "Abrir mapa de notas",
-      icon: Network,
-      accent: "rgba(59,130,246,0.16)",
-      accentEdge: "rgba(96,165,250,0.22)",
-      onClick: () => onOpenSidePanel("graph")
+      title: "Modo Zettel",
+      note: "Create atomic notes and connect core ideas.",
+      icon: NotebookPen,
+      accent: "rgba(244,114,182,0.14)",
+      accentEdge: "rgba(244,114,182,0.2)",
+      onClick: () => onOpenSidePanel("create_note")
     },
     {
-      title: "Conectar Notas",
-      note: "Criar nota-ponte",
-      icon: GitBranchPlus,
+      title: "Smart Video Import",
+      note: "Import and process video context automatically.",
+      icon: Network,
       accent: "rgba(16,185,129,0.16)",
       accentEdge: "rgba(52,211,153,0.22)",
-      onClick: () => onOpenSidePanel("link_note")
-    },
-    {
-      title: "Threads",
-      note: "Ver estrutura",
-      icon: Workflow,
-      accent: "rgba(244,114,182,0.14)",
-      accentEdge: "rgba(244,114,182,0.18)",
-      onClick: () => chrome.tabs.create({ url: URLS.MINDDOCK_LANDING })
+      comingSoon: true
     }
   ]
 
@@ -595,38 +595,54 @@ export function HomeDashboard({ onOpenSidePanel, onOpenZettelHub }: HomeDashboar
             className="mt-2">
             <div className="mb-1 flex items-center justify-between">
               <span className="text-[10px] font-medium uppercase tracking-[0.16em] text-zinc-500">
-                Modo Caneta
+                Thinker Modules
               </span>
-              <span className="text-[10px] text-zinc-600">4 modulos</span>
+              <span className="text-[10px] text-zinc-600">{cards.length} modules</span>
             </div>
 
             <div className="grid grid-cols-2 gap-1.5">
-              {cards.map(({ title, note, icon: Icon, accent, accentEdge, onClick }, index) => (
-                <motion.button
-                  key={title}
-                  type="button"
-                  initial={{ opacity: 0, y: 10 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ duration: 0.22, delay: 0.07 + index * 0.03 }}
-                  whileHover={{ y: -2, scale: 1.01 }}
-                  whileTap={{ scale: 0.99 }}
-                  onClick={onClick}
-                  className="liquid-glass-panel h-[104px] rounded-[18px] p-2 text-left hover:border-white/[0.1]">
-                  <div className="liquid-glass-content flex items-start justify-between gap-3">
-                    <div
-                      className="liquid-glass-soft flex h-7 w-7 items-center justify-center rounded-[14px] text-zinc-100">
-                      <Icon size={12} strokeWidth={1.8} />
-                    </div>
-                    <ArrowUpRight size={11} strokeWidth={2} className="mt-0.5 text-zinc-500" />
-                  </div>
+              {cards.map(({ title, note, icon: Icon, accent, accentEdge, onClick, comingSoon }, index) => {
+                const isComingSoon = Boolean(comingSoon)
 
-                  <div className="liquid-glass-content">
-                    <div className="mt-2 h-[2px] w-7 rounded-full bg-white/[0.14]" />
-                    <h2 className="mt-2 text-[11px] font-semibold tracking-[-0.02em] text-white">{title}</h2>
-                    <p className="mt-0.5 text-[9px] text-zinc-400">{note}</p>
-                  </div>
-                </motion.button>
-              ))}
+                return (
+                  <motion.button
+                    key={title}
+                    type="button"
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ duration: 0.22, delay: 0.07 + index * 0.03 }}
+                    whileHover={isComingSoon ? undefined : { y: -2, scale: 1.01 }}
+                    whileTap={isComingSoon ? undefined : { scale: 0.99 }}
+                    onClick={onClick}
+                    disabled={isComingSoon || typeof onClick !== "function"}
+                    className={`liquid-glass-panel h-[104px] rounded-[18px] p-2 text-left hover:border-white/[0.1] ${
+                      isComingSoon ? "cursor-not-allowed opacity-85" : ""
+                    }`}
+                    style={{
+                      background: `linear-gradient(155deg, ${accent} 0%, rgba(6,6,7,0.52) 36%, rgba(6,6,7,0.85) 100%)`,
+                      boxShadow: `inset 0 1px 0 rgba(255,255,255,0.08), 0 0 0 1px ${accentEdge}`
+                    }}>
+                    <div className="liquid-glass-content flex items-start justify-between gap-3">
+                      <div className="liquid-glass-soft flex h-7 w-7 items-center justify-center rounded-[14px] text-zinc-100">
+                        <Icon size={12} strokeWidth={1.8} />
+                      </div>
+                      {isComingSoon ? (
+                        <span className="rounded-full border border-[#facc15]/40 bg-[#facc15]/15 px-2 py-0.5 text-[8px] font-medium uppercase tracking-[0.12em] text-[#fde68a]">
+                          Coming soon
+                        </span>
+                      ) : (
+                        <ArrowUpRight size={11} strokeWidth={2} className="mt-0.5 text-zinc-500" />
+                      )}
+                    </div>
+
+                    <div className="liquid-glass-content">
+                      <div className="mt-2 h-[2px] w-7 rounded-full bg-white/[0.14]" />
+                      <h2 className="mt-2 text-[11px] font-semibold tracking-[-0.02em] text-white">{title}</h2>
+                      <p className="mt-0.5 text-[9px] text-zinc-300">{note}</p>
+                    </div>
+                  </motion.button>
+                )
+              })}
             </div>
           </motion.div>
         </div>

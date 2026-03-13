@@ -7,6 +7,7 @@ import {
   normalizeAccountEmail,
   normalizeAuthUser
 } from "~/lib/notebook-account-scope"
+import { getFromSecureStorage } from "~/lib/utils"
 
 const NOTEBOOK_CACHE_KEY = "minddock_cached_notebooks"
 const AUTH_USER_KEY = "nexus_auth_user"
@@ -176,11 +177,12 @@ function delay(timeoutMs: number): Promise<void> {
 
 async function resolveNotebookAccountScope(): Promise<{ accountKey: string; confirmed: boolean }> {
   try {
+    const secureSession = await getFromSecureStorage<Record<string, unknown>>(TOKEN_STORAGE_KEY)
     const snapshot = await chrome.storage.local.get([AUTH_USER_KEY, ACCOUNT_EMAIL_KEY, TOKEN_STORAGE_KEY])
     const fixedAuthUser = normalizeAuthUser(snapshot[AUTH_USER_KEY])
     const fixedAccountEmail = normalizeAccountEmail(snapshot[ACCOUNT_EMAIL_KEY])
 
-    const session = snapshot[TOKEN_STORAGE_KEY]
+    const session = secureSession ?? snapshot[TOKEN_STORAGE_KEY]
     const sessionAuthUser =
       session && typeof session === "object"
         ? normalizeAuthUser((session as { authUser?: unknown }).authUser)
