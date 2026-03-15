@@ -20,6 +20,7 @@ function getSafeRuntime(): typeof chrome.runtime | null {
 
 export function useAuth(): AuthState & {
   signIn: () => Promise<void>
+  signInBypassThinker: () => Promise<void>
   signOut: () => Promise<void>
   refresh: () => Promise<void>
   error: string | null
@@ -140,5 +141,37 @@ export function useAuth(): AuthState & {
     setState({ user: null, isLoading: false, isAuthenticated: false })
   }, [])
 
-  return { ...state, signIn, signOut, refresh: fetchAuth, error }
+  const signInBypassThinker = useCallback(async () => {
+    setState((currentState) => ({ ...currentState, isLoading: true }))
+    setError(null)
+
+    try {
+      const runtime = getSafeRuntime()
+      if (!runtime?.sendMessage) {
+        throw new Error("Contexto da extensao indisponivel. Recarregue a pagina.")
+      }
+
+      const response = await runtime.sendMessage({
+        command: "MINDDOCK_DEV_BYPASS_SIGN_IN",
+        payload: { tier: "thinker" }
+      })
+      if (response?.success === false) {
+        throw new Error(String(response.error ?? "Falha ao ativar bypass Thinker."))
+      }
+
+      await fetchAuth()
+    } catch (bypassError) {
+      const message =
+        bypassError instanceof Error ? bypassError.message : "Falha ao ativar bypass Thinker."
+      setError(message)
+      setState((currentState) => ({
+        ...currentState,
+        isLoading: false,
+        isAuthenticated: false
+      }))
+      throw bypassError
+    }
+  }, [fetchAuth])
+
+  return { ...state, signIn, signInBypassThinker, signOut, refresh: fetchAuth, error }
 }

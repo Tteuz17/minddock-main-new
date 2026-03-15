@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import { Eye, ListFilter, X } from "lucide-react"
+import { AlertTriangle, CheckCircle2, Download, Eye, FileText, ListFilter, Search, X } from "lucide-react"
 import {
   MESSAGE_ACTIONS,
   type StandardResponse
@@ -105,7 +105,7 @@ export function SourceDownloadPanel() {
   })
   const selectAllCheckboxRef = useRef<HTMLInputElement | null>(null)
   const previewBlobUrlRef = useRef<string | null>(null)
-  const uiCopy = useMemo(() => resolveSourceDownloadUiCopy(), [])
+  const uiCopy = useMemo(() => resolveSourceDownloadUiCopy("en"), [])
 
   const selectedCount = selectedSourceIds.size
   const downloadFormatMeta = useMemo<Record<DownloadFormat, { label: string; subtitle: string; noTranslate?: boolean }>>(
@@ -944,6 +944,12 @@ export function SourceDownloadPanel() {
     .replace(/\bbaixe\b/gi, "Download")
     .replace(/\bbaixado\b/gi, "Download")
   const isPreviewToast = /\bpre[-\s]?visual/i.test(toastDisplayMessage)
+  const toastStatusLabel =
+    toast.status === "error"
+      ? "Error"
+      : toast.status === "success"
+        ? "Completed"
+        : "In progress"
 
   return (
     <>
@@ -961,7 +967,7 @@ export function SourceDownloadPanel() {
       {isOpen && (
         <div
             data-minddock-source-overlay="true"
-            className="fixed inset-0 z-[2147483647] flex items-center justify-center bg-[#020204]/80 px-4 backdrop-blur-sm"
+            className="fixed inset-0 z-[2147483647] flex items-center justify-center bg-[#000000]/88 px-4 backdrop-blur-[1px]"
             onClick={(event) => {
               event.stopPropagation()
             }}
@@ -981,24 +987,24 @@ export function SourceDownloadPanel() {
               onMouseDown={(event) => {
                 event.stopPropagation()
               }}
-              className="relative flex max-h-[88vh] w-full max-w-[960px] flex-col overflow-hidden rounded-[22px] border border-white/[0.08] bg-[#08090b] text-[#d6dae0] shadow-[0_24px_64px_rgba(0,0,0,0.45)]">
+              className="relative flex max-h-[88vh] w-full max-w-[920px] flex-col overflow-hidden rounded-[14px] border border-white/[0.14] bg-[#000000] text-[#e2e6ee] shadow-[0_18px_48px_rgba(0,0,0,0.56)]">
               <div
                 aria-hidden="true"
-                className="pointer-events-none absolute inset-0 rounded-[inherit] opacity-90"
-                style={{
-                  backgroundImage: "radial-gradient(circle, rgba(255, 255, 255, 0.07) 1px, transparent 1px)",
-                  backgroundSize: "14px 14px",
-                  backgroundPosition: "0 0"
-                }}
-              />
+                className="pointer-events-none absolute inset-0 rounded-[inherit]">
+                <div className="absolute inset-x-0 top-0 h-px bg-white/[0.16]" />
+              </div>
 
               <div className="relative z-[1] flex flex-1 flex-col">
-                <header className="flex items-start justify-between gap-3 border-b border-white/[0.06] px-5 pb-3 pt-5">
+                <header className="flex items-start justify-between gap-4 border-b border-white/[0.12] bg-[#060606] px-5 pb-4 pt-4">
                   <div>
-                    <h2 className="text-[28px] font-semibold leading-none tracking-tight text-white">
+                    <span className="inline-flex items-center gap-1.5 rounded-[6px] border border-white/[0.16] bg-[#0b0b0b] px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-[#b7c0cf]">
+                      {isPreviewMode ? <Eye size={11} strokeWidth={2} className="text-[#facc15]" /> : <FileText size={11} strokeWidth={2} className="text-[#facc15]" />}
+                      {isPreviewMode ? "PREVIEW LAB" : "SOURCE VAULT"}
+                    </span>
+                    <h2 className="mt-2 text-[30px] font-semibold leading-none tracking-tight text-white">
                       {uiCopy.modalTitle}
                     </h2>
-                    <p className="mt-1 text-sm text-[#9ca3af]">
+                    <p className="mt-1.5 max-w-[640px] text-[13px] leading-relaxed text-[#9da7b8]">
                       {isPreviewMode
                         ? uiCopy.modalSubtitlePreview
                         : uiCopy.modalSubtitleSelection}
@@ -1012,26 +1018,27 @@ export function SourceDownloadPanel() {
                       closeModal()
                     }}
                     disabled={isRunningDownload || isSyncingGDocs || isPreparingPreview}
-                    className="inline-flex h-9 w-9 items-center justify-center rounded-[11px] border border-white/[0.12] bg-[#111318] text-[#a5acb8] transition-colors hover:text-white disabled:cursor-not-allowed disabled:opacity-50">
+                    className="inline-flex h-10 w-10 items-center justify-center rounded-[8px] border border-white/[0.2] bg-[#0a0a0a] text-[#a9b2c1] transition-colors hover:border-[#facc15]/55 hover:bg-[#151209] hover:text-[#facc15] disabled:cursor-not-allowed disabled:opacity-50">
                     <X size={15} strokeWidth={1.8} />
                   </button>
                 </header>
 
                 <div className="px-5 pb-2 pt-3">
                   {!isPreviewMode && (
-                    <div className="rounded-xl border border-white/[0.1] bg-[#0e1116] px-3 py-2">
+                    <div className="flex items-center gap-2 rounded-[10px] border border-white/[0.16] bg-[#0a0a0a] px-3 py-2.5">
+                      <Search size={14} strokeWidth={2} className="text-[#8f98a8]" />
                       <input
                         type="search"
                         value={sourceSearch}
                         onChange={(event) => setSourceSearch(event.target.value)}
                         placeholder={uiCopy.sourceFilterPlaceholder}
-                        className="w-full bg-transparent text-sm text-[#e5e7eb] outline-none placeholder:text-[#6b7280]"
+                        className="w-full bg-transparent text-sm text-[#eef2fa] outline-none placeholder:text-[#7a8391]"
                       />
                     </div>
                   )}
 
                   <div className={isPreviewMode ? "mt-0" : "mt-3"}>
-                    <div className="grid grid-cols-2 gap-2 rounded-xl border border-white/[0.1] bg-[#0e1116] p-2 sm:grid-cols-4">
+                    <div className="grid grid-cols-2 gap-2 rounded-[10px] border border-white/[0.16] bg-[#0c0c0c] p-2.5 sm:grid-cols-4">
                       {DOWNLOAD_FORMAT_OPTIONS.map((item) => {
                         const active = format === item
                         const itemMeta = downloadFormatMeta[item]
@@ -1049,11 +1056,11 @@ export function SourceDownloadPanel() {
                               updateFormat(item)
                             }}
                             className={[
-                              "flex min-h-[48px] flex-col justify-center gap-0.5 rounded-lg border px-2.5 py-2 text-left",
+                              "flex min-h-[50px] flex-col justify-center gap-0.5 rounded-[8px] border px-2.5 py-2 text-left transition-colors",
                               preventTranslation ? "notranslate" : "",
                               active
-                                ? "border-[#facc15]/40 bg-[#2a2208] text-[#fff1a6]"
-                                : "border-transparent bg-[#12161d] text-[#c7ced8]"
+                                ? "border-[#facc15] bg-[#facc15] text-[#131002]"
+                                : "border-white/[0.16] bg-[#111111] text-[#c8d1de] hover:border-[#facc15]/35 hover:bg-[#161616]"
                             ].join(" ")}>
                             <span
                               translate={preventTranslation ? "no" : undefined}
@@ -1072,8 +1079,8 @@ export function SourceDownloadPanel() {
                   </div>
 
                   {!isPreviewMode && (
-                    <div className="mt-2 flex items-center justify-between gap-2 text-xs text-[#a5acb8]">
-                      <label className="inline-flex shrink-0 items-center gap-2 whitespace-nowrap text-[#c8d0db]">
+                    <div className="mt-2 flex items-center justify-between gap-2 text-xs text-[#9aa6b8]">
+                      <label className="inline-flex shrink-0 items-center gap-2 whitespace-nowrap rounded-[8px] border border-white/[0.16] bg-[#0f0f0f] px-2.5 py-1 text-[#d5dbe6]">
                         <input
                           ref={selectAllCheckboxRef}
                           type="checkbox"
@@ -1092,9 +1099,9 @@ export function SourceDownloadPanel() {
                 </div>
 
                 {!isPreviewMode && (
-                  <div className="mx-5 mt-2 min-h-[210px] max-h-[320px] overflow-y-auto rounded-xl border border-white/[0.1] bg-[#0e1116]/90 p-1.5 scrollbar-thin">
+                  <div className="mx-5 mt-2 min-h-[220px] max-h-[330px] overflow-y-auto rounded-[10px] border border-white/[0.16] bg-[#0c0c0c] p-2 scrollbar-thin">
                     {isLoadingSources && (
-                      <div className="px-3 py-6 text-sm text-[#9ca3af]">{uiCopy.loadingBackendSources}</div>
+                      <div className="px-3 py-6 text-sm text-[#a4adbc]">{uiCopy.loadingBackendSources}</div>
                     )}
 
                     {!isLoadingSources && sourceLoadError && (
@@ -1102,7 +1109,7 @@ export function SourceDownloadPanel() {
                     )}
 
                     {!isLoadingSources && !sourceLoadError && filteredSources.length === 0 && (
-                      <div className="px-3 py-6 text-sm text-[#9ca3af]">{uiCopy.noSourcesForFilter}</div>
+                      <div className="px-3 py-6 text-sm text-[#a4adbc]">{uiCopy.noSourcesForFilter}</div>
                     )}
 
                     {!isLoadingSources &&
@@ -1113,7 +1120,7 @@ export function SourceDownloadPanel() {
                         return (
                           <label
                             key={source.sourceId}
-                            className="grid cursor-pointer grid-cols-[20px_minmax(0,1fr)] items-start gap-2 border-t border-white/[0.06] px-2 py-2.5">
+                            className="grid cursor-pointer grid-cols-[20px_minmax(0,1fr)] items-start gap-2 rounded-[8px] border border-transparent px-2.5 py-2.5 transition-colors hover:border-white/[0.16] hover:bg-[#131313]">
                             <input
                               type="checkbox"
                               checked={isChecked}
@@ -1141,9 +1148,9 @@ export function SourceDownloadPanel() {
                 )}
 
                 {isPreviewMode && (
-                  <div className="mx-5 mt-2 min-h-[320px] max-h-[420px] overflow-y-auto rounded-xl border border-white/[0.1] bg-[#0e1116]/90 p-2.5 scrollbar-thin">
+                  <div className="mx-5 mt-2 min-h-[320px] max-h-[420px] overflow-y-auto rounded-[10px] border border-white/[0.16] bg-[#0c0c0c] p-2.5 scrollbar-thin">
                     {previewSkippedCount > 0 && (
-                      <div className="mb-2 rounded-lg border border-white/[0.08] bg-[#10151d] px-3 py-2 text-xs text-[#c7ced8]">
+                      <div className="mb-2 rounded-[10px] border border-white/[0.08] bg-[#10151d] px-3 py-2 text-xs text-[#c7ced8]">
                         {uiCopy.previewSkippedLabel(previewSkippedCount)}
                       </div>
                     )}
@@ -1160,8 +1167,8 @@ export function SourceDownloadPanel() {
                         {previewDrafts.map((draft) => (
                           <article
                             key={draft.sourceId}
-                            className="flex h-[320px] flex-col overflow-hidden rounded-lg border border-white/[0.08] bg-[#12161d]">
-                            <header className="flex items-center justify-between gap-2 border-b border-white/[0.08] px-3 py-2">
+                            className="flex h-[320px] flex-col overflow-hidden rounded-[8px] border border-white/[0.16] bg-[#111111]">
+                            <header className="flex items-center justify-between gap-2 border-b border-white/[0.12] px-3 py-2.5">
                               <div className="min-w-0">
                                 <h3 className="truncate text-sm font-semibold text-white">{draft.sourceTitle}</h3>
                                 <p className="text-xs text-[#9ca3af]">
@@ -1195,7 +1202,7 @@ export function SourceDownloadPanel() {
                 {(() => {
                   const downloadCount = selectedCount
                   return (
-                    <footer className="mt-3 grid grid-cols-[250px_minmax(0,1fr)] gap-3 px-5 pb-5 pt-1">
+                    <footer className="mt-3 grid grid-cols-[240px_minmax(0,1fr)] gap-3 px-5 pb-5 pt-1">
                       <button
                         type="button"
                         onMouseDown={swallowInteraction}
@@ -1213,7 +1220,7 @@ export function SourceDownloadPanel() {
                           isPreparingPreview ||
                           sources.length === 0
                         }
-                        className="inline-flex min-h-[54px] items-center justify-center gap-1.5 rounded-xl border border-white/[0.1] bg-[#12161d] px-5 text-base font-semibold text-[#d6dae0] disabled:cursor-not-allowed disabled:opacity-45">
+                        className="inline-flex min-h-[54px] items-center justify-center gap-1.5 rounded-[10px] border border-white/[0.2] bg-[#111111] px-5 text-base font-semibold text-[#d9dfeb] transition-colors hover:border-[#facc15]/45 hover:bg-[#171717] disabled:cursor-not-allowed disabled:opacity-45">
                         <Eye size={16} />
                         {isPreviewMode ? uiCopy.backButton : uiCopy.previewButton}
                       </button>
@@ -1230,7 +1237,8 @@ export function SourceDownloadPanel() {
                           isPreparingPreview ||
                           downloadCount === 0
                         }
-                        className="inline-flex min-h-[44px] items-center justify-center gap-1 rounded-xl bg-[#16a34a] px-4 text-base font-semibold text-[#052e16] shadow-[0_10px_24px_rgba(22,163,74,0.25)] disabled:cursor-not-allowed disabled:opacity-45">
+                        className="inline-flex min-h-[54px] items-center justify-center gap-1.5 rounded-[10px] border border-[#eab308] bg-[#facc15] px-4 text-base font-semibold text-[#1b1400] shadow-[6px_6px_0px_rgba(250,204,21,0.18)] transition-colors hover:bg-[#fbbf24] disabled:cursor-not-allowed disabled:opacity-45">
+                        <Download size={16} strokeWidth={2} />
                         {isRunningDownload ? uiCopy.downloadRunningButton : uiCopy.downloadButton(downloadCount)}
                       </button>
                     </footer>
@@ -1244,28 +1252,35 @@ export function SourceDownloadPanel() {
       {toast.status !== "idle" && !isPreviewMode && (
         <aside
           data-minddock-source-toast="true"
-          className="fixed bottom-4 right-4 z-[2147483647] w-[min(370px,calc(100vw-28px))] overflow-hidden rounded-[18px] border border-white/[0.1] bg-[#08090b] text-[#d6dae0] shadow-[0_18px_44px_rgba(0,0,0,0.5)]">
+          className="fixed bottom-4 right-4 z-[2147483647] w-[min(390px,calc(100vw-24px))] overflow-hidden rounded-[12px] border border-white/[0.18] bg-[#000000] text-[#d6dae0] shadow-[0_18px_48px_rgba(0,0,0,0.56)]">
           <div
             aria-hidden="true"
-            className="pointer-events-none absolute inset-0 rounded-[inherit] opacity-85"
-            style={{
-              backgroundImage: "radial-gradient(circle, rgba(255, 255, 255, 0.065) 1px, transparent 1px)",
-              backgroundSize: "14px 14px",
-              backgroundPosition: "0 0"
-            }}
+            className="absolute inset-x-0 top-0 h-[2px] bg-[#facc15]"
           />
 
-          <div className="relative z-[1] p-3.5">
-            <header className="mb-2 flex items-center justify-between gap-2">
-              <strong className="text-[20px] font-semibold leading-none tracking-tight text-white">
-                {isSyncingGDocs
-                  ? uiCopy.toastTitleUpdatingSources
-                  : isPreparingPreview || isPreviewToast
-                    ? uiCopy.toastTitlePreviewSources
-                    : isRunningDownload
-                      ? uiCopy.toastTitleDownloadingSources
-                      : uiCopy.toastTitleDownloadSources}
-              </strong>
+          <div className="relative z-[1] p-4">
+            <header className="mb-2.5 flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <div className="mb-1 inline-flex items-center gap-1.5 rounded-[6px] border border-white/[0.2] bg-[#111111] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-[#b5becc]">
+                  {toast.status === "error" ? (
+                    <AlertTriangle size={11} strokeWidth={2} className="text-red-400" />
+                  ) : toast.status === "success" ? (
+                    <CheckCircle2 size={11} strokeWidth={2} className="text-emerald-400" />
+                  ) : (
+                    <Download size={11} strokeWidth={2} className="text-[#facc15]" />
+                  )}
+                  {toastStatusLabel}
+                </div>
+                <strong className="block truncate text-[18px] font-semibold leading-none tracking-tight text-white">
+                  {isSyncingGDocs
+                    ? uiCopy.toastTitleUpdatingSources
+                    : isPreparingPreview || isPreviewToast
+                      ? uiCopy.toastTitlePreviewSources
+                      : isRunningDownload
+                        ? uiCopy.toastTitleDownloadingSources
+                        : uiCopy.toastTitleDownloadSources}
+                </strong>
+              </div>
               <button
                 type="button"
                 aria-label={uiCopy.closeNoticeAriaLabel}
@@ -1274,21 +1289,21 @@ export function SourceDownloadPanel() {
                   swallowInteraction(event)
                   setToast({ status: "idle", message: "", progress: 0 })
                 }}
-                className="inline-flex h-7 w-7 items-center justify-center rounded-[10px] border border-white/[0.12] bg-[#101319] text-[#8f98a6] transition-colors hover:text-white">
+                className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-[7px] border border-white/[0.2] bg-[#111111] text-[#8f98a6] transition-colors hover:border-[#facc15]/45 hover:bg-[#171717] hover:text-[#facc15]">
                 <X size={14} strokeWidth={1.8} />
               </button>
             </header>
 
-            <p className="mb-2 text-sm text-[#b5bcc8]">{toastDisplayMessage}</p>
+            <p className="mb-3 text-sm leading-relaxed text-[#b9c2d0]">{toastDisplayMessage}</p>
 
-            <div className="h-2 overflow-hidden rounded-full bg-white/[0.1]">
+            <div className="mb-1 flex items-center justify-between text-[11px] text-[#8b97ab]">
+              <span>Progress</span>
+              <span>{Math.max(0, Math.min(100, Math.round(toast.progress)))}%</span>
+            </div>
+
+            <div className="h-2.5 overflow-hidden rounded-[6px] border border-white/[0.18] bg-[#111111]">
               <div
-                className={[
-                  "h-full rounded-full transition-all duration-200",
-                  toast.status === "error"
-                    ? "bg-[linear-gradient(90deg,#ef4444_0%,#f97316_100%)]"
-                    : "bg-[linear-gradient(90deg,#60a5fa_0%,#22c55e_100%)]"
-                ].join(" ")}
+                className="h-full rounded-full bg-[#facc15] transition-all duration-300"
                 style={{
                   width: `${Math.max(0, Math.min(100, toast.progress))}%`
                 }}

@@ -1,4 +1,4 @@
-import { FileText, Loader2 } from "lucide-react"
+import { Loader2 } from "lucide-react"
 import { useCallback, useState, type MouseEvent } from "react"
 import { showMindDockToast } from "../../../../contents/common/minddock-ui"
 import { extractChatAsStructuredData } from "./ConversationJsonExtractor"
@@ -27,6 +27,7 @@ interface NotionExportMessageResponse {
 
 const NOTION_EXPORT_TIMEOUT_MS = 120_000
 const NOTION_CONNECT_TIMEOUT_MS = 120_000
+const NOTION_LOGO_SRC = new URL("../../../../public/images/logos/Notion-logo.svg.png", import.meta.url).href
 
 function stopActionPropagation(event: MouseEvent<HTMLElement>): void {
   event.preventDefault()
@@ -45,7 +46,7 @@ function requestWorkspaceNotionExport(rawTextBlocks: RawNotionTextBlock[]): Prom
         return
       }
       isSettled = true
-      reject(new Error("A exportacao para Notion demorou demais. Tente novamente."))
+      reject(new Error("Notion export timed out. Please try again."))
     }, NOTION_EXPORT_TIMEOUT_MS)
 
     try {
@@ -91,7 +92,7 @@ function requestWorkspaceNotionExport(rawTextBlocks: RawNotionTextBlock[]): Prom
       }
       isSettled = true
       window.clearTimeout(timeoutId)
-      reject(error instanceof Error ? error : new Error("Falha inesperada ao enviar mensagem para o background."))
+      reject(error instanceof Error ? error : new Error("Unexpected error while contacting the background service."))
     }
   })
 }
@@ -104,7 +105,7 @@ function requestNotionAccountConnection(): Promise<void> {
         return
       }
       isSettled = true
-      reject(new Error("A conexao com o Notion demorou demais."))
+      reject(new Error("Notion connection timed out."))
     }, NOTION_CONNECT_TIMEOUT_MS)
 
     try {
@@ -118,12 +119,12 @@ function requestNotionAccountConnection(): Promise<void> {
 
         const runtimeError = chrome.runtime.lastError
         if (runtimeError) {
-          reject(new Error(runtimeError.message || "Falha ao conectar com o Notion."))
+          reject(new Error(runtimeError.message || "Failed to connect to Notion."))
           return
         }
 
         if (!response?.success) {
-          reject(new Error(String(response?.error ?? "Falha ao autenticar com o Notion.")))
+          reject(new Error(String(response?.error ?? "Failed to authenticate with Notion.")))
           return
         }
 
@@ -135,7 +136,7 @@ function requestNotionAccountConnection(): Promise<void> {
       }
       isSettled = true
       window.clearTimeout(timeoutId)
-      reject(error instanceof Error ? error : new Error("Falha inesperada ao conectar com o Notion."))
+      reject(error instanceof Error ? error : new Error("Unexpected error while connecting to Notion."))
     }
   })
 }
@@ -164,7 +165,7 @@ export function NotionExportAction({
       })
       if (structuredChatNodes.length === 0) {
         showMindDockToast({
-          message: "Nenhum conteudo de conversa visivel para exportar no Notion.",
+          message: "No visible chat content to export to Notion.",
           variant: "info",
           timeoutMs: 2600
         })
@@ -178,7 +179,7 @@ export function NotionExportAction({
 
       const notionPageUrl = await requestWorkspaceNotionExport(rawTextBlocks)
       showMindDockToast({
-        message: "Exportacao para Notion concluida.",
+        message: "Notion export completed.",
         variant: "success",
         timeoutMs: 2400
       })
@@ -186,7 +187,7 @@ export function NotionExportAction({
       onExportFinished?.()
     } catch (error) {
       showMindDockToast({
-        message: error instanceof Error ? error.message : "Nao foi possivel exportar o bate-papo para o Notion.",
+        message: error instanceof Error ? error.message : "Could not export chat to Notion.",
         variant: "error",
         timeoutMs: 3200
       })
@@ -208,14 +209,20 @@ export function NotionExportAction({
       }}
       disabled={isDisabled}
       className={[
-        "flex w-full items-center gap-3 rounded-[11px] border border-white/[0.08] bg-[#101722] px-3 py-2.5 text-left text-[13px] transition-colors",
-        isDisabled ? "cursor-not-allowed opacity-70 text-[#a6aec0]" : "cursor-pointer text-[#d0d6e1] hover:bg-[#151b24] hover:text-white",
+        "flex w-full items-center gap-3 rounded-[11px] border border-white/[0.07] bg-white/[0.03] px-3 py-2.5 text-left text-[13px] transition-colors",
+        isDisabled
+          ? "cursor-not-allowed opacity-70 text-[#a6aec0]"
+          : "cursor-pointer text-[#d0d6e1] hover:border-[#facc15]/20 hover:bg-[#facc15]/[0.06] hover:text-white",
         className
       ].join(" ")}>
-      <span className="inline-flex h-[18px] w-[18px] items-center justify-center rounded-[6px] border border-white/[0.12] bg-[#0a0f16] text-[#a8b2c6]">
-        {isExporting ? <Loader2 size={12} strokeWidth={2} className="animate-spin" /> : <FileText size={12} strokeWidth={2} />}
+      <span className="inline-flex h-[18px] w-[18px] items-center justify-center rounded-[6px] border border-white/[0.12] bg-[#0a0f16]">
+        {isExporting ? (
+          <Loader2 size={12} strokeWidth={2} className="animate-spin text-[#facc15]" />
+        ) : (
+          <img src={NOTION_LOGO_SRC} alt="Notion" className="h-3 w-3 object-contain" />
+        )}
       </span>
-      <span className="flex-1">Exportar para Notion</span>
+      <span className="flex-1">Export to Notion</span>
     </button>
   )
 }

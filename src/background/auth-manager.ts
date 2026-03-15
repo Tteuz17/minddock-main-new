@@ -6,12 +6,25 @@ import {
 } from "@supabase/supabase-js"
 import { STORAGE_KEYS } from "~/lib/constants"
 import { FIXED_STORAGE_KEYS } from "~/lib/contracts"
-import { getFromStorage, removeFromStorage, setInStorage } from "~/lib/utils"
-import type { UserProfile } from "~/lib/types"
+import {
+  getFromSecureStorage,
+  getFromStorage,
+  removeFromSecureStorage,
+  removeFromStorage,
+  setInSecureStorage,
+  setInStorage
+} from "~/lib/utils"
+import type { SubscriptionTier, UserProfile } from "~/lib/types"
 
 interface SupabaseConfig {
   url: string
   anonKey: string
+}
+
+interface DevAuthBypassState {
+  enabled: boolean
+  tier: SubscriptionTier
+  token: string
 }
 
 class AuthManager {
@@ -20,6 +33,21 @@ class AuthManager {
   private authListenerBound = false
 
   async initializeSession(): Promise<UserProfile | null> {
+    const devBypassState = await this.getDevAuthBypassState()
+    if (devBypassState) {
+      const cachedProfile = await getFromStorage<UserProfile>(STORAGE_KEYS.USER_PROFILE)
+      if (cachedProfile && !this.isDevBypassProfile(cachedProfile)) {
+        await removeFromStorage(STORAGE_KEYS.DEV_AUTH_BYPASS)
+      } else {
+      const profile = cachedProfile ?? this.buildDevBypassProfile(devBypassState.tier)
+      if (!cachedProfile) {
+        await setInStorage(STORAGE_KEYS.USER_PROFILE, profile)
+      }
+      this.notifyListeners(profile)
+      return profile
+      }
+    }
+
     const client = await this.getClient()
     const { data, error } = await client.auth.getSession()
 
@@ -35,7 +63,7 @@ class AuthManager {
     }
 
     // Sem sessao Supabase: limpa estado local e notifica logout.
-    await removeFromStorage(FIXED_STORAGE_KEYS.SUPABASE_SESSION)
+    await removeFromSecureStorage(FIXED_STORAGE_KEYS.SUPABASE_SESSION)
     await removeFromStorage(STORAGE_KEYS.USER_PROFILE)
     this.notifyListeners(null)
     return null
@@ -60,6 +88,7 @@ class AuthManager {
     }
 
     await this.persistSession(data.session)
+    await removeFromStorage(STORAGE_KEYS.DEV_AUTH_BYPASS)
     const profile = await this.fetchProfile(data.session.user)
     this.notifyListeners(profile)
     return profile
@@ -95,6 +124,7 @@ class AuthManager {
       }
 
       await this.persistSession(data.session)
+      await removeFromStorage(STORAGE_KEYS.DEV_AUTH_BYPASS)
       const profile = await this.fetchProfile(data.session.user)
       this.notifyListeners(profile)
       return profile
@@ -118,6 +148,7 @@ class AuthManager {
       }
 
       await this.persistSession(data.session)
+      await removeFromStorage(STORAGE_KEYS.DEV_AUTH_BYPASS)
       const profile = await this.fetchProfile(data.session.user)
       this.notifyListeners(profile)
       return profile
@@ -134,13 +165,41 @@ class AuthManager {
       throw new Error(`Falha no logout Supabase: ${error.message}`)
     }
 
-    await removeFromStorage(FIXED_STORAGE_KEYS.SUPABASE_SESSION)
+    await removeFromSecureStorage(FIXED_STORAGE_KEYS.SUPABASE_SESSION)
     await removeFromStorage(STORAGE_KEYS.USER_PROFILE)
     await removeFromStorage(STORAGE_KEYS.SUBSCRIPTION)
+    await removeFromStorage(STORAGE_KEYS.DEV_AUTH_BYPASS)
     this.notifyListeners(null)
   }
 
+  async getAccessToken(): Promise<string | null> {
+    const devBypassState = await this.getDevAuthBypassState()
+    const cachedProfile = await getFromStorage<UserProfile>(STORAGE_KEYS.USER_PROFILE)
+    if (devBypassState && this.isDevBypassProfile(cachedProfile)) {
+      return devBypassState.token
+    }
+
+    const client = await this.getClient()
+    const { data } = await client.auth.getSession()
+    return data.session?.access_token ?? null
+  }
+
+  async getSupabaseClient(): Promise<SupabaseClient> {
+    return this.getClient()
+  }
+
   async getCurrentUser(): Promise<UserProfile | null> {
+    const cachedProfile = await getFromStorage<UserProfile>(STORAGE_KEYS.USER_PROFILE)
+    const devBypassState = await this.getDevAuthBypassState()
+    if (devBypassState) {
+      if (this.isDevBypassProfile(cachedProfile)) {
+        return cachedProfile
+      }
+      const profile = this.buildDevBypassProfile(devBypassState.tier)
+      await setInStorage(STORAGE_KEYS.USER_PROFILE, profile)
+      return profile
+    }
+
     const client = await this.getClient()
     const { data: sessionData, error: sessionError } = await client.auth.getSession()
 
@@ -150,14 +209,13 @@ class AuthManager {
 
     const sessionUser = sessionData.session?.user
     if (!sessionUser) {
-      await removeFromStorage(FIXED_STORAGE_KEYS.SUPABASE_SESSION)
+      await removeFromSecureStorage(FIXED_STORAGE_KEYS.SUPABASE_SESSION)
       await removeFromStorage(STORAGE_KEYS.USER_PROFILE)
       return null
     }
 
-    const cached = await getFromStorage<UserProfile>(STORAGE_KEYS.USER_PROFILE)
-    if (cached?.id === sessionUser.id) {
-      return cached
+    if (cachedProfile?.id === sessionUser.id) {
+      return cachedProfile
     }
 
     return this.fetchProfile(sessionUser)
@@ -181,14 +239,14 @@ class AuthManager {
         storageKey: FIXED_STORAGE_KEYS.SUPABASE_SESSION,
         storage: {
           getItem: async (key: string) => {
-            const value = await getFromStorage<string>(key)
+            const value = await getFromSecureStorage<string>(key)
             return value ?? null
           },
           setItem: async (key: string, value: string) => {
-            await setInStorage(key, value)
+            await setInSecureStorage(key, value)
           },
           removeItem: async (key: string) => {
-            await removeFromStorage(key)
+            await removeFromSecureStorage(key)
           }
         }
       }
@@ -211,7 +269,18 @@ class AuthManager {
 
   private async handleAuthStateChanged(session: Session | null): Promise<void> {
     if (!session?.user) {
-      await removeFromStorage(FIXED_STORAGE_KEYS.SUPABASE_SESSION)
+      const devBypassState = await this.getDevAuthBypassState()
+      if (devBypassState) {
+        const cachedProfile = await getFromStorage<UserProfile>(STORAGE_KEYS.USER_PROFILE)
+        const profile = cachedProfile ?? this.buildDevBypassProfile(devBypassState.tier)
+        if (!cachedProfile) {
+          await setInStorage(STORAGE_KEYS.USER_PROFILE, profile)
+        }
+        this.notifyListeners(profile)
+        return
+      }
+
+      await removeFromSecureStorage(FIXED_STORAGE_KEYS.SUPABASE_SESSION)
       await removeFromStorage(STORAGE_KEYS.USER_PROFILE)
       this.notifyListeners(null)
       return
@@ -246,7 +315,7 @@ class AuthManager {
   }
 
   private async persistSession(session: Session): Promise<void> {
-    await setInStorage(FIXED_STORAGE_KEYS.SUPABASE_SESSION, JSON.stringify(session))
+    await setInSecureStorage(FIXED_STORAGE_KEYS.SUPABASE_SESSION, JSON.stringify(session))
   }
 
   private async fetchProfile(user: User): Promise<UserProfile> {
@@ -277,6 +346,48 @@ class AuthManager {
     for (const listener of this.listeners) {
       listener(user)
     }
+  }
+
+  private async getDevAuthBypassState(): Promise<DevAuthBypassState | null> {
+    const raw = await getFromStorage<Record<string, unknown>>(STORAGE_KEYS.DEV_AUTH_BYPASS)
+    if (!raw || typeof raw !== "object") {
+      return null
+    }
+
+    if (raw.enabled !== true) {
+      return null
+    }
+
+    const tierRaw = String(raw.tier ?? "").trim().toLowerCase()
+    const tier: SubscriptionTier = tierRaw === "thinker_pro" ? "thinker_pro" : "thinker"
+    const token = String(raw.token ?? "").trim() || "dev-bypass-token"
+    return {
+      enabled: true,
+      tier,
+      token
+    }
+  }
+
+  private buildDevBypassProfile(tier: SubscriptionTier): UserProfile {
+    const now = new Date().toISOString()
+    return {
+      id: "dev-thinker-test-user",
+      email: "thinker.test@minddock.local",
+      displayName: "Thinker Test",
+      subscriptionTier: tier,
+      subscriptionStatus: "active",
+      createdAt: now,
+      updatedAt: now
+    }
+  }
+
+  private isDevBypassProfile(profile: UserProfile | null | undefined): boolean {
+    const userId = String(profile?.id ?? "").trim()
+    const email = String(profile?.email ?? "")
+      .trim()
+      .toLowerCase()
+
+    return userId === "dev-thinker-test-user" || email.endsWith("@minddock.local")
   }
 
   private isAuthSessionMissingError(error: { message?: string } | null | undefined): boolean {

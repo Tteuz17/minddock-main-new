@@ -27,6 +27,7 @@ export const STORAGE_KEYS = {
   TOKEN_EXPIRES_AT: "nexus_token_expires_at",
   USER_PROFILE: "minddock_user_profile",
   SUBSCRIPTION: "minddock_subscription",
+  DEV_AUTH_BYPASS: "minddock_dev_auth_bypass",
   SIDEPANEL_VIEW: "minddock_sidepanel_view",
   SIDEPANEL_NOTE_DRAFT: "minddock_sidepanel_note_draft",
   NOTEBOOKS_CACHE: "minddock_notebooks_cache",
@@ -41,8 +42,8 @@ export const STORAGE_KEYS = {
 export const PLANS: Record<SubscriptionTier, { price_monthly?: number; price_yearly?: number; limits: PlanLimits }> = {
   free: {
     limits: {
-      imports_per_day: 10,
-      exports_per_day: 10,
+      imports_per_day: 7,
+      exports_per_day: 7,
       prompts_saved: 10,
       prompt_folders: 3,
       source_views: 5,
@@ -54,8 +55,8 @@ export const PLANS: Record<SubscriptionTier, { price_monthly?: number; price_yea
     }
   },
   pro: {
-    price_monthly: 2.99,
-    price_yearly: 1.99,
+    price_monthly: 4.99,
+    price_yearly: 24.99,
     limits: {
       imports_per_day: "unlimited",
       exports_per_day: "unlimited",
@@ -66,13 +67,12 @@ export const PLANS: Record<SubscriptionTier, { price_monthly?: number; price_yea
       collections: "unlimited",
       ai_features: false,
       zettelkasten: false,
-      cloud_sync: true,
-      agile_prompts_basic: true
+      cloud_sync: false
     }
   },
   thinker: {
     price_monthly: 7.99,
-    price_yearly: 5.99,
+    price_yearly: 64.99,
     limits: {
       imports_per_day: "unlimited",
       exports_per_day: "unlimited",
@@ -92,7 +92,7 @@ export const PLANS: Record<SubscriptionTier, { price_monthly?: number; price_yea
   },
   thinker_pro: {
     price_monthly: 14.99,
-    price_yearly: 10.99,
+    price_yearly: 119.99,
     limits: {
       imports_per_day: "unlimited",
       exports_per_day: "unlimited",

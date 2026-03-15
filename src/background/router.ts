@@ -5,20 +5,26 @@ import { renderPdfBase64ViaOffscreen } from "./services/offscreen-pdf-service"
 import { exportService } from "~/services/export-service"
 import { NotebookLMService, type SyncVerificationResult } from "~/services/NotebookLMService"
 import { zettelkastenService } from "~/services/zettelkasten"
-import { threadService } from "~/services/thread-service"
+import { threadService } from "./services/ThreadService"
 import { STORAGE_KEYS } from "~/lib/constants"
 import {
   FIXED_STORAGE_KEYS,
   MESSAGE_ACTIONS,
   type StandardResponse
 } from "~/lib/contracts"
-import { formatChatAsReadableMarkdownV2 } from "~/lib/utils"
+import {
+  formatChatAsReadableMarkdownV2,
+  getFromSecureStorage,
+  setInSecureStorage
+} from "~/lib/utils"
 import type {
   ChromeMessage,
   ChromeMessageResponse,
   Notebook,
   SidePanelLaunchTarget,
-  SidePanelNoteDraft
+  SidePanelNoteDraft,
+  SubscriptionTier,
+  UserProfile
 } from "~/lib/types"
 import {
   buildNotebookAccountKey,
@@ -47,6 +53,14 @@ const RESYNC_PROGRESS_EVENT = "MINDDOCK_RESYNC_PROGRESS"
 const RESYNC_SUCCESS_EVENT = "MINDDOCK_RESYNC_SUCCESS"
 const RESYNC_FLOW_VERSION = "resync-v6"
 const GDOC_SYNC_STEP_DELAY_MS = 320
+const MAX_MESSAGE_FIELD_LENGTH = 160
+const MAX_MESSAGE_PAYLOAD_SIZE = 1_000_000
+const AI_RATE_LIMIT_WINDOW_MS = 60_000
+const AI_RATE_LIMIT_MAX_REQUESTS = 8
+const CHAT_SOURCE_BINDING_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000
+const CHAT_SOURCE_BINDING_MAX_TITLE_LENGTH = 180
+const CHAT_SOURCE_BINDING_MAX_HASH_LENGTH = 128
+const CHAT_SOURCE_BINDING_MAX_KEY_LENGTH = 420
 const BLOCKED_NOTEBOOK_TITLE_KEYS = new Set([
   "conversa",
   "conversas",
@@ -174,8 +188,9 @@ class MessageRouter {
   private readonly pendingNotebookResultKey = "minddock_pending_notebook_result"
   private readonly pendingNotebookErrorKey = "minddock_pending_notebook_error"
   private readonly chatSourceBindingsKey = "minddock_chat_source_bindings"
-  private readonly maxChatSourceBindings = 250
+  private readonly maxChatSourceBindings = 180
   private readonly resyncInFlight = new Set<string>()
+  private readonly aiRateLimitHits = new Map<string, number[]>()
   private createNotebookRequestLocked = false
 
   constructor() {
@@ -200,6 +215,7 @@ class MessageRouter {
     this.register("MINDDOCK_GET_AUTH", this.handleAuthGetStatus)
     this.register("MINDDOCK_SIGN_OUT", this.handleAuthSignOut)
     this.register("MINDDOCK_SIGN_IN", this.handleLegacySignIn)
+    this.register("MINDDOCK_DEV_BYPASS_SIGN_IN", this.handleDevBypassSignIn)
 
     this.register("MINDDOCK_GET_SOURCE_CONTENT", this.handleGetSourceContent)
     this.register("MINDDOCK_ADD_SOURCE", this.handleAddSource)
@@ -222,10 +238,275 @@ class MessageRouter {
     this.register(MESSAGE_ACTIONS.THREAD_SAVE_MESSAGES, this.handleThreadSaveMessages)
     this.register(MESSAGE_ACTIONS.OPEN_SIDEPANEL, this.handleOpenSidePanel)
     this.register(MESSAGE_ACTIONS.CMD_RENDER_PDF_OFFSCREEN, this.handleRenderPdfOffscreen)
+
+    void this.compactChatSourceBindings()
   }
 
   private register(command: string, handler: Handler): void {
     this.handlers.set(command, handler.bind(this))
+  }
+
+  private asRecord(value: unknown): Record<string, unknown> | null {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return null
+    }
+    return value as Record<string, unknown>
+  }
+
+  private normalizeBoundedString(value: unknown, maxLength: number): string | null {
+    if (typeof value !== "string") {
+      return null
+    }
+    const normalized = value.trim()
+    if (!normalized || normalized.length > maxLength) {
+      return null
+    }
+    return normalized
+  }
+
+  private validateIncomingMessageEnvelope(message: unknown): string | null {
+    const record = this.asRecord(message)
+    if (!record) {
+      return "Mensagem invalida: payload de runtime deve ser objeto."
+    }
+
+    for (const field of ["command", "action", "intent"] as const) {
+      const value = record[field]
+      if (value === undefined) {
+        continue
+      }
+      if (typeof value !== "string") {
+        return `Mensagem invalida: campo '${field}' deve ser string.`
+      }
+      if (value.trim().length > MAX_MESSAGE_FIELD_LENGTH) {
+        return `Mensagem invalida: campo '${field}' excede limite.`
+      }
+    }
+
+    for (const field of ["payload", "tokens"] as const) {
+      const value = record[field]
+      if (value === undefined) {
+        continue
+      }
+      if (typeof value === "function" || typeof value === "symbol" || typeof value === "bigint") {
+        return `Mensagem invalida: campo '${field}' contem tipo nao suportado.`
+      }
+
+      try {
+        const serialized = JSON.stringify(value)
+        if ((serialized?.length ?? 0) > MAX_MESSAGE_PAYLOAD_SIZE) {
+          return `Mensagem invalida: campo '${field}' excede limite de tamanho.`
+        }
+      } catch {
+        return `Mensagem invalida: campo '${field}' nao serializavel.`
+      }
+    }
+
+    return null
+  }
+
+  private validateMessagePayload(action: string, payload: unknown): string | null {
+    const objectPayloadActions = new Set<string>([
+      MESSAGE_ACTIONS.STORE_SESSION_TOKENS,
+      "MINDDOCK_SAVE_TOKENS",
+      MESSAGE_ACTIONS.CMD_AUTH_SIGN_IN,
+      "MINDDOCK_ADD_SOURCE",
+      "MINDDOCK_IMPORT_AI_CHAT",
+      "PROTOCOL_APPEND_SOURCE",
+      "MINDDOCK_IMPROVE_PROMPT",
+      MESSAGE_ACTIONS.PROMPT_OPTIONS,
+      "MINDDOCK_ATOMIZE_NOTE",
+      MESSAGE_ACTIONS.ATOMIZE_PREVIEW,
+      MESSAGE_ACTIONS.SAVE_ATOMIC_NOTES,
+      "MINDDOCK_EXPORT_SOURCES",
+      "MINDDOCK_HIGHLIGHT_SNIPE",
+      MESSAGE_ACTIONS.THREAD_LIST,
+      MESSAGE_ACTIONS.THREAD_CREATE,
+      MESSAGE_ACTIONS.THREAD_DELETE,
+      MESSAGE_ACTIONS.THREAD_RENAME,
+      MESSAGE_ACTIONS.THREAD_MESSAGES,
+      MESSAGE_ACTIONS.THREAD_SAVE_MESSAGES
+    ])
+
+    if (objectPayloadActions.has(action) && !this.asRecord(payload)) {
+      return `Payload invalido para ${action}: objeto esperado.`
+    }
+
+    switch (action) {
+      case MESSAGE_ACTIONS.STORE_SESSION_TOKENS:
+      case "MINDDOCK_SAVE_TOKENS": {
+        const record = this.asRecord(payload)
+        if (!record) return `Payload invalido para ${action}.`
+        const nested = this.asRecord(record.tokens) ?? {}
+        const at =
+          this.normalizeBoundedString(record.at, 8192) ??
+          this.normalizeBoundedString(record.atToken, 8192) ??
+          this.normalizeBoundedString(nested.at, 8192) ??
+          this.normalizeBoundedString(nested.atToken, 8192)
+        const bl =
+          this.normalizeBoundedString(record.bl, 8192) ??
+          this.normalizeBoundedString(record.blToken, 8192) ??
+          this.normalizeBoundedString(nested.bl, 8192) ??
+          this.normalizeBoundedString(nested.blToken, 8192)
+        if (!at || !bl) {
+          return `Payload invalido para ${action}: at/bl obrigatorios.`
+        }
+        return null
+      }
+
+      case MESSAGE_ACTIONS.CMD_AUTH_SIGN_IN: {
+        const record = this.asRecord(payload)
+        if (!record) return `Payload invalido para ${action}.`
+        if (!this.normalizeBoundedString(record.email, 320)) {
+          return "Payload invalido para login: email obrigatorio."
+        }
+        if (!this.normalizeBoundedString(record.password, 2048)) {
+          return "Payload invalido para login: senha obrigatoria."
+        }
+        return null
+      }
+
+      case "MINDDOCK_SIGN_IN": {
+        if (payload === undefined || payload === null) {
+          return null
+        }
+        const record = this.asRecord(payload)
+        if (!record) return `Payload invalido para ${action}.`
+        const email = this.normalizeBoundedString(record.email, 320)
+        const password = this.normalizeBoundedString(record.password, 2048)
+        if ((email && !password) || (!email && password)) {
+          return "Payload invalido para login legado: email e senha devem ser informados juntos."
+        }
+        return null
+      }
+
+      case "MINDDOCK_IMPROVE_PROMPT":
+      case MESSAGE_ACTIONS.PROMPT_OPTIONS: {
+        const record = this.asRecord(payload)
+        if (!record || !this.normalizeBoundedString(record.prompt, 20_000)) {
+          return `Payload invalido para ${action}: prompt obrigatorio.`
+        }
+        return null
+      }
+
+      case "MINDDOCK_ATOMIZE_NOTE":
+      case MESSAGE_ACTIONS.ATOMIZE_PREVIEW: {
+        const record = this.asRecord(payload)
+        if (!record || !this.normalizeBoundedString(record.content, 120_000)) {
+          return `Payload invalido para ${action}: content obrigatorio.`
+        }
+        return null
+      }
+
+      case MESSAGE_ACTIONS.SAVE_ATOMIC_NOTES: {
+        const record = this.asRecord(payload)
+        const notes = Array.isArray(record?.notes) ? record.notes : []
+        if (notes.length === 0 || notes.length > 200) {
+          return `Payload invalido para ${action}: quantidade de notas invalida.`
+        }
+        return null
+      }
+
+      case MESSAGE_ACTIONS.THREAD_LIST: {
+        const record = this.asRecord(payload)
+        if (
+          !record ||
+          !this.normalizeBoundedString(record.notebookId, 128)
+        ) {
+          return `Payload invalido para ${action}.`
+        }
+        return null
+      }
+
+      case MESSAGE_ACTIONS.THREAD_CREATE: {
+        const record = this.asRecord(payload)
+        const topic = record ? this.normalizeBoundedString(record.topic, 120) : null
+        const icon = record ? this.normalizeBoundedString(record.icon, 32) : null
+        if (
+          !record ||
+          !this.normalizeBoundedString(record.notebookId, 128) ||
+          !this.normalizeBoundedString(record.name, 120) ||
+          (record.topic !== undefined && record.topic !== null && !topic) ||
+          (record.icon !== undefined && record.icon !== null && !icon)
+        ) {
+          return `Payload invalido para ${action}.`
+        }
+        return null
+      }
+
+      case MESSAGE_ACTIONS.THREAD_DELETE:
+      case MESSAGE_ACTIONS.THREAD_MESSAGES: {
+        const record = this.asRecord(payload)
+        if (!record || !this.normalizeBoundedString(record.threadId, 128)) {
+          return `Payload invalido para ${action}.`
+        }
+        return null
+      }
+
+      case MESSAGE_ACTIONS.THREAD_RENAME: {
+        const record = this.asRecord(payload)
+        if (
+          !record ||
+          !this.normalizeBoundedString(record.threadId, 128) ||
+          !this.normalizeBoundedString(record.name, 120)
+        ) {
+          return `Payload invalido para ${action}.`
+        }
+        return null
+      }
+
+      case MESSAGE_ACTIONS.THREAD_SAVE_MESSAGES: {
+        const record = this.asRecord(payload)
+        if (
+          !record ||
+          !this.normalizeBoundedString(record.threadId, 128) ||
+          !Array.isArray(record.messages)
+        ) {
+          return `Payload invalido para ${action}.`
+        }
+        return null
+      }
+
+      case "MINDDOCK_ADD_SOURCE": {
+        const record = this.asRecord(payload)
+        if (
+          !record ||
+          !this.normalizeBoundedString(record.notebookId, 128) ||
+          !this.normalizeBoundedString(record.title, 280) ||
+          !this.normalizeBoundedString(record.content, 120_000)
+        ) {
+          return `Payload invalido para ${action}.`
+        }
+        return null
+      }
+
+      case "MINDDOCK_EXPORT_SOURCES": {
+        const record = this.asRecord(payload)
+        const format = this.normalizeBoundedString(record?.format, 16)
+        const sources = Array.isArray(record?.sources) ? record.sources : null
+        if (!format || !sources) {
+          return `Payload invalido para ${action}.`
+        }
+        if (!["markdown", "txt", "pdf", "json"].includes(format)) {
+          return `Payload invalido para ${action}: formato nao suportado.`
+        }
+        return null
+      }
+
+      case "MINDDOCK_HIGHLIGHT_SNIPE": {
+        const record = this.asRecord(payload)
+        if (!record) return `Payload invalido para ${action}.`
+        const content = this.normalizeBoundedString(record.content, 120_000)
+        const text = this.normalizeBoundedString(record.text, 120_000)
+        if (!content && !text) {
+          return `Payload invalido para ${action}: content/text obrigatorio.`
+        }
+        return null
+      }
+
+      default:
+        return null
+    }
   }
 
   async handle(
@@ -233,6 +514,12 @@ class MessageRouter {
     sender: MessageSender,
     sendResponse: (response: ChromeMessageResponse) => void
   ): Promise<void> {
+    const envelopeError = this.validateIncomingMessageEnvelope(message)
+    if (envelopeError) {
+      sendResponse(this.normalizeResponse(this.fail(envelopeError)))
+      return
+    }
+
     const action = this.resolveIncomingAction(message)
     const handler = this.handlers.get(action)
     if (!handler) {
@@ -247,6 +534,11 @@ class MessageRouter {
 
     try {
       const payload = this.resolveIncomingPayload(message, action)
+      const payloadValidationError = this.validateMessagePayload(action, payload)
+      if (payloadValidationError) {
+        sendResponse(this.normalizeResponse(this.fail(payloadValidationError)))
+        return
+      }
       const result = await handler(payload, sender)
       sendResponse(this.normalizeResponse(result))
     } catch (err) {
@@ -371,7 +663,7 @@ class MessageRouter {
       return "RESYNC_INSERT_INVALID"
     }
 
-    if (/TIMEOUT|\d+s|RESYNC_ABORTED/i.test(normalizedMessage)) {
+    if (/TIMEOUT|RESYNC_ABORTED|\b\d+s\b/i.test(normalizedMessage)) {
       return "RESYNC_TIMEOUT"
     }
 
@@ -520,12 +812,15 @@ class MessageRouter {
       return this.fail("Payload invalido para MINDDOCK_STORE_SESSION_TOKENS: at/bl obrigatorios.")
     }
 
+    await Promise.all([
+      setInSecureStorage(FIXED_STORAGE_KEYS.AT_TOKEN, at),
+      setInSecureStorage(FIXED_STORAGE_KEYS.BL_TOKEN, bl),
+      setInSecureStorage(FIXED_STORAGE_KEYS.SESSION_ID, sessionId),
+      setInSecureStorage(FIXED_STORAGE_KEYS.TOKEN_EXPIRES_AT, Date.now() + 60 * 60 * 1000)
+    ])
+
     const storagePatch: Record<string, unknown> = {
-      [FIXED_STORAGE_KEYS.AT_TOKEN]: at,
-      [FIXED_STORAGE_KEYS.BL_TOKEN]: bl,
-      [FIXED_STORAGE_KEYS.SESSION_ID]: sessionId,
-      [FIXED_STORAGE_KEYS.AUTH_USER]: authUser,
-      [FIXED_STORAGE_KEYS.TOKEN_EXPIRES_AT]: Date.now() + 60 * 60 * 1000
+      [FIXED_STORAGE_KEYS.AUTH_USER]: authUser
     }
     if (accountEmail) {
       storagePatch[this.notebookAccountEmailKey] = accountEmail
@@ -548,6 +843,7 @@ class MessageRouter {
     confirmed: boolean
   }> {
     try {
+      const secureSession = await getFromSecureStorage<Record<string, unknown>>("notebooklm_session")
       const snapshot = await chrome.storage.local.get([
         FIXED_STORAGE_KEYS.AUTH_USER,
         this.notebookAccountEmailKey,
@@ -558,7 +854,7 @@ class MessageRouter {
       const fixedAuthUser = normalizeAuthUser(snapshot[FIXED_STORAGE_KEYS.AUTH_USER])
       const fixedAccountEmail = normalizeAccountEmail(snapshot[this.notebookAccountEmailKey])
 
-      const session = snapshot["notebooklm_session"]
+      const session = secureSession ?? snapshot["notebooklm_session"]
       const sessionTokens =
         session && typeof session === "object"
           ? (session as { authUser?: unknown; accountEmail?: unknown })
@@ -696,6 +992,50 @@ class MessageRouter {
       isAuthenticated: !!user,
       user
     })
+  }
+
+  private async handleDevBypassSignIn(payload: unknown): Promise<StandardResponse> {
+    const requestedTier = String((payload as { tier?: unknown })?.tier ?? "")
+      .trim()
+      .toLowerCase()
+    const tier: SubscriptionTier = requestedTier === "thinker_pro" ? "thinker_pro" : "thinker"
+    const now = new Date().toISOString()
+
+    const user: UserProfile = {
+      id: "dev-thinker-test-user",
+      email: "thinker.test@minddock.local",
+      displayName: "Thinker Test",
+      subscriptionTier: tier,
+      subscriptionStatus: "active",
+      createdAt: now,
+      updatedAt: now
+    }
+
+    await chrome.storage.local.set({
+      [STORAGE_KEYS.USER_PROFILE]: user,
+      [STORAGE_KEYS.DEV_AUTH_BYPASS]: {
+        enabled: true,
+        tier,
+        token: "dev-bypass-token",
+        activatedAt: now
+      }
+    })
+
+    try {
+      chrome.runtime.sendMessage(
+        {
+          command: "MINDDOCK_AUTH_CHANGED",
+          payload: { user }
+        },
+        () => {
+          void chrome.runtime.lastError
+        }
+      )
+    } catch {
+      // Ignore listener failures in transient contexts.
+    }
+
+    return this.ok({ isAuthenticated: true, user, bypass: true })
   }
 
   private async handleGetNotebooks(): Promise<StandardResponse> {
@@ -1593,14 +1933,14 @@ class MessageRouter {
       if (requestedResync && Date.now() >= resyncDeadlineTs) {
         return this.fail(
           "RESYNC_TIMEOUT",
-            this.buildResyncErrorPayload(
-              resolvedNotebookId,
-              targetSourceToSwap,
-              resyncStartTs,
-              `Re-sync excedeu o limite de ${RESYNC_TOTAL_BUDGET_SECONDS}s durante a fase de validacao.`
-            )
+          this.buildResyncErrorPayload(
+            resolvedNotebookId,
+            targetSourceToSwap,
+            resyncStartTs,
+            `Re-sync excedeu o limite de ${RESYNC_TOTAL_BUDGET_SECONDS}s durante a fase de validacao.`
           )
-        }
+        )
+      }
 
       let sourceId = ""
       if (requestedResync && targetSourceToSwap) {
@@ -2058,11 +2398,67 @@ class MessageRouter {
     return this.ok({ tier })
   }
 
+  private async ensureAuthenticatedForAi(): Promise<StandardResponse | null> {
+    const token = await authManager.getAccessToken()
+    if (!token) {
+      return this.fail("Nao autenticado.")
+    }
+    return null
+  }
+
+  private async enforceAiRateLimit(): Promise<StandardResponse | null> {
+    const now = Date.now()
+
+    for (const [key, timestamps] of this.aiRateLimitHits.entries()) {
+      const fresh = timestamps.filter((timestamp) => now - timestamp < AI_RATE_LIMIT_WINDOW_MS)
+      if (fresh.length === 0) {
+        this.aiRateLimitHits.delete(key)
+      } else {
+        this.aiRateLimitHits.set(key, fresh)
+      }
+    }
+
+    const user = await authManager.getCurrentUser()
+    const key = String(user?.id ?? "").trim()
+    if (!key) {
+      return this.fail("Nao autenticado.")
+    }
+
+    const hits = this.aiRateLimitHits.get(key) ?? []
+    if (hits.length >= AI_RATE_LIMIT_MAX_REQUESTS) {
+      const retryAfterSeconds = Math.max(
+        1,
+        Math.ceil((AI_RATE_LIMIT_WINDOW_MS - (now - hits[0])) / 1000)
+      )
+      return this.fail(
+        `Muitas requisicoes de IA em pouco tempo. Aguarde ${retryAfterSeconds}s e tente novamente.`
+      )
+    }
+
+    hits.push(now)
+    this.aiRateLimitHits.set(key, hits)
+    return null
+  }
+
+
   private async handleImprovePrompt(payload: unknown): Promise<StandardResponse> {
+    const authGuard = await this.ensureAuthenticatedForAi()
+    if (authGuard) {
+      return authGuard
+    }
+
+    const rateGuard = await this.enforceAiRateLimit()
+    if (rateGuard) {
+      return rateGuard
+    }
+
     const { prompt } = payload as { prompt: string }
     const canUseAI = await subscriptionManager.canUseFeature("ai_features")
     if (!canUseAI) {
-      return this.fail("Melhoria de prompts requer plano Thinker ou superior.")
+      return this.fail("Melhoria de prompts requer plano Thinker ou superior.", {
+        tier_required: "thinker",
+        upgrade_url: "https://minddock.app/#pricing"
+      })
     }
     const canCallAI = await storageManager.checkUsageLimit(
       "aiCalls",
@@ -2083,30 +2479,52 @@ class MessageRouter {
   }
 
   private async handlePromptOptions(payload: unknown): Promise<StandardResponse> {
+    const authGuard = await this.ensureAuthenticatedForAi()
+    if (authGuard) {
+      return authGuard
+    }
+
+    const rateGuard = await this.enforceAiRateLimit()
+    if (rateGuard) {
+      return rateGuard
+    }
+
     const { prompt } = payload as { prompt: string }
-    
-    // TODO: Descomentar quando tiver a chave da API do Claude
-    // const options = await aiService.generatePromptOptions(prompt)
-    // return this.ok({ options })
-    
-    return this.fail(
-      "Funcionalidade de opcoes de prompt temporariamente desabilitada no cliente. Use um proxy server-side para IA."
+    const canUseAI = await subscriptionManager.canUseFeature("ai_features")
+    if (!canUseAI) {
+      return this.fail("Geração de opções requer plano Thinker ou superior.", {
+        tier_required: "thinker",
+        upgrade_url: "https://minddock.app/#pricing"
+      })
+    }
+    const canCallAI = await storageManager.checkUsageLimit(
+      "aiCalls",
+      (await subscriptionManager.getLimits()).ai_calls_per_day ?? 0
     )
+    if (!canCallAI) {
+      return this.fail("Limite de chamadas de IA atingido para hoje.")
+    }
+    const options = await aiService.generatePromptOptions(prompt)
+    await storageManager.incrementUsage("aiCalls")
+    return this.ok({ options })
   }
 
   // ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ Focus Threads ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬
 
   private async handleThreadList(payload: unknown): Promise<StandardResponse> {
-    const { userId, notebookId } = payload as { userId: string; notebookId: string }
-    const threads = await threadService.getThreads(userId, notebookId)
+    const { notebookId } = payload as { notebookId: string }
+    const threads = await threadService.getThreads(notebookId)
     return this.ok({ threads })
   }
 
   private async handleThreadCreate(payload: unknown): Promise<StandardResponse> {
-    const { userId, notebookId, name } = payload as {
-      userId: string; notebookId: string; name: string
+    const { notebookId, name, topic, icon } = payload as {
+      notebookId: string
+      name: string
+      topic?: string
+      icon?: string
     }
-    const thread = await threadService.createThread(userId, notebookId, name)
+    const thread = await threadService.createThread(notebookId, name, { topic, icon })
     return this.ok({ thread })
   }
 
@@ -2189,25 +2607,42 @@ class MessageRouter {
   }
 
   private async handleAtomizeNote(payload: unknown): Promise<StandardResponse> {
+    const authGuard = await this.ensureAuthenticatedForAi()
+    if (authGuard) {
+      return authGuard
+    }
+
+    const rateGuard = await this.enforceAiRateLimit()
+    if (rateGuard) {
+      return rateGuard
+    }
+
     const { content } = payload as { content: string }
     const canUseZettel = await subscriptionManager.canUseFeature("zettelkasten")
     if (!canUseZettel) {
-      return this.fail("Zettelkasten requer plano Thinker ou superior.")
+      return this.fail("Zettelkasten requer plano Thinker ou superior.", {
+        tier_required: "thinker",
+        upgrade_url: "https://minddock.app/#pricing"
+      })
     }
-    
-    // TODO: Descomentar quando tiver a chave da API do Claude
-    // const notes = await aiService.atomizeContent(content)
-    // const user = await authManager.getCurrentUser()
-    // if (!user) {
-    //   return this.fail("Nao autenticado.")
-    // }
-    // await zettelkastenService.saveAtomicNotes(user.id, notes)
-    // await storageManager.incrementUsage("aiCalls")
-    // return this.ok({ count: notes.length })
-    
-    return this.fail(
-      "Funcionalidade de atomizacao temporariamente desabilitada no cliente. Use um proxy server-side para IA."
+
+    const canCallAI = await storageManager.checkUsageLimit(
+      "aiCalls",
+      (await subscriptionManager.getLimits()).ai_calls_per_day ?? 0
     )
+    if (!canCallAI) {
+      return this.fail("Limite de chamadas de IA atingido para hoje.")
+    }
+
+    const user = await authManager.getCurrentUser()
+    if (!user) {
+      return this.fail("Nao autenticado.")
+    }
+
+    const notes = await aiService.atomizeContent(content)
+    await zettelkastenService.saveAtomicNotes(user.id, notes)
+    await storageManager.incrementUsage("aiCalls")
+    return this.ok({ count: notes.length })
   }
 
   private async handleExportSources(payload: unknown): Promise<StandardResponse> {
@@ -2273,18 +2708,40 @@ class MessageRouter {
   }
 
   private async handleAtomizePreview(payload: unknown): Promise<StandardResponse> {
+    const authGuard = await this.ensureAuthenticatedForAi()
+    if (authGuard) {
+      return authGuard
+    }
+
+    const rateGuard = await this.enforceAiRateLimit()
+    if (rateGuard) {
+      return rateGuard
+    }
+
     const { content } = payload as { content: string }
     if (!content?.trim()) {
       return this.fail("Conteudo vazio para atomizacao.")
     }
-    
-    // TODO: Descomentar quando tiver a chave da API do Claude
-    // const notes = await aiService.atomizeContent(content)
-    // return this.ok({ notes })
-    
-    return this.fail(
-      "Funcionalidade de atomizacao temporariamente desabilitada no cliente. Use um proxy server-side para IA."
+
+    const canUseZettel = await subscriptionManager.canUseFeature("zettelkasten")
+    if (!canUseZettel) {
+      return this.fail("Zettelkasten requer plano Thinker ou superior.", {
+        tier_required: "thinker",
+        upgrade_url: "https://minddock.app/#pricing"
+      })
+    }
+
+    const canCallAI = await storageManager.checkUsageLimit(
+      "aiCalls",
+      (await subscriptionManager.getLimits()).ai_calls_per_day ?? 0
     )
+    if (!canCallAI) {
+      return this.fail("Limite de chamadas de IA atingido para hoje.")
+    }
+
+    const notes = await aiService.atomizeContent(content)
+    await storageManager.incrementUsage("aiCalls")
+    return this.ok({ notes })
   }
 
   private async handleSaveAtomicNotes(payload: unknown): Promise<StandardResponse> {
@@ -2343,8 +2800,13 @@ class MessageRouter {
       return {}
     }
 
+    const now = Date.now()
     const output: Record<string, ChatSourceBindingRecord> = {}
     for (const [key, candidate] of Object.entries(rawValue as Record<string, unknown>)) {
+      if (!key || key.length > CHAT_SOURCE_BINDING_MAX_KEY_LENGTH) {
+        continue
+      }
+
       if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
         continue
       }
@@ -2354,14 +2816,26 @@ class MessageRouter {
         continue
       }
 
+      const updatedAtRaw = String((candidate as { updatedAt?: unknown }).updatedAt ?? "").trim()
+      const updatedAtMs = Date.parse(updatedAtRaw)
+      const isStale =
+        !Number.isFinite(updatedAtMs) || now - updatedAtMs > CHAT_SOURCE_BINDING_MAX_AGE_MS
+      if (isStale) {
+        continue
+      }
+
+      const sourceTitle = String((candidate as { sourceTitle?: unknown }).sourceTitle ?? "")
+        .trim()
+        .slice(0, CHAT_SOURCE_BINDING_MAX_TITLE_LENGTH)
+      const lastSyncHash = String((candidate as { lastSyncHash?: unknown }).lastSyncHash ?? "")
+        .trim()
+        .slice(0, CHAT_SOURCE_BINDING_MAX_HASH_LENGTH)
+
       output[key] = {
         sourceId,
-        sourceTitle: String((candidate as { sourceTitle?: unknown }).sourceTitle ?? "").trim(),
-        lastSyncHash:
-          String((candidate as { lastSyncHash?: unknown }).lastSyncHash ?? "").trim() || undefined,
-        updatedAt:
-          String((candidate as { updatedAt?: unknown }).updatedAt ?? "").trim() ||
-          new Date(0).toISOString()
+        sourceTitle,
+        lastSyncHash: lastSyncHash || undefined,
+        updatedAt: new Date(updatedAtMs).toISOString()
       }
     }
 
@@ -2371,8 +2845,42 @@ class MessageRouter {
   private async writeChatSourceBindingsMap(
     bindings: Record<string, ChatSourceBindingRecord>
   ): Promise<void> {
+    const now = Date.now()
     const trimmedBindings = Object.fromEntries(
       Object.entries(bindings)
+        .filter(([key, value]) => {
+          if (!key || key.length > CHAT_SOURCE_BINDING_MAX_KEY_LENGTH) {
+            return false
+          }
+
+          const sourceId = String(value?.sourceId ?? "").trim()
+          if (!sourceId) {
+            return false
+          }
+
+          const updatedAtMs = Date.parse(String(value?.updatedAt ?? "").trim())
+          if (!Number.isFinite(updatedAtMs) || now - updatedAtMs > CHAT_SOURCE_BINDING_MAX_AGE_MS) {
+            return false
+          }
+
+          return true
+        })
+        .map(
+          ([key, value]): [string, ChatSourceBindingRecord] => [
+            key,
+            {
+              sourceId: String(value.sourceId ?? "").trim(),
+              sourceTitle: String(value.sourceTitle ?? "")
+                .trim()
+                .slice(0, CHAT_SOURCE_BINDING_MAX_TITLE_LENGTH),
+              lastSyncHash:
+                String(value.lastSyncHash ?? "")
+                  .trim()
+                  .slice(0, CHAT_SOURCE_BINDING_MAX_HASH_LENGTH) || undefined,
+              updatedAt: new Date(value.updatedAt).toISOString()
+            }
+          ]
+        )
         .sort((left, right) => {
           const leftTime = Date.parse(left[1].updatedAt)
           const rightTime = Date.parse(right[1].updatedAt)
@@ -2387,6 +2895,15 @@ class MessageRouter {
     await chrome.storage.local.set({
       [this.chatSourceBindingsKey]: trimmedBindings
     })
+  }
+
+  private async compactChatSourceBindings(): Promise<void> {
+    try {
+      const bindings = await this.readChatSourceBindingsMap()
+      await this.writeChatSourceBindingsMap(bindings)
+    } catch (error) {
+      console.warn("[MindDock] Falha ao compactar chatSourceBindings.", error)
+    }
   }
 
   private async readChatSourceBinding(url: string, notebookId: string): Promise<string | null> {
@@ -2472,8 +2989,10 @@ class MessageRouter {
     const normalizedLastSyncHash = String(lastSyncHash ?? "").trim()
     const nextRecord: ChatSourceBindingRecord = {
       sourceId: normalizedSourceId,
-      sourceTitle: String(sourceTitle ?? "").trim(),
-      lastSyncHash: normalizedLastSyncHash || undefined,
+      sourceTitle: String(sourceTitle ?? "")
+        .trim()
+        .slice(0, CHAT_SOURCE_BINDING_MAX_TITLE_LENGTH),
+      lastSyncHash: normalizedLastSyncHash.slice(0, CHAT_SOURCE_BINDING_MAX_HASH_LENGTH) || undefined,
       updatedAt: new Date().toISOString()
     }
     for (const key of keys) {

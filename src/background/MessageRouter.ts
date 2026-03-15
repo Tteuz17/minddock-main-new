@@ -12,7 +12,7 @@ import {
   resolveActiveSessions,
   type NotebookProbeAccountResult
 } from "~/services/notebookDiscoveryService"
-import { formatChatAsReadableMarkdownV2 } from "~/lib/utils"
+import { formatChatAsReadableMarkdownV2, getFromSecureStorage } from "~/lib/utils"
 import {
   NOTEBOOK_ACCOUNT_DEFAULT,
   buildNotebookAccountKey,
@@ -487,6 +487,7 @@ async function resolveNotebookAccountScope(): Promise<{
   confirmed: boolean
 }> {
   try {
+    const secureSession = await getFromSecureStorage<Record<string, unknown>>(TOKEN_STORAGE_KEY)
     const snapshot = await chrome.storage.local.get([
       AUTH_USER_KEY,
       NOTEBOOK_ACCOUNT_EMAIL_KEY,
@@ -496,7 +497,7 @@ async function resolveNotebookAccountScope(): Promise<{
     const fixedAccountEmail = normalizeAccountEmail(snapshot[NOTEBOOK_ACCOUNT_EMAIL_KEY])
     const fromFixed = normalizeAuthUser(snapshot[AUTH_USER_KEY])
 
-    const session = snapshot[TOKEN_STORAGE_KEY]
+    const session = secureSession ?? snapshot[TOKEN_STORAGE_KEY]
     const sessionAccountEmail =
       session && typeof session === "object"
         ? normalizeAccountEmail((session as { accountEmail?: unknown }).accountEmail)

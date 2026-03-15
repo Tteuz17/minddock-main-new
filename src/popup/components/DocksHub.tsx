@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react"
+import { useState, useCallback } from "react"
 import { motion, AnimatePresence } from "framer-motion"
 import {
   ArrowLeft,
@@ -10,9 +10,9 @@ import {
   Trash2
 } from "lucide-react"
 import { URLS } from "~/lib/constants"
+import { MESSAGE_ACTIONS } from "~/lib/contracts"
 import { useNotebooks } from "~/hooks/useNotebooks"
 import { useAuth } from "~/hooks/useAuth"
-import { threadService } from "~/services/thread-service"
 import type { Thread } from "~/lib/types"
 
 interface DocksHubProps {
@@ -28,16 +28,29 @@ export function DocksHub({ onBack }: DocksHubProps) {
   const [creatingId, setCreatingId] = useState<string | null>(null)
   const [newDockName, setNewDockName] = useState("")
   const [addingTo, setAddingTo] = useState<string | null>(null)
+  const [errorMessage, setErrorMessage] = useState<string | null>(null)
 
   const loadDocks = useCallback(
     async (notebookId: string) => {
       if (!user || docksByNotebook[notebookId]) return
       setLoadingId(notebookId)
+      setErrorMessage(null)
       try {
-        const threads = await threadService.getThreads(user.id, notebookId)
+        const response = await chrome.runtime.sendMessage({
+          command: MESSAGE_ACTIONS.THREAD_LIST,
+          payload: { notebookId }
+        })
+
+        if (!response?.success) {
+          throw new Error(String(response?.error ?? "Falha ao carregar docks."))
+        }
+
+        const payload = (response.payload ?? response.data) as { threads?: Thread[] } | undefined
+        const threads = payload?.threads ?? []
         setDocksByNotebook((prev) => ({ ...prev, [notebookId]: threads }))
-      } catch {
+      } catch (error) {
         setDocksByNotebook((prev) => ({ ...prev, [notebookId]: [] }))
+        setErrorMessage(error instanceof Error ? error.message : "Falha ao carregar docks.")
       } finally {
         setLoadingId(null)
       }
@@ -57,16 +70,31 @@ export function DocksHub({ onBack }: DocksHubProps) {
   const handleCreateDock = async (notebookId: string) => {
     if (!user || !newDockName.trim()) return
     setCreatingId(notebookId)
+    setErrorMessage(null)
     try {
-      const thread = await threadService.createThread(user.id, notebookId, newDockName.trim())
+      const response = await chrome.runtime.sendMessage({
+        command: MESSAGE_ACTIONS.THREAD_CREATE,
+        payload: { notebookId, name: newDockName.trim() }
+      })
+
+      if (!response?.success) {
+        throw new Error(String(response?.error ?? "Falha ao criar dock."))
+      }
+
+      const payload = (response.payload ?? response.data) as { thread?: Thread } | undefined
+      const thread = payload?.thread
+      if (!thread) {
+        throw new Error("Resposta invalida ao criar dock.")
+      }
+
       setDocksByNotebook((prev) => ({
         ...prev,
         [notebookId]: [thread, ...(prev[notebookId] ?? [])]
       }))
       setNewDockName("")
       setAddingTo(null)
-    } catch {
-      // silently fail
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "Falha ao criar dock.")
     } finally {
       setCreatingId(null)
     }
@@ -74,13 +102,21 @@ export function DocksHub({ onBack }: DocksHubProps) {
 
   const handleDeleteDock = async (notebookId: string, threadId: string) => {
     try {
-      await threadService.deleteThread(threadId)
+      setErrorMessage(null)
+      const response = await chrome.runtime.sendMessage({
+        command: MESSAGE_ACTIONS.THREAD_DELETE,
+        payload: { threadId }
+      })
+      if (!response?.success) {
+        throw new Error(String(response?.error ?? "Falha ao remover dock."))
+      }
+
       setDocksByNotebook((prev) => ({
         ...prev,
         [notebookId]: (prev[notebookId] ?? []).filter((t) => t.id !== threadId)
       }))
-    } catch {
-      // silently fail
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "Falha ao remover dock.")
     }
   }
 
@@ -103,6 +139,9 @@ export function DocksHub({ onBack }: DocksHubProps) {
       </div>
 
       <div className="flex-1 overflow-y-auto px-3 pb-4">
+        {errorMessage ? (
+          <p className="mt-2 text-[10px] text-red-400">{errorMessage}</p>
+        ) : null}
         <p className="mt-2 text-[10px] leading-relaxed text-zinc-600">
           Each Dock is an isolated context inside a notebook — separate history, sources, and reasoning.
         </p>

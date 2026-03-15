@@ -1,31 +1,42 @@
 /**
  * Docks bar for NotebookLM.
- * Demo mode is local-only so the UI works for recording without saving to Supabase.
+ * Uses persisted docks via the extension background router.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react"
 import { AnimatePresence, motion } from "framer-motion"
 import {
   ArrowUpRight,
+  BookOpen,
+  Briefcase,
   ChevronDown,
   ChevronUp,
   FileText,
+  Folder,
   Hash,
+  Lightbulb,
   Loader2,
   MessageSquare,
   Plus,
+  RefreshCw,
+  Sparkles,
+  Target,
   Trash2,
   Wand2,
-  X
+  X,
+  type LucideIcon
 } from "lucide-react"
 
 import { useAuth } from "~/hooks/useAuth"
 import { MESSAGE_ACTIONS } from "~/lib/contracts"
 import type { Thread, ThreadMessage } from "~/lib/types"
-import { captureVisibleMessages, triggerNotebookNewConversation } from "./sourceDom"
+import {
+  captureVisibleMessages,
+  triggerNotebookDeleteConversationHistory
+} from "./sourceDom"
 
 const MAX_VISIBLE = 3
-const DOCKS_DEMO_MODE = true
+const DOCKS_DEMO_MODE = false
 const DEMO_DOCKS_STORAGE_KEY_PREFIX = "minddock:docks-demo"
 const COMPOSER_SELECTORS = [
   "textarea",
@@ -37,6 +48,42 @@ const MINDDOCK_LOGO_SRC = new URL(
   "../../public/images/logo/logo minddock sem fundo.png",
   import.meta.url
 ).href
+
+type DockIconKey = "hash" | "folder" | "target" | "lightbulb" | "book" | "briefcase" | "sparkles"
+
+const DEFAULT_DOCK_ICON: DockIconKey = "hash"
+
+const DOCK_ICON_OPTIONS: Array<{ value: DockIconKey; label: string; Icon: LucideIcon }> = [
+  { value: "hash", label: "General", Icon: Hash },
+  { value: "folder", label: "Organize", Icon: Folder },
+  { value: "target", label: "Goal", Icon: Target },
+  { value: "lightbulb", label: "Ideas", Icon: Lightbulb },
+  { value: "book", label: "Study", Icon: BookOpen },
+  { value: "briefcase", label: "Work", Icon: Briefcase },
+  { value: "sparkles", label: "Creative", Icon: Sparkles }
+]
+
+function normalizeDockTopic(value: string): string {
+  return String(value ?? "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .slice(0, 120)
+}
+
+function normalizeDockIcon(value: unknown): DockIconKey {
+  const normalized = String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "-")
+
+  const isKnown = DOCK_ICON_OPTIONS.some((option) => option.value === normalized)
+  return isKnown ? (normalized as DockIconKey) : DEFAULT_DOCK_ICON
+}
+
+function resolveDockIconOption(value: unknown): { value: DockIconKey; label: string; Icon: LucideIcon } {
+  const normalized = normalizeDockIcon(value)
+  return DOCK_ICON_OPTIONS.find((option) => option.value === normalized) ?? DOCK_ICON_OPTIONS[0]
+}
 
 function isVisibleElement(element: HTMLElement): boolean {
   if (!element.isConnected || element.offsetParent === null) {
@@ -150,6 +197,253 @@ function extractDockContext(messages: ThreadMessage[]): {
     insight: truncateText(lastAssistantMessage || "No saved assistant reply.", 420),
     transcript
   }
+}
+
+function inferPreferredLanguage(messages: ThreadMessage[]): "Portuguese" | "English" | "Mixed" {
+  const fullText = messages.map((message) => message.content).join("\n").toLowerCase()
+  const portugueseSignals = [
+    " você ",
+    " para ",
+    " como ",
+    " que ",
+    " não ",
+    " conversa ",
+    " resumo ",
+    "aplique",
+    "estrutur"
+  ]
+  const englishSignals = [
+    " the ",
+    " and ",
+    " with ",
+    " how ",
+    " continue ",
+    " prompt ",
+    "copywriting",
+    "summary"
+  ]
+
+  const countSignals = (signals: string[]) =>
+    signals.reduce((acc, signal) => acc + (fullText.includes(signal) ? 1 : 0), 0)
+
+  const ptScore = countSignals(portugueseSignals)
+  const enScore = countSignals(englishSignals)
+
+  if (Math.abs(ptScore - enScore) <= 1) {
+    return "Mixed"
+  }
+
+  return ptScore > enScore ? "Portuguese" : "English"
+}
+
+function inferLearningStyleSignals(messages: ThreadMessage[]): string[] {
+  const userMessages = messages
+    .filter((message) => message.role === "user")
+    .map((message) => message.content.toLowerCase())
+
+  const signals: string[] = []
+  const hasPattern = (pattern: RegExp) => userMessages.some((content) => pattern.test(content))
+
+  if (hasPattern(/\b(passo a passo|step by step|estrutura|structured|organizado|organized)\b/u)) {
+    signals.push("Prefers structured, step-by-step guidance.")
+  }
+  if (hasPattern(/\b(exemplo|examples?|na prática|practical|aplicação|apply)\b/u)) {
+    signals.push("Learns better with concrete examples and practical application.")
+  }
+  if (hasPattern(/\b(sem enrolação|direto|objetivo|conciso|straight to the point)\b/u)) {
+    signals.push("Values concise and direct responses.")
+  }
+  if (hasPattern(/\b(detalhe|detalhado|deep|profundo|aprofundar)\b/u)) {
+    signals.push("Wants depth and detail when useful.")
+  }
+  if (hasPattern(/\b(continuar|continue|de onde parou|where we left off)\b/u)) {
+    signals.push("Expects continuity and context preservation across sessions.")
+  }
+
+  if (signals.length === 0) {
+    signals.push("No explicit learning-style markers detected; preserve current interaction pattern.")
+  }
+
+  return signals
+}
+
+function buildProfessionalContinuationPrompt(
+  thread: Thread,
+  messages: ThreadMessage[]
+): string {
+  const userMessages = messages.filter((message) => message.role === "user")
+  const assistantMessages = messages.filter((message) => message.role === "assistant")
+  const firstUser = userMessages[0]?.content.trim() || "No first user message found."
+  const latestUser = userMessages[userMessages.length - 1]?.content.trim() || "No latest user message found."
+  const latestAssistant =
+    assistantMessages[assistantMessages.length - 1]?.content.trim() || "No latest assistant response found."
+  const language = inferPreferredLanguage(messages)
+  const learningSignals = inferLearningStyleSignals(messages)
+  const context = extractDockContext(messages)
+  const recentUserQuotes = userMessages
+    .slice(-5)
+    .map((message, index) => `${index + 1}. "${truncateText(message.content, 220)}"`)
+    .join("\n")
+
+  return [
+    `CONTINUITY BRIEF FROM SAVED DOCK: "${thread.name}"`,
+    thread.topic ? `Dock topic: ${thread.topic}` : "Dock topic: not specified",
+    "",
+    "You are continuing an existing conversation. Do not restart from zero.",
+    "",
+    "NON-NEGOTIABLE CONTINUITY RULES:",
+    "1. Preserve every relevant detail from this dock context.",
+    "2. Preserve the user's language, tone, and study style.",
+    "3. Keep the same project direction and avoid generic reset answers.",
+    "4. If information is missing, ask only the minimum clarifying question.",
+    "5. Keep outputs practical, actionable, and easy to execute.",
+    "",
+    "INFERRED USER PROFILE:",
+    `- Preferred language: ${language}`,
+    `- Interaction style signals: ${learningSignals.join(" | ")}`,
+    "",
+    "CONVERSATION MEMORY SNAPSHOT:",
+    `- Initial user intent: ${truncateText(firstUser, 420)}`,
+    `- Latest user intent: ${truncateText(latestUser, 420)}`,
+    `- Latest assistant state: ${truncateText(latestAssistant, 460)}`,
+    `- Core saved insight: ${context.insight}`,
+    "",
+    "RECENT USER VOICE SAMPLES (style anchor):",
+    recentUserQuotes || "No recent user quotes.",
+    "",
+    "TASK NOW:",
+    "1. Start with a 5-bullet continuity checkpoint that proves you understood the full history.",
+    "2. Continue exactly from the last pending point.",
+    "3. Deliver a professional, implementation-ready next step.",
+    "",
+    "FULL TRANSCRIPT (SOURCE OF TRUTH - DO NOT IGNORE):",
+    context.transcript || "No transcript available."
+  ].join("\n")
+}
+
+function buildCompactContinuationPrompt(thread: Thread, messages: ThreadMessage[]): string {
+  const userMessages = messages.filter((message) => message.role === "user")
+  const latestUser = userMessages[userMessages.length - 1]?.content.trim() || "No latest user message found."
+  const context = extractDockContext(messages)
+
+  return [
+    `CONTINUE FROM SAVED DOCK: "${thread.name}"`,
+    thread.topic ? `Topic: ${thread.topic}` : "Topic: not specified",
+    "",
+    "Use this as persistent context and continue from where we stopped:",
+    `- Original intent: ${context.question}`,
+    `- Latest user intent: ${truncateText(latestUser, 320)}`,
+    `- Key insight to preserve: ${context.insight}`,
+    "",
+    "Rules:",
+    "1. Do not restart from zero.",
+    "2. Keep the same language and tone.",
+    "3. Continue with practical next steps.",
+    "",
+    "Short transcript anchor:",
+    truncateText(context.transcript, 2200)
+  ].join("\n")
+}
+
+const MANUAL_USER_LABELS = new Set([
+  "user",
+  "you",
+  "usuario",
+  "usuário",
+  "voce",
+  "você",
+  "eu",
+  "pergunta"
+])
+
+const MANUAL_ASSISTANT_LABELS = new Set([
+  "assistant",
+  "ai",
+  "notebooklm",
+  "minddock",
+  "modelo",
+  "resposta",
+  "bot"
+])
+
+function normalizeManualRoleLabel(value: string): string {
+  return String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, " ")
+}
+
+function waitForUi(delayMs: number): Promise<void> {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, delayMs)
+  })
+}
+
+function parseManualConversationInput(
+  rawValue: string
+): Array<{ role: "user" | "assistant"; content: string }> {
+  const lines = String(rawValue ?? "").replace(/\r/g, "").split("\n")
+  const output: Array<{ role: "user" | "assistant"; content: string }> = []
+
+  let currentRole: "user" | "assistant" | null = null
+  let currentBuffer: string[] = []
+
+  const flush = () => {
+    if (!currentRole) {
+      currentBuffer = []
+      return
+    }
+
+    const content = currentBuffer.join("\n").trim()
+    if (content.length > 0) {
+      output.push({ role: currentRole, content })
+    }
+
+    currentRole = null
+    currentBuffer = []
+  }
+
+  for (const rawLine of lines) {
+    const line = rawLine ?? ""
+    const markerMatch = line.match(/^\s*([A-Za-zÀ-ÿ][\wÀ-ÿ \-]{0,24})\s*[:\-]\s*(.*)$/u)
+
+    if (markerMatch) {
+      const marker = normalizeManualRoleLabel(markerMatch[1] ?? "")
+      const content = String(markerMatch[2] ?? "")
+      const isUser = MANUAL_USER_LABELS.has(marker)
+      const isAssistant = MANUAL_ASSISTANT_LABELS.has(marker)
+
+      if (isUser || isAssistant) {
+        flush()
+        currentRole = isUser ? "user" : "assistant"
+        if (content.trim()) {
+          currentBuffer.push(content)
+        }
+        continue
+      }
+    }
+
+    if (!currentRole && line.trim().length > 0) {
+      // Fallback: sem marcador, salva como resposta única para não perder contexto.
+      currentRole = "assistant"
+    }
+
+    if (currentRole) {
+      currentBuffer.push(line)
+    }
+  }
+
+  flush()
+
+  return output
+    .map((message) => ({
+      role: message.role,
+      content: message.content.trim()
+    }))
+    .filter((message) => message.content.length > 0)
+    .slice(0, 250)
 }
 
 const SAMPLE_DOCKS: Array<{
@@ -299,13 +593,24 @@ function getDemoStorageKey(userId: string, notebookId: string): string {
   return `${DEMO_DOCKS_STORAGE_KEY_PREFIX}:${userId}:${notebookId}`
 }
 
-function buildDemoThread(userId: string, notebookId: string, name: string, index: number): Thread {
+function buildDemoThread(
+  userId: string,
+  notebookId: string,
+  name: string,
+  index: number,
+  options: { topic?: string; icon?: string } = {}
+): Thread {
   const now = new Date().toISOString()
+  const topic = normalizeDockTopic(options.topic ?? "")
+  const icon = normalizeDockIcon(options.icon)
+
   return {
     id: `demo-dock-${notebookId}-${index}-${Date.now()}`,
     userId,
     notebookId,
     name,
+    ...(topic ? { topic } : {}),
+    ...(icon ? { icon } : {}),
     createdAt: now,
     updatedAt: now
   }
@@ -387,22 +692,26 @@ export function FocusThreadsBar() {
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
   const [showCreateModal, setShowCreateModal] = useState(false)
   const [newDockName, setNewDockName] = useState("")
+  const [newDockTopic, setNewDockTopic] = useState("")
+  const [newDockIcon, setNewDockIcon] = useState<DockIconKey>(DEFAULT_DOCK_ICON)
   const [isCreating, setIsCreating] = useState(false)
   const [createError, setCreateError] = useState<string | null>(null)
+  const [showPasteModal, setShowPasteModal] = useState(false)
+  const [pasteInputValue, setPasteInputValue] = useState("")
+  const [pasteError, setPasteError] = useState<string | null>(null)
+  const [isSavingPastedConversation, setIsSavingPastedConversation] = useState(false)
+  const [isUpdatingDockSnapshot, setIsUpdatingDockSnapshot] = useState(false)
+  const [showClearConversationModal, setShowClearConversationModal] = useState(false)
+  const [clearConversationContext, setClearConversationContext] = useState<{ dockName: string } | null>(null)
+  const [expandAllMessages, setExpandAllMessages] = useState(false)
   const [actionFeedback, setActionFeedback] = useState<{
     type: "success" | "error"
     text: string
   } | null>(null)
   const createInputRef = useRef<HTMLInputElement | null>(null)
+  const pasteInputRef = useRef<HTMLTextAreaElement | null>(null)
   const actionFeedbackTimeoutRef = useRef<number | null>(null)
-
-  const openNativeNewConversation = useCallback(() => {
-    ;[120, 360, 720].forEach((delay) => {
-      window.setTimeout(() => {
-        void triggerNotebookNewConversation()
-      }, delay)
-    })
-  }, [])
+  const clearConversationResolverRef = useRef<((confirmed: boolean) => void) | null>(null)
 
   useEffect(() => {
     if (showCreateModal && createInputRef.current) {
@@ -412,9 +721,26 @@ export function FocusThreadsBar() {
   }, [showCreateModal])
 
   useEffect(() => {
+    if (showPasteModal && pasteInputRef.current) {
+      pasteInputRef.current.focus()
+    }
+  }, [showPasteModal])
+
+  useEffect(() => {
+    if (!historyOpen) {
+      setExpandAllMessages(false)
+    }
+  }, [historyOpen, activeId])
+
+  useEffect(() => {
     return () => {
       if (actionFeedbackTimeoutRef.current) {
         window.clearTimeout(actionFeedbackTimeoutRef.current)
+      }
+
+      if (clearConversationResolverRef.current) {
+        clearConversationResolverRef.current(false)
+        clearConversationResolverRef.current = null
       }
     }
   }, [])
@@ -434,6 +760,78 @@ export function FocusThreadsBar() {
     []
   )
 
+  const captureCurrentConversation = useCallback(async (): Promise<
+    Array<{ role: "user" | "assistant"; content: string }>
+  > => {
+    let bestCapture = captureVisibleMessages()
+    if (bestCapture.length >= 2) {
+      return bestCapture
+    }
+
+    for (const delay of [90, 180, 320]) {
+      await waitForUi(delay)
+      const nextCapture = captureVisibleMessages()
+      if (nextCapture.length > bestCapture.length) {
+        bestCapture = nextCapture
+      }
+      if (nextCapture.length >= 2) {
+        return nextCapture
+      }
+    }
+
+    return bestCapture
+  }, [])
+
+  const resetNotebookConversation = useCallback(async (): Promise<boolean> => {
+    return triggerNotebookDeleteConversationHistory()
+  }, [])
+
+  const requestClearConversationConfirmation = useCallback((dockName: string): Promise<boolean> => {
+    const normalizedDockName = dockName.trim() || "current dock"
+
+    return new Promise((resolve) => {
+      if (clearConversationResolverRef.current) {
+        clearConversationResolverRef.current(false)
+      }
+      clearConversationResolverRef.current = resolve
+      setClearConversationContext({ dockName: normalizedDockName })
+      setShowClearConversationModal(true)
+    })
+  }, [])
+
+  const resolveClearConversationConfirmation = useCallback((confirmed: boolean) => {
+    setShowClearConversationModal(false)
+    setClearConversationContext(null)
+
+    const resolver = clearConversationResolverRef.current
+    clearConversationResolverRef.current = null
+    resolver?.(confirmed)
+  }, [])
+
+  const maybePromptToClearConversationAfterSave = useCallback(
+    async (dockName: string): Promise<boolean> => {
+      const confirmed = await requestClearConversationConfirmation(dockName)
+
+      if (!confirmed) {
+        pushActionFeedback("Saved to Dock. Conversation history was kept.")
+        return false
+      }
+
+      const cleared = await resetNotebookConversation()
+      if (!cleared) {
+        pushActionFeedback(
+          "Saved to Dock, but history delete could not be confirmed. If NotebookLM asked for confirmation, confirm it and try again.",
+          "error"
+        )
+        return false
+      }
+
+      pushActionFeedback("Conversation history cleared. Dock and sources were preserved.")
+      return true
+    },
+    [pushActionFeedback, requestClearConversationConfirmation, resetNotebookConversation]
+  )
+
   useEffect(() => {
     if (!user || !notebookId.current) return
 
@@ -448,8 +846,8 @@ export function FocusThreadsBar() {
 
     chrome.runtime
       .sendMessage({
-        command: "MINDDOCK_THREAD_LIST",
-        payload: { userId: user.id, notebookId: notebookId.current }
+        command: MESSAGE_ACTIONS.THREAD_LIST,
+        payload: { notebookId: notebookId.current }
       })
       .then((res) => {
         if (res?.success) {
@@ -468,12 +866,12 @@ export function FocusThreadsBar() {
   }, [renamingId])
 
   const saveCurrentToDock = useCallback(
-    async (threadId: string) => {
-      const captured = captureVisibleMessages()
-      if (captured.length === 0) return
+    async (threadId: string): Promise<boolean> => {
+      const captured = await captureCurrentConversation()
+      if (captured.length === 0) return false
 
       if (DOCKS_DEMO_MODE) {
-        if (!user || !notebookId.current) return
+        if (!user || !notebookId.current) return false
 
         const store = readDemoStore(user.id, notebookId.current)
         const now = new Date().toISOString()
@@ -498,15 +896,21 @@ export function FocusThreadsBar() {
         })
 
         setThreads(nextThreads)
-        return
+        return true
       }
 
-      await chrome.runtime.sendMessage({
-        command: "MINDDOCK_THREAD_SAVE_MESSAGES",
+      const response = await chrome.runtime.sendMessage({
+        command: MESSAGE_ACTIONS.THREAD_SAVE_MESSAGES,
         payload: { threadId, messages: captured }
       })
+      if (!response?.success) {
+        pushActionFeedback(response?.error ?? "Failed to save this conversation in the dock.", "error")
+        return false
+      }
+
+      return true
     },
-    [user]
+    [captureCurrentConversation, pushActionFeedback, user]
   )
 
   const loadMessages = useCallback(
@@ -527,7 +931,7 @@ export function FocusThreadsBar() {
       }
 
       const res = await chrome.runtime.sendMessage({
-        command: "MINDDOCK_THREAD_MESSAGES",
+        command: MESSAGE_ACTIONS.THREAD_MESSAGES,
         payload: { threadId }
       })
       const nextMessages: ThreadMessage[] = res?.payload?.messages ?? res?.data?.messages ?? []
@@ -539,12 +943,12 @@ export function FocusThreadsBar() {
 
   async function handleSelectDock(thread: Thread) {
     if (thread.id === activeId) {
-      setHistoryOpen((value) => !value)
+      const nextHistoryOpen = !historyOpen
+      if (nextHistoryOpen) {
+        await loadMessages(thread.id)
+      }
+      setHistoryOpen(nextHistoryOpen)
       return
-    }
-
-    if (activeId) {
-      await saveCurrentToDock(activeId)
     }
 
     setActiveId(thread.id)
@@ -555,7 +959,7 @@ export function FocusThreadsBar() {
     )
   }
 
-  function handleUseInCurrentChat() {
+  function handleUseCompactContinuity() {
     if (!activeThread || messages.length === 0) {
       pushActionFeedback("This dock has no saved context yet.", "error")
       return
@@ -568,23 +972,35 @@ export function FocusThreadsBar() {
     }
 
     const currentValue = readComposerValue(composer).trim()
-    const context = extractDockContext(messages)
-    const dockContextBlock = [
-      `Context from my saved dock "${activeThread.name}":`,
-      "",
-      `Original question: ${context.question}`,
-      "",
-      "Saved insight:",
-      context.insight,
-      "",
-      "Use this saved context to continue the current conversation."
-    ].join("\n")
+    const dockContextBlock = buildCompactContinuationPrompt(activeThread, messages)
 
     const nextValue = currentValue ? `${currentValue}\n\n${dockContextBlock}` : dockContextBlock
 
     writeComposerValue(composer, nextValue)
     setHistoryOpen(false)
-    pushActionFeedback("Dock context inserted into the current chat.")
+    pushActionFeedback("Compact continuity prompt inserted into the current chat.")
+  }
+
+  function handleUseFullProfessionalContinuity() {
+    if (!activeThread || messages.length === 0) {
+      pushActionFeedback("This dock has no saved context yet.", "error")
+      return
+    }
+
+    const composer = resolveActiveComposer()
+    if (!composer) {
+      pushActionFeedback("No active NotebookLM composer found.", "error")
+      return
+    }
+
+    const currentValue = readComposerValue(composer).trim()
+    const dockContextBlock = buildProfessionalContinuationPrompt(activeThread, messages)
+
+    const nextValue = currentValue ? `${currentValue}\n\n${dockContextBlock}` : dockContextBlock
+
+    writeComposerValue(composer, nextValue)
+    setHistoryOpen(false)
+    pushActionFeedback("Full professional continuity prompt inserted into the current chat.")
   }
 
   function handleGenerateNextPrompt() {
@@ -618,6 +1034,29 @@ export function FocusThreadsBar() {
     writeComposerValue(composer, nextPrompt)
     setHistoryOpen(false)
     pushActionFeedback("A follow-up prompt was generated in the chat.")
+  }
+
+  async function handleUpdateDockSnapshot() {
+    if (!activeThread || isUpdatingDockSnapshot) {
+      return
+    }
+
+    try {
+      setIsUpdatingDockSnapshot(true)
+      const saved = await saveCurrentToDock(activeThread.id)
+      if (!saved) {
+        pushActionFeedback(
+          "Could not detect the visible conversation. Scroll the chat and try Update snapshot again.",
+          "error"
+        )
+        return
+      }
+
+      await loadMessages(activeThread.id)
+      pushActionFeedback("Dock snapshot updated. New messages are saved only when you click update.")
+    } finally {
+      setIsUpdatingDockSnapshot(false)
+    }
   }
 
   async function handleSendToNotes() {
@@ -663,27 +1102,140 @@ export function FocusThreadsBar() {
 
   function openCreateModal() {
     setNewDockName("")
+    setNewDockTopic("")
+    setNewDockIcon(DEFAULT_DOCK_ICON)
     setCreateError(null)
     setShowCreateModal(true)
   }
 
   function closeCreateModal() {
     setShowCreateModal(false)
+    setNewDockTopic("")
+    setNewDockIcon(DEFAULT_DOCK_ICON)
     setCreateError(null)
+  }
+
+  function openPasteModal() {
+    if (!activeId) {
+      pushActionFeedback("Select a dock first to paste and save conversation.", "error")
+      return
+    }
+
+    setPasteInputValue("")
+    setPasteError(null)
+    setShowPasteModal(true)
+  }
+
+  function closePasteModal() {
+    if (isSavingPastedConversation) return
+    setShowPasteModal(false)
+    setPasteError(null)
+  }
+
+  async function handleSavePastedConversation() {
+    if (!activeId) {
+      setPasteError("Select a dock before saving pasted conversation.")
+      return
+    }
+
+    const parsedMessages = parseManualConversationInput(pasteInputValue)
+    if (parsedMessages.length === 0) {
+      setPasteError("Could not parse messages. Use lines like 'User:' and 'NotebookLM:'.")
+      return
+    }
+
+    try {
+      setIsSavingPastedConversation(true)
+      setPasteError(null)
+
+      if (DOCKS_DEMO_MODE) {
+        if (!user || !notebookId.current) {
+          setPasteError("No user session available.")
+          return
+        }
+
+        const store = readDemoStore(user.id, notebookId.current)
+        const now = new Date().toISOString()
+        const nextMessages: ThreadMessage[] = parsedMessages.map((message, index) => ({
+          id: `${activeId}-manual-${Date.now()}-${index}`,
+          threadId: activeId,
+          role: message.role,
+          content: message.content,
+          createdAt: now
+        }))
+
+        const nextThreads = store.threads.map((thread) =>
+          thread.id === activeId ? { ...thread, updatedAt: now } : thread
+        )
+
+        writeDemoStore(user.id, notebookId.current, {
+          threads: nextThreads,
+          messagesById: {
+            ...store.messagesById,
+            [activeId]: nextMessages
+          }
+        })
+
+        setThreads(nextThreads)
+        setMessages(nextMessages)
+        setShowPasteModal(false)
+        pushActionFeedback(`Saved ${nextMessages.length} pasted messages to dock.`)
+        return
+      }
+
+      const saveResponse = await chrome.runtime.sendMessage({
+        command: MESSAGE_ACTIONS.THREAD_SAVE_MESSAGES,
+        payload: { threadId: activeId, messages: parsedMessages }
+      })
+
+      if (!saveResponse?.success) {
+        setPasteError(saveResponse?.error ?? "Failed to save pasted conversation.")
+        return
+      }
+
+      await loadMessages(activeId)
+      setShowPasteModal(false)
+      pushActionFeedback(`Saved ${parsedMessages.length} pasted messages to dock.`)
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Failed to save pasted conversation."
+      setPasteError(message)
+    } finally {
+      setIsSavingPastedConversation(false)
+    }
   }
 
   async function handleCreateDock() {
     const name = newDockName.trim()
+    const topic = normalizeDockTopic(newDockTopic)
+    const icon = normalizeDockIcon(newDockIcon)
     if (!name || !user || !notebookId.current) return
 
     try {
       setIsCreating(true)
       setCreateError(null)
+      const capturedCurrentConversation = await captureCurrentConversation()
+      if (capturedCurrentConversation.length === 0) {
+        pushActionFeedback("No visible conversation was detected. The dock may start empty.", "error")
+      }
 
       if (DOCKS_DEMO_MODE) {
-        const thread = buildDemoThread(user.id, notebookId.current, name, threads.length)
+        const thread = buildDemoThread(user.id, notebookId.current, name, threads.length, {
+          topic,
+          icon
+        })
         const nextThreads = [thread, ...threads]
-        const starterMessages = buildLightCopyStarterMessages(thread.id)
+        const now = new Date().toISOString()
+        const starterMessages =
+          capturedCurrentConversation.length > 0
+            ? capturedCurrentConversation.map((message, index) => ({
+                id: `${thread.id}-capture-${Date.now()}-${index}`,
+                threadId: thread.id,
+                role: message.role,
+                content: message.content,
+                createdAt: now
+              }))
+            : buildLightCopyStarterMessages(thread.id)
         const currentStore = readDemoStore(user.id, notebookId.current)
 
         writeDemoStore(user.id, notebookId.current, {
@@ -699,23 +1251,51 @@ export function FocusThreadsBar() {
         setMessages(starterMessages)
         setHistoryOpen(false)
         closeCreateModal()
-        openNativeNewConversation()
+        if (capturedCurrentConversation.length > 0) {
+          await maybePromptToClearConversationAfterSave(name)
+        }
         return
       }
 
       const res = await chrome.runtime.sendMessage({
-        command: "MINDDOCK_THREAD_CREATE",
-        payload: { userId: user.id, notebookId: notebookId.current, name }
+        command: MESSAGE_ACTIONS.THREAD_CREATE,
+        payload: {
+          notebookId: notebookId.current,
+          name,
+          topic: topic || undefined,
+          icon
+        }
       })
 
       if (res?.success) {
         const thread: Thread = res.payload?.thread ?? res.data?.thread
+
+        if (capturedCurrentConversation.length > 0) {
+          const saveResponse = await chrome.runtime.sendMessage({
+            command: MESSAGE_ACTIONS.THREAD_SAVE_MESSAGES,
+            payload: { threadId: thread.id, messages: capturedCurrentConversation }
+          })
+
+          if (!saveResponse?.success) {
+            pushActionFeedback(saveResponse?.error ?? "Failed to save captured conversation.", "error")
+          }
+        }
+
+        const loadedMessagesResponse = await chrome.runtime.sendMessage({
+          command: MESSAGE_ACTIONS.THREAD_MESSAGES,
+          payload: { threadId: thread.id }
+        })
+        const loadedMessages: ThreadMessage[] =
+          loadedMessagesResponse?.payload?.messages ?? loadedMessagesResponse?.data?.messages ?? []
+
         setThreads((prev) => [thread, ...prev])
         setActiveId(thread.id)
-        setMessages([])
+        setMessages(loadedMessages)
         setHistoryOpen(false)
         closeCreateModal()
-        openNativeNewConversation()
+        if (capturedCurrentConversation.length > 0) {
+          await maybePromptToClearConversationAfterSave(name)
+        }
       } else {
         setCreateError(res?.error ?? "Failed to create dock.")
       }
@@ -755,7 +1335,7 @@ export function FocusThreadsBar() {
       }
     } else {
       await chrome.runtime.sendMessage({
-        command: "MINDDOCK_THREAD_DELETE",
+        command: MESSAGE_ACTIONS.THREAD_DELETE,
         payload: { threadId }
       })
       setThreads((prev) => prev.filter((thread) => thread.id !== threadId))
@@ -803,7 +1383,7 @@ export function FocusThreadsBar() {
     }
 
     const res = await chrome.runtime.sendMessage({
-      command: "MINDDOCK_THREAD_RENAME",
+      command: MESSAGE_ACTIONS.THREAD_RENAME,
       payload: { threadId: renamingId, name: nextName }
     })
 
@@ -857,6 +1437,24 @@ export function FocusThreadsBar() {
 
   const visibleThreads = threads.slice(0, MAX_VISIBLE)
   const activeThread = threads.find((thread) => thread.id === activeId)
+  const activeDockIconOption = resolveDockIconOption(activeThread?.icon)
+  const ActiveDockIcon = activeDockIconOption.Icon
+  const createDockIconOption = resolveDockIconOption(newDockIcon)
+  const CreateDockIcon = createDockIconOption.Icon
+  const isConfirmDeleteActive = !!activeThread && confirmDeleteId === activeThread.id
+  const historyPanelSize = expandAllMessages
+    ? {
+        width: "min(94vw, 1120px)",
+        cardHeight: "82vh",
+        minCardHeight: 560,
+        listMinHeight: 360
+      }
+    : {
+        width: 420,
+        cardHeight: "min(76vh, 560px)",
+        minCardHeight: 460,
+        listMinHeight: 240
+      }
 
   return (
     <div style={{ display: "contents" }}>
@@ -871,7 +1469,8 @@ export function FocusThreadsBar() {
             <>
               {visibleThreads.map((thread) => {
                 const isActive = thread.id === activeId
-                const isConfirmDelete = confirmDeleteId === thread.id
+                const dockIcon = resolveDockIconOption(thread.icon)
+                const DockIcon = dockIcon.Icon
 
                 return (
                   <div
@@ -886,7 +1485,7 @@ export function FocusThreadsBar() {
                     style={{ maxWidth: 130 }}
                     onClick={() => void handleSelectDock(thread)}
                     onDoubleClick={(event) => handleDoubleClick(thread, event)}>
-                    <Hash
+                    <DockIcon
                       size={9}
                       strokeWidth={2.5}
                       className={isActive ? "shrink-0 text-black/60" : "shrink-0 text-zinc-500"}
@@ -906,20 +1505,10 @@ export function FocusThreadsBar() {
                         className="w-16 bg-transparent text-[10px] font-medium outline-none"
                       />
                     ) : (
-                      <span className="truncate text-[10px] font-medium">{thread.name}</span>
+                      <span className="truncate text-[10px] font-medium" title={thread.topic || thread.name}>
+                        {thread.name}
+                      </span>
                     )}
-
-                    <button
-                      type="button"
-                      onClick={(event) => void handleDeleteDock(thread.id, event)}
-                      className={[
-                        "shrink-0 rounded transition-all",
-                        isConfirmDelete
-                          ? "text-red-500 opacity-100"
-                          : "opacity-0 group-hover:opacity-60 hover:!opacity-100"
-                      ].join(" ")}>
-                      <Trash2 size={8} strokeWidth={2} />
-                    </button>
 
                     {isActive && (
                       <span className="shrink-0 opacity-50">
@@ -960,76 +1549,115 @@ export function FocusThreadsBar() {
               exit={{ opacity: 0, y: -4, scale: 0.98 }}
               transition={{ duration: 0.15 }}
               className="absolute top-full z-50 mt-1"
-              style={{ minWidth: 280, maxWidth: 360 }}>
+              style={{ width: historyPanelSize.width, maxWidth: "94vw" }}>
               <div
-                className="rounded-xl border border-white/10 bg-[#0f0f0f] shadow-[0_12px_32px_rgba(0,0,0,0.5)]"
-                style={{ maxHeight: 320, display: "flex", flexDirection: "column" }}>
-                <div className="flex items-center justify-between border-b border-white/[0.07] px-3 py-2">
-                  <div className="flex items-center gap-2">
-                    <span className="flex h-5 w-5 items-center justify-center rounded-md bg-[#facc15]/10">
-                      <Hash size={9} strokeWidth={2.5} className="text-[#facc15]" />
+                className="relative overflow-hidden rounded-2xl border border-[#facc15]/20 bg-[#07090c] shadow-[0_24px_64px_rgba(0,0,0,0.6)]"
+                style={{
+                  height: historyPanelSize.cardHeight,
+                  minHeight: historyPanelSize.minCardHeight,
+                  display: "flex",
+                  flexDirection: "column"
+                }}>
+                <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(250,204,21,0.14),transparent_48%)]" />
+
+                <div className="relative z-10 shrink-0 flex items-center justify-between border-b border-[#facc15]/10 px-3.5 py-2.5">
+                  <div className="flex items-center gap-2.5">
+                    <span className="flex h-6 w-6 items-center justify-center rounded-lg border border-[#facc15]/30 bg-[#facc15]/12">
+                      <ActiveDockIcon size={10} strokeWidth={2.5} className="text-[#facc15]" />
                     </span>
-                    <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-400">
-                      {activeThread.name}
-                    </span>
+                    <div className="flex min-w-0 flex-col">
+                      <span className="truncate text-[9px] font-semibold uppercase tracking-[0.16em] text-zinc-500">
+                        {activeThread.name}
+                      </span>
+                      {activeThread.topic ? (
+                        <span className="truncate text-[10px] text-zinc-300">{activeThread.topic}</span>
+                      ) : null}
+                    </div>
                   </div>
 
-                  <button
-                    type="button"
-                    onClick={() => setHistoryOpen(false)}
-                    className="flex h-5 w-5 items-center justify-center rounded-md text-zinc-600 transition-colors hover:bg-white/[0.06] hover:text-zinc-300">
-                    <X size={12} strokeWidth={2} />
-                  </button>
+                  <div className="flex items-center gap-1.5">
+                    {messages.length > 0 && !isLoadingMessages ? (
+                      <button
+                        type="button"
+                        onClick={() => setExpandAllMessages((previous) => !previous)}
+                        className="rounded-lg border border-white/[0.1] bg-white/[0.03] px-2 py-1 text-[9px] font-semibold text-zinc-300 transition-colors hover:border-[#facc15]/40 hover:bg-[#facc15]/[0.08] hover:text-[#fde68a]">
+                        {expandAllMessages ? "Collapse reader" : "Expand reader"}
+                      </button>
+                    ) : null}
+
+                    <button
+                      type="button"
+                      onClick={() => setHistoryOpen(false)}
+                      className="flex h-6 w-6 items-center justify-center rounded-lg border border-transparent text-zinc-500 transition-colors hover:border-white/[0.1] hover:bg-white/[0.05] hover:text-zinc-300">
+                      <X size={12} strokeWidth={2} />
+                    </button>
+                  </div>
                 </div>
 
-                <div className="overflow-y-auto px-3 py-2.5" style={{ maxHeight: 270 }}>
+                <div
+                  className="relative z-10 flex-1 overflow-y-auto px-3.5 py-3"
+                  style={{ minHeight: historyPanelSize.listMinHeight }}>
                   {isLoadingMessages ? (
                     <div className="flex items-center justify-center gap-2 py-6">
                       <Loader2 size={12} className="animate-spin text-zinc-600" />
                       <span className="text-[10px] text-zinc-600">Loading history...</span>
                     </div>
                   ) : messages.length === 0 ? (
-                    <div className="flex flex-col items-center gap-2 py-8">
-                      <span className="flex h-8 w-8 items-center justify-center rounded-full bg-white/[0.04]">
-                        <MessageSquare size={14} className="text-zinc-700" strokeWidth={1.5} />
+                    <div className="flex flex-col items-center gap-2.5 py-8">
+                      <span className="flex h-9 w-9 items-center justify-center rounded-full border border-white/[0.08] bg-white/[0.04]">
+                        <MessageSquare size={14} className="text-zinc-600" strokeWidth={1.5} />
                       </span>
-                      <p className="text-[10px] text-zinc-600">No messages in this dock</p>
-                      <p className="text-[9px] text-zinc-700">Switch docks to save the conversation</p>
+                      <p className="text-[10px] font-medium text-zinc-500">No messages in this dock</p>
+                      <p className="text-[9px] text-zinc-600">Use update snapshot to save current conversation</p>
+                      <button
+                        type="button"
+                        onClick={openPasteModal}
+                        className="mt-1 rounded-lg border border-[#facc15]/30 bg-[#facc15]/10 px-2.5 py-1.5 text-[9px] font-semibold text-[#fde047] transition-colors hover:bg-[#facc15]/20">
+                        Paste conversation manually
+                      </button>
                     </div>
                   ) : (
-                    <div className="flex flex-col gap-2">
+                    <div className="flex flex-col gap-2.5">
                       {messages.map((message) => (
                         <div
                           key={message.id}
                           className={[
-                            "rounded-lg px-2.5 py-2",
+                            "rounded-xl px-3 py-2.5 shadow-[0_0_0_1px_rgba(255,255,255,0.02)_inset]",
                             message.role === "user"
-                              ? "ml-6 border border-[#facc15]/[0.12] bg-[#facc15]/[0.07]"
-                              : "mr-6 border border-white/[0.07] bg-white/[0.03]"
+                              ? expandAllMessages
+                                ? "ml-2 border border-[#facc15]/30 bg-[#231b08]/85"
+                                : "ml-6 border border-[#facc15]/30 bg-[#231b08]/85"
+                              : expandAllMessages
+                                ? "mr-2 border border-white/[0.08] bg-[#0f1217]/85"
+                                : "mr-6 border border-white/[0.08] bg-[#0f1217]/85"
                           ].join(" ")}>
-                          <div className="mb-1 flex items-center gap-1.5">
+                          <div className="mb-1.5 flex items-center gap-2">
                             <span
                               className={[
-                                "flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-sm",
-                                message.role === "user" ? "bg-[#facc15]/20" : "bg-white/[0.06]"
+                                "flex h-4 w-4 shrink-0 items-center justify-center rounded-md",
+                                message.role === "user" ? "bg-[#facc15]/20" : "bg-white/[0.08]"
                               ].join(" ")}>
                               <MessageSquare
-                                size={7}
+                                size={8}
                                 strokeWidth={2}
                                 className={message.role === "user" ? "text-[#facc15]" : "text-zinc-500"}
                               />
                             </span>
                             <p
                               className={[
-                                "text-[9px] font-semibold uppercase tracking-[0.1em]",
-                                message.role === "user" ? "text-[#facc15]/60" : "text-zinc-600"
+                                "text-[9px] font-semibold uppercase tracking-[0.14em]",
+                                message.role === "user" ? "text-[#fde047]" : "text-zinc-500"
                               ].join(" ")}>
                               {message.role === "user" ? "you" : "notebooklm"}
                             </p>
                           </div>
-                          <p className="whitespace-pre-wrap text-[10px] leading-[1.55] text-zinc-300">
-                            {message.content.length > 280
-                              ? `${message.content.slice(0, 280)}...`
+                          <p
+                            className={[
+                              "whitespace-pre-wrap text-zinc-200",
+                              expandAllMessages ? "text-[11px] leading-[1.68]" : "text-[10px] leading-[1.55]"
+                            ].join(" ")}>
+                            {!expandAllMessages && message.content.length > 480
+                              ? `${message.content.slice(0, 480)}...`
                               : message.content}
                           </p>
                         </div>
@@ -1038,12 +1666,14 @@ export function FocusThreadsBar() {
                   )}
                 </div>
 
-                <div className="border-t border-white/[0.07] px-3 py-2.5">
+                <div className="relative z-10 shrink-0 border-t border-[#facc15]/10 bg-black/20 px-3.5 py-3">
                   {actionFeedback && (
                     <p
                       className={[
-                        "mb-2 text-[9px] font-medium",
-                        actionFeedback.type === "error" ? "text-red-400" : "text-[#facc15]/80"
+                        "mb-2 rounded-lg border px-2 py-1.5 text-[9px] font-medium",
+                        actionFeedback.type === "error"
+                          ? "border-red-500/30 bg-red-500/10 text-red-300"
+                          : "border-[#facc15]/30 bg-[#facc15]/10 text-[#fde047]"
                       ].join(" ")}>
                       {actionFeedback.text}
                     </p>
@@ -1052,15 +1682,30 @@ export function FocusThreadsBar() {
                   <div className="grid gap-1.5">
                     <button
                       type="button"
-                      onClick={handleUseInCurrentChat}
+                      onClick={handleUseCompactContinuity}
                       disabled={messages.length === 0 || isLoadingMessages}
-                      className="flex items-center justify-between rounded-lg border border-white/[0.07] bg-white/[0.03] px-2.5 py-2 text-left transition-colors hover:border-[#facc15]/20 hover:bg-[#facc15]/[0.05] disabled:cursor-default disabled:opacity-40">
+                      className="flex items-center justify-between rounded-xl border border-white/[0.08] bg-[#0d1117]/85 px-3 py-2.5 text-left transition-colors hover:border-[#facc15]/25 hover:bg-[#121823] disabled:cursor-default disabled:opacity-40">
                       <span className="flex items-center gap-2">
-                        <span className="flex h-5 w-5 items-center justify-center rounded-md bg-[#facc15]/10">
+                        <span className="flex h-5 w-5 items-center justify-center rounded-md border border-[#facc15]/20 bg-[#facc15]/12">
                           <ArrowUpRight size={10} strokeWidth={2} className="text-[#facc15]" />
                         </span>
                         <span className="text-[10px] font-medium text-zinc-200">
-                          Use in current chat
+                          Use compact continuity
+                        </span>
+                      </span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={handleUseFullProfessionalContinuity}
+                      disabled={messages.length === 0 || isLoadingMessages}
+                      className="flex items-center justify-between rounded-xl border border-[#facc15]/35 bg-[#2a2008]/70 px-3 py-2.5 text-left transition-colors hover:border-[#facc15]/55 hover:bg-[#33280a]/85 disabled:cursor-default disabled:opacity-40">
+                      <span className="flex items-center gap-2">
+                        <span className="flex h-5 w-5 items-center justify-center rounded-md border border-[#facc15]/30 bg-[#facc15]/18">
+                          <Sparkles size={10} strokeWidth={2} className="text-[#facc15]" />
+                        </span>
+                        <span className="text-[10px] font-medium text-[#fef3c7]">
+                          Use full professional continuity
                         </span>
                       </span>
                     </button>
@@ -1069,9 +1714,9 @@ export function FocusThreadsBar() {
                       type="button"
                       onClick={handleGenerateNextPrompt}
                       disabled={messages.length === 0 || isLoadingMessages}
-                      className="flex items-center justify-between rounded-lg border border-white/[0.07] bg-white/[0.03] px-2.5 py-2 text-left transition-colors hover:border-[#facc15]/20 hover:bg-[#facc15]/[0.05] disabled:cursor-default disabled:opacity-40">
+                      className="flex items-center justify-between rounded-xl border border-white/[0.08] bg-[#0d1117]/85 px-3 py-2.5 text-left transition-colors hover:border-[#facc15]/25 hover:bg-[#121823] disabled:cursor-default disabled:opacity-40">
                       <span className="flex items-center gap-2">
-                        <span className="flex h-5 w-5 items-center justify-center rounded-md bg-[#facc15]/10">
+                        <span className="flex h-5 w-5 items-center justify-center rounded-md border border-[#facc15]/20 bg-[#facc15]/12">
                           <Wand2 size={10} strokeWidth={2} className="text-[#facc15]" />
                         </span>
                         <span className="text-[10px] font-medium text-zinc-200">
@@ -1080,19 +1725,51 @@ export function FocusThreadsBar() {
                       </span>
                     </button>
 
+                  </div>
+
+                  <div className="mt-2 grid grid-cols-3 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => void handleUpdateDockSnapshot()}
+                      disabled={!activeThread || isLoadingMessages || isUpdatingDockSnapshot}
+                      title="Update dock snapshot"
+                      aria-label="Update dock snapshot"
+                      className="flex h-10 w-full items-center justify-center rounded-xl border border-white/[0.08] bg-[#0d1117]/90 text-zinc-300 transition-colors hover:border-[#facc15]/35 hover:bg-[#121823] hover:text-[#facc15] disabled:cursor-default disabled:opacity-40">
+                      {isUpdatingDockSnapshot ? (
+                        <Loader2 size={14} strokeWidth={2.1} className="animate-spin" />
+                      ) : (
+                        <RefreshCw size={14} strokeWidth={2.1} />
+                      )}
+                    </button>
+
                     <button
                       type="button"
                       onClick={() => void handleSendToNotes()}
                       disabled={messages.length === 0 || isLoadingMessages}
-                      className="flex items-center justify-between rounded-lg border border-white/[0.07] bg-white/[0.03] px-2.5 py-2 text-left transition-colors hover:border-[#facc15]/20 hover:bg-[#facc15]/[0.05] disabled:cursor-default disabled:opacity-40">
-                      <span className="flex items-center gap-2">
-                        <span className="flex h-5 w-5 items-center justify-center rounded-md bg-[#facc15]/10">
-                          <FileText size={10} strokeWidth={2} className="text-[#facc15]" />
-                        </span>
-                        <span className="text-[10px] font-medium text-zinc-200">
-                          Send to notes
-                        </span>
-                      </span>
+                      title="Send to notes"
+                      aria-label="Send to notes"
+                      className="flex h-10 w-full items-center justify-center rounded-xl border border-white/[0.08] bg-[#0d1117]/90 text-zinc-300 transition-colors hover:border-[#facc15]/35 hover:bg-[#121823] hover:text-[#facc15] disabled:cursor-default disabled:opacity-40">
+                      <FileText size={14} strokeWidth={2.1} />
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        if (!activeThread) {
+                          return
+                        }
+                        void handleDeleteDock(activeThread.id, event)
+                      }}
+                      disabled={!activeThread}
+                      title={isConfirmDeleteActive ? "Click again to delete dock" : "Delete dock"}
+                      aria-label={isConfirmDeleteActive ? "Confirm delete dock" : "Delete dock"}
+                      className={[
+                        "flex h-10 w-full items-center justify-center rounded-xl border text-zinc-300 transition-colors disabled:cursor-default disabled:opacity-40",
+                        isConfirmDeleteActive
+                          ? "border-red-500/45 bg-red-500/15 text-red-300 hover:bg-red-500/20"
+                          : "border-white/[0.08] bg-[#0d1117]/90 hover:border-[#facc15]/35 hover:bg-[#121823] hover:text-[#facc15]"
+                      ].join(" ")}>
+                      <Trash2 size={14} strokeWidth={2.1} />
                     </button>
                   </div>
                 </div>
@@ -1163,7 +1840,7 @@ export function FocusThreadsBar() {
                         borderRadius: 8,
                         background: "rgba(250,204,21,0.1)"
                       }}>
-                      <Hash size={12} strokeWidth={2.5} color="#facc15" />
+                      <CreateDockIcon size={12} strokeWidth={2.5} color="#facc15" />
                     </span>
                     <span
                       style={{
@@ -1220,9 +1897,76 @@ export function FocusThreadsBar() {
                     fontSize: 13,
                     color: "#ffffff",
                     outline: "none",
-                    marginBottom: createError ? 8 : 16
+                    marginBottom: 12
                   }}
                 />
+
+                <p style={{ marginBottom: 8, fontSize: 11, color: "#71717a", fontWeight: 500 }}>
+                  Conversation theme
+                </p>
+
+                <input
+                  type="text"
+                  value={newDockTopic}
+                  onChange={(event) => setNewDockTopic(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" && newDockName.trim()) void handleCreateDock()
+                    if (event.key === "Escape") closeCreateModal()
+                  }}
+                  placeholder="Ex: Luxury copywriting"
+                  maxLength={120}
+                  style={{
+                    width: "100%",
+                    boxSizing: "border-box",
+                    background: "rgba(255,255,255,0.05)",
+                    border: "1px solid rgba(255,255,255,0.1)",
+                    borderRadius: 8,
+                    padding: "9px 12px",
+                    fontSize: 13,
+                    color: "#ffffff",
+                    outline: "none",
+                    marginBottom: 12
+                  }}
+                />
+
+                <p style={{ marginBottom: 8, fontSize: 11, color: "#71717a", fontWeight: 500 }}>
+                  Organization icon
+                </p>
+
+                <div
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+                    gap: 6,
+                    marginBottom: createError ? 8 : 16
+                  }}>
+                  {DOCK_ICON_OPTIONS.map((option) => {
+                    const OptionIcon = option.Icon
+                    const isActive = option.value === newDockIcon
+                    return (
+                      <button
+                        key={option.value}
+                        type="button"
+                        onClick={() => setNewDockIcon(option.value)}
+                        title={option.label}
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          height: 32,
+                          borderRadius: 8,
+                          border: isActive
+                            ? "1px solid rgba(250,204,21,0.75)"
+                            : "1px solid rgba(255,255,255,0.12)",
+                          background: isActive ? "rgba(250,204,21,0.14)" : "rgba(255,255,255,0.03)",
+                          color: isActive ? "#facc15" : "#a1a1aa",
+                          cursor: "pointer"
+                        }}>
+                        <OptionIcon size={14} strokeWidth={2.2} />
+                      </button>
+                    )
+                  })}
+                </div>
 
                 {createError && (
                   <p style={{ marginBottom: 12, fontSize: 10, color: "#ef4444", lineHeight: 1.4 }}>
@@ -1289,6 +2033,363 @@ export function FocusThreadsBar() {
                     opacity: 0.8
                   }}
                 />
+              </div>
+            </motion.div>
+          </>
+        )}
+      </AnimatePresence>
+      <AnimatePresence>
+        {showPasteModal && (
+          <>
+            <motion.div
+              key="paste-backdrop"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.15 }}
+              onClick={closePasteModal}
+              style={{
+                position: "fixed",
+                inset: 0,
+                background: "rgba(0,0,0,0.65)",
+                zIndex: 2147483646
+              }}
+            />
+
+            <motion.div
+              key="paste-card"
+              initial={{ opacity: 0, scale: 0.96, y: 8 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.96, y: 8 }}
+              transition={{ duration: 0.18, ease: [0.4, 0, 0.2, 1] }}
+              style={{
+                position: "fixed",
+                inset: 0,
+                zIndex: 2147483647,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                padding: 24
+              }}>
+              <div
+                style={{
+                  width: 420,
+                  maxWidth: "92vw",
+                  background: "#0f0f0f",
+                  border: "1px solid rgba(255,255,255,0.1)",
+                  borderRadius: 16,
+                  padding: "20px 20px 16px",
+                  boxShadow: "0 24px 64px rgba(0,0,0,0.7)",
+                  fontFamily: "system-ui, -apple-system, sans-serif"
+                }}>
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    marginBottom: 12
+                  }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        width: 28,
+                        height: 28,
+                        borderRadius: 8,
+                        background: "rgba(250,204,21,0.1)"
+                      }}>
+                      <MessageSquare size={12} strokeWidth={2.3} color="#facc15" />
+                    </span>
+                    <span
+                      style={{
+                        fontSize: 13,
+                        fontWeight: 600,
+                        color: "#ffffff",
+                        letterSpacing: "-0.01em"
+                      }}>
+                      Paste conversation into dock
+                    </span>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={closePasteModal}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      width: 24,
+                      height: 24,
+                      borderRadius: 6,
+                      border: "none",
+                      background: "transparent",
+                      color: "#71717a",
+                      cursor: "pointer"
+                    }}>
+                    <X size={13} strokeWidth={2} />
+                  </button>
+                </div>
+
+                <p style={{ marginBottom: 8, fontSize: 11, color: "#71717a", lineHeight: 1.5 }}>
+                  Paste plain text. Prefer this format:
+                  <br />
+                  <span style={{ color: "#a1a1aa" }}>User: ...</span>
+                  <br />
+                  <span style={{ color: "#a1a1aa" }}>NotebookLM: ...</span>
+                </p>
+
+                <textarea
+                  ref={pasteInputRef}
+                  value={pasteInputValue}
+                  onChange={(event) => setPasteInputValue(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Escape") {
+                      closePasteModal()
+                    }
+
+                    if (
+                      event.key === "Enter" &&
+                      (event.ctrlKey || event.metaKey) &&
+                      !isSavingPastedConversation
+                    ) {
+                      event.preventDefault()
+                      void handleSavePastedConversation()
+                    }
+                  }}
+                  placeholder={"User: ...\nNotebookLM: ...\nUser: ..."}
+                  style={{
+                    width: "100%",
+                    minHeight: 180,
+                    maxHeight: 320,
+                    resize: "vertical",
+                    boxSizing: "border-box",
+                    background: "rgba(255,255,255,0.05)",
+                    border: "1px solid rgba(255,255,255,0.1)",
+                    borderRadius: 8,
+                    padding: "10px 12px",
+                    fontSize: 12,
+                    lineHeight: 1.5,
+                    color: "#ffffff",
+                    outline: "none",
+                    marginBottom: pasteError ? 8 : 12
+                  }}
+                />
+
+                {pasteError && (
+                  <p style={{ marginBottom: 10, fontSize: 10, color: "#ef4444", lineHeight: 1.4 }}>
+                    {pasteError}
+                  </p>
+                )}
+
+                <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+                  <button
+                    type="button"
+                    onClick={closePasteModal}
+                    style={{
+                      padding: "7px 14px",
+                      borderRadius: 8,
+                      border: "1px solid rgba(255,255,255,0.1)",
+                      background: "transparent",
+                      color: "#a1a1aa",
+                      fontSize: 12,
+                      fontWeight: 500,
+                      cursor: "pointer"
+                    }}>
+                    Cancel
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => void handleSavePastedConversation()}
+                    disabled={!pasteInputValue.trim() || isSavingPastedConversation}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 6,
+                      padding: "7px 16px",
+                      borderRadius: 8,
+                      border: "none",
+                      background:
+                        pasteInputValue.trim() && !isSavingPastedConversation ? "#facc15" : "#3f3f46",
+                      color: pasteInputValue.trim() && !isSavingPastedConversation ? "#000000" : "#71717a",
+                      fontSize: 12,
+                      fontWeight: 600,
+                      cursor: pasteInputValue.trim() && !isSavingPastedConversation ? "pointer" : "default"
+                    }}>
+                    {isSavingPastedConversation ? (
+                      <>
+                        <Loader2 size={11} className="animate-spin" />
+                        Saving...
+                      </>
+                    ) : (
+                      <>
+                        <MessageSquare size={11} strokeWidth={2.5} />
+                        Save to dock
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {showClearConversationModal && (
+          <>
+            <motion.div
+              key="clear-conversation-backdrop"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.15 }}
+              onClick={() => resolveClearConversationConfirmation(false)}
+              style={{
+                position: "fixed",
+                inset: 0,
+                background: "rgba(0,0,0,0.65)",
+                zIndex: 2147483646
+              }}
+            />
+
+            <motion.div
+              key="clear-conversation-card"
+              initial={{ opacity: 0, scale: 0.96, y: 8 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.96, y: 8 }}
+              transition={{ duration: 0.18, ease: [0.4, 0, 0.2, 1] }}
+              style={{
+                position: "fixed",
+                inset: 0,
+                zIndex: 2147483647,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                padding: 24
+              }}>
+              <div
+                style={{
+                  width: 480,
+                  maxWidth: "94vw",
+                  background: "#0f0f0f",
+                  border: "1px solid rgba(255,255,255,0.1)",
+                  borderRadius: 16,
+                  padding: "20px 20px 16px",
+                  boxShadow: "0 24px 64px rgba(0,0,0,0.7)",
+                  fontFamily: "system-ui, -apple-system, sans-serif"
+                }}>
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    marginBottom: 12
+                  }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        width: 28,
+                        height: 28,
+                        borderRadius: 8,
+                        background: "rgba(250,204,21,0.12)"
+                      }}>
+                      <Trash2 size={12} strokeWidth={2.3} color="#facc15" />
+                    </span>
+                    <span
+                      style={{
+                        fontSize: 13,
+                        fontWeight: 600,
+                        color: "#ffffff",
+                        letterSpacing: "-0.01em"
+                      }}>
+                      Clear conversation to start fresh?
+                    </span>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => resolveClearConversationConfirmation(false)}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      width: 24,
+                      height: 24,
+                      borderRadius: 6,
+                      border: "none",
+                      background: "transparent",
+                      color: "#71717a",
+                      cursor: "pointer"
+                    }}>
+                    <X size={13} strokeWidth={2} />
+                  </button>
+                </div>
+
+                <div style={{ marginBottom: 14, color: "#d4d4d8", fontSize: 12, lineHeight: 1.6 }}>
+                  <p style={{ margin: 0 }}>
+                    Your full conversation is already saved in{" "}
+                    <span style={{ color: "#facc15", fontWeight: 600 }}>
+                      Dock "{clearConversationContext?.dockName ?? "current dock"}"
+                    </span>
+                    .
+                  </p>
+                  <p style={{ margin: "8px 0 0" }}>
+                    You will not lose anything saved in Docks.
+                  </p>
+                  <p style={{ margin: "8px 0 0", color: "#fde68a", fontWeight: 600 }}>
+                    Safe to clear: your full content is already stored in this Dock.
+                  </p>
+                  <p style={{ margin: "8px 0 0" }}>
+                    This clears only NotebookLM conversation history to keep focus on a new chat.
+                  </p>
+                  <p style={{ margin: "8px 0 0" }}>
+                    Your sources stay connected and unchanged.
+                  </p>
+                </div>
+
+                <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+                  <button
+                    type="button"
+                    onClick={() => resolveClearConversationConfirmation(false)}
+                    style={{
+                      padding: "7px 14px",
+                      borderRadius: 8,
+                      border: "1px solid rgba(255,255,255,0.1)",
+                      background: "transparent",
+                      color: "#a1a1aa",
+                      fontSize: 12,
+                      fontWeight: 500,
+                      cursor: "pointer"
+                    }}>
+                    Keep history
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => resolveClearConversationConfirmation(true)}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 6,
+                      padding: "7px 16px",
+                      borderRadius: 8,
+                      border: "none",
+                      background: "#facc15",
+                      color: "#000000",
+                      fontSize: 12,
+                      fontWeight: 600,
+                      cursor: "pointer"
+                    }}>
+                    <Trash2 size={11} strokeWidth={2.4} />
+                    Clear history
+                  </button>
+                </div>
               </div>
             </motion.div>
           </>

@@ -376,7 +376,7 @@ function positionMicrophoneMountPoint(
   let calculatedLeft = inputRect.right - VOICE_BUTTON_SIZE - 56
   let calculatedTop = inputRect.top + (inputRect.height - VOICE_BUTTON_SIZE) / 2
 
-  if (sourceRect && sendRect) {
+  if (sourceRect && sendRect && sourceCounterElement && sendButtonElement) {
     const initialAvailableGap = sendRect.left - sourceRect.right
     ensureSourceCounterSpacing(sourceCounterElement, VOICE_LANE_MIN_GAP, initialAvailableGap)
 

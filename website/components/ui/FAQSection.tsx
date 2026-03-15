@@ -188,11 +188,16 @@ export default function FAQSection() {
 
   useEffect(() => {
     if (typeof window === "undefined") { setHasEntered(true); return; }
-    let timeout: ReturnType<typeof setTimeout>;
+    let timeout: number | undefined;
     const onLoad = () => { timeout = window.setTimeout(() => setHasEntered(true), 120); };
     if (document.readyState === "complete") { onLoad(); }
     else { window.addEventListener("load", onLoad, { once: true }); }
-    return () => { window.removeEventListener("load", onLoad); clearTimeout(timeout); };
+    return () => {
+      window.removeEventListener("load", onLoad);
+      if (timeout !== undefined) {
+        window.clearTimeout(timeout);
+      }
+    };
   }, []);
 
   const setCardGlow = (event: React.MouseEvent<HTMLLIElement>) => {

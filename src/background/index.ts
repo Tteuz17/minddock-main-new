@@ -21,7 +21,11 @@ const TOKEN_STORAGE_KEY = "notebooklm_session"
 const DEFAULT_NOTEBOOK_KEY = "nexus_default_notebook_id"
 const LEGACY_DEFAULT_NOTEBOOK_KEY = "minddock_default_notebook"
 const SELECTION_MENU_CONTEXTS: chrome.contextMenus.ContextType[] = ["selection", "page"]
-const hasContextMenusApi = Boolean(chrome.contextMenus?.create && chrome.contextMenus?.update)
+const hasContextMenusApi =
+  typeof chrome !== "undefined" &&
+  typeof (chrome as { contextMenus?: unknown }).contextMenus === "object" &&
+  typeof (chrome as { contextMenus?: { create?: unknown } }).contextMenus?.create === "function" &&
+  typeof (chrome as { contextMenus?: { update?: unknown } }).contextMenus?.update === "function"
 
 let ensureSelectionMenuInFlight: Promise<void> | null = null
 
