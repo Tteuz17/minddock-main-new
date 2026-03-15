@@ -101,12 +101,7 @@ export function ZettelLinkNotes() {
     setIsSuggesting(true)
     setSuggestions([])
     try {
-      const response = await chrome.runtime.sendMessage({
-        command: "MINDDOCK_IMPROVE_PROMPT",
-        payload: { prompt: "__SUGGEST_LINKS__" }
-      })
-      // Use ai-service directly via background is complex,
-      // so we call suggestLinks through the service import
+      // Suggestion scoring is local-only to avoid exposing provider API keys in the extension bundle.
       const { aiService } = await import("~/services/ai-service")
       const result = await aiService.suggestLinks(
         noteA.content,

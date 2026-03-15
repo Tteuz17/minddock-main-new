@@ -2,7 +2,6 @@ import { authManager } from "./auth-manager"
 import { storageManager } from "./storage-manager"
 import { subscriptionManager } from "./subscription"
 import { renderPdfBase64ViaOffscreen } from "./services/offscreen-pdf-service"
-import { aiService } from "~/services/ai-service"
 import { exportService } from "~/services/export-service"
 import { NotebookLMService, type SyncVerificationResult } from "~/services/NotebookLMService"
 import { zettelkastenService } from "~/services/zettelkasten"
@@ -145,7 +144,7 @@ function stripTrailingContextSnippet(value: string): string {
   const [fullMatch, innerRaw] = parentheticalMatch
   const inner = String(innerRaw ?? "").trim()
   const words = inner.split(/\s+/u).filter(Boolean)
-  const hasLetters = /[A-Za-zÀ-ÖØ-öø-ÿ]/u.test(inner)
+  const hasLetters = /[A-Za-z\u00c0-\u00ff]/u.test(inner)
   const looksLikeContextSnippet = hasLetters && (words.length >= 3 || inner.length >= 22)
 
   if (!looksLikeContextSnippet) {
@@ -2018,9 +2017,22 @@ class MessageRouter {
       if (requestedResync) {
         this.emitResyncProgress(capturedFromUrl, "error")
       }
-      const errorMessage = error instanceof Error ? error.message : "Falha ao importar conversa."
+      const rawErrorMessage = error instanceof Error ? error.message : "Falha ao importar conversa."
+      const normalizedErrorMessageKey = String(rawErrorMessage ?? "")
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .toLowerCase()
+
+      const userFacingErrorMessage =
+        normalizedErrorMessageKey.includes("unexpected end of json input") ||
+        normalizedErrorMessageKey.includes("fim inesperado da entrada json") ||
+        normalizedErrorMessageKey.includes("json parse") ||
+        normalizedErrorMessageKey.includes("json.parse")
+          ? "Resposta invalida do NotebookLM/YouTube. Recarregue o YouTube e o NotebookLM e tente novamente."
+          : rawErrorMessage
+
       if (requestedResync) {
-        const normalizedErrorDetail = String(errorMessage ?? "").replace(/\s+/g, " ").trim()
+        const normalizedErrorDetail = String(rawErrorMessage ?? "").replace(/\s+/g, " ").trim()
         const errorCode = this.classifyResyncErrorCode(normalizedErrorDetail)
         return this.fail(
           errorCode,
@@ -2032,7 +2044,7 @@ class MessageRouter {
           )
         )
       }
-      return this.fail(errorMessage)
+      return this.fail(userFacingErrorMessage)
     } finally {
       if (requestedResync && resyncInFlightKey) {
         this.resyncInFlight.delete(resyncInFlightKey)
@@ -2065,7 +2077,9 @@ class MessageRouter {
     // await storageManager.incrementUsage("aiCalls")
     // return this.ok({ improved })
     
-    return this.fail("Funcionalidade de melhoria de prompts temporariamente desabilitada. Configure PLASMO_PUBLIC_CLAUDE_API_KEY no .env para ativar.")
+    return this.fail(
+      "Funcionalidade de melhoria de prompts temporariamente desabilitada no cliente. Use um proxy server-side para IA."
+    )
   }
 
   private async handlePromptOptions(payload: unknown): Promise<StandardResponse> {
@@ -2075,10 +2089,12 @@ class MessageRouter {
     // const options = await aiService.generatePromptOptions(prompt)
     // return this.ok({ options })
     
-    return this.fail("Funcionalidade de opcoes de prompt temporariamente desabilitada. Configure PLASMO_PUBLIC_CLAUDE_API_KEY no .env para ativar.")
+    return this.fail(
+      "Funcionalidade de opcoes de prompt temporariamente desabilitada no cliente. Use um proxy server-side para IA."
+    )
   }
 
-  // ─── Focus Threads ─────────────────────────────────────────────────────────
+  // ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ Focus Threads ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬
 
   private async handleThreadList(payload: unknown): Promise<StandardResponse> {
     const { userId, notebookId } = payload as { userId: string; notebookId: string }
@@ -2189,7 +2205,9 @@ class MessageRouter {
     // await storageManager.incrementUsage("aiCalls")
     // return this.ok({ count: notes.length })
     
-    return this.fail("Funcionalidade de atomizacao temporariamente desabilitada. Configure PLASMO_PUBLIC_CLAUDE_API_KEY no .env para ativar.")
+    return this.fail(
+      "Funcionalidade de atomizacao temporariamente desabilitada no cliente. Use um proxy server-side para IA."
+    )
   }
 
   private async handleExportSources(payload: unknown): Promise<StandardResponse> {
@@ -2264,7 +2282,9 @@ class MessageRouter {
     // const notes = await aiService.atomizeContent(content)
     // return this.ok({ notes })
     
-    return this.fail("Funcionalidade de atomizacao temporariamente desabilitada. Configure PLASMO_PUBLIC_CLAUDE_API_KEY no .env para ativar.")
+    return this.fail(
+      "Funcionalidade de atomizacao temporariamente desabilitada no cliente. Use um proxy server-side para IA."
+    )
   }
 
   private async handleSaveAtomicNotes(payload: unknown): Promise<StandardResponse> {

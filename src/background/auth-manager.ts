@@ -34,13 +34,7 @@ class AuthManager {
       return profile
     }
 
-    // Sem sessão Supabase — mas preserva perfis dev (id começa com "dev-")
-    const existingProfile = await getFromStorage<UserProfile>(STORAGE_KEYS.USER_PROFILE)
-    if (existingProfile?.id?.startsWith("dev-")) {
-      this.notifyListeners(existingProfile)
-      return existingProfile
-    }
-
+    // Sem sessao Supabase: limpa estado local e notifica logout.
     await removeFromStorage(FIXED_STORAGE_KEYS.SUPABASE_SESSION)
     await removeFromStorage(STORAGE_KEYS.USER_PROFILE)
     this.notifyListeners(null)
@@ -147,11 +141,6 @@ class AuthManager {
   }
 
   async getCurrentUser(): Promise<UserProfile | null> {
-    const cached = await getFromStorage<UserProfile>(STORAGE_KEYS.USER_PROFILE)
-    if (cached) {
-      return cached
-    }
-
     const client = await this.getClient()
     const { data: sessionData, error: sessionError } = await client.auth.getSession()
 
@@ -161,7 +150,14 @@ class AuthManager {
 
     const sessionUser = sessionData.session?.user
     if (!sessionUser) {
+      await removeFromStorage(FIXED_STORAGE_KEYS.SUPABASE_SESSION)
+      await removeFromStorage(STORAGE_KEYS.USER_PROFILE)
       return null
+    }
+
+    const cached = await getFromStorage<UserProfile>(STORAGE_KEYS.USER_PROFILE)
+    if (cached?.id === sessionUser.id) {
+      return cached
     }
 
     return this.fetchProfile(sessionUser)

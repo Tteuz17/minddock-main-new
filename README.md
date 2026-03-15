@@ -22,18 +22,50 @@ minddock-main/
 
 ## Como buildar
 
-1. Instale dependencias:
+1. Configure ambiente:
+```bash
+# PowerShell (Windows)
+Copy-Item .env.example .env
+```
+- Preencha obrigatoriamente:
+  - `PLASMO_PUBLIC_SUPABASE_URL`
+  - `PLASMO_PUBLIC_SUPABASE_ANON_KEY`
+
+2. Instale dependencias:
 ```bash
 npm install
 ```
-2. Build de producao:
+3. Build de producao:
 ```bash
 npm run build
 ```
-3. Desenvolvimento:
+4. Desenvolvimento:
 ```bash
 npm run dev
 ```
+
+## Notion OAuth (server-side)
+
+Para exportar ao Notion sem expor segredo no bundle da extensao:
+
+1. Defina o secret no Supabase:
+```bash
+supabase secrets set NOTION_CLIENT_SECRET=seu_secret_do_notion
+```
+
+2. Deploy da Edge Function:
+```bash
+supabase functions deploy notion-oauth-exchange --no-verify-jwt
+```
+
+3. No `.env` da extensao, opcionalmente configure:
+`PLASMO_PUBLIC_NOTION_OAUTH_EXCHANGE_ENDPOINT=https://<seu-projeto>.supabase.co/functions/v1/notion-oauth-exchange`
+
+Se essa variavel nao for definida, a extensao usa automaticamente
+`<PLASMO_PUBLIC_SUPABASE_URL>/functions/v1/notion-oauth-exchange`.
+
+4. No app de integracao do Notion, adicione o Redirect URI da extensao:
+`https://<extension-id>.chromiumapp.org/`
 
 ## Como carregar a extensao
 

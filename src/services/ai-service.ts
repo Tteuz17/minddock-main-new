@@ -1,33 +1,79 @@
-/**
- * MindDock AI Service (Claude API)
- * Current MVP calls Claude directly from the background.
- * Production path should move this to server-side functions.
- */
+import type { Note } from "~/lib/types"
 
-import Anthropic from "@anthropic-ai/sdk"
-import { CLAUDE_CONFIG } from "~/lib/constants"
-import type { Note, SubscriptionTier } from "~/lib/types"
+const STOPWORDS = new Set([
+  "a",
+  "an",
+  "and",
+  "are",
+  "as",
+  "at",
+  "by",
+  "com",
+  "da",
+  "de",
+  "do",
+  "dos",
+  "e",
+  "em",
+  "for",
+  "in",
+  "is",
+  "na",
+  "no",
+  "of",
+  "on",
+  "or",
+  "para",
+  "por",
+  "the",
+  "to",
+  "um",
+  "uma",
+  "with"
+])
 
-const CLAUDE_API_KEY = process.env.PLASMO_PUBLIC_CLAUDE_API_KEY!
+function normalizeWhitespace(value: string): string {
+  return String(value ?? "")
+    .replace(/\r/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim()
+}
+
+function tokenize(value: string): string[] {
+  return normalizeWhitespace(value)
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .split(/[^a-z0-9]+/u)
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 3 && !STOPWORDS.has(token))
+}
+
+function jaccardSimilarity(a: readonly string[], b: readonly string[]): number {
+  const setA = new Set(a)
+  const setB = new Set(b)
+  if (setA.size === 0 || setB.size === 0) {
+    return 0
+  }
+
+  let intersection = 0
+  for (const token of setA) {
+    if (setB.has(token)) {
+      intersection += 1
+    }
+  }
+
+  const union = setA.size + setB.size - intersection
+  return union <= 0 ? 0 : intersection / union
+}
+
+function buildTitleFromChunk(contentChunk: string, index: number): string {
+  const firstSentence = contentChunk.split(/[.!?]/u).map((part) => part.trim()).find(Boolean) ?? ""
+  const clipped = firstSentence.slice(0, 58).trim()
+  return clipped || `Atomic note ${index + 1}`
+}
 
 class AIService {
-  private getClient(tier: SubscriptionTier = "thinker"): Anthropic {
-    void tier
-    return new Anthropic({
-      apiKey: CLAUDE_API_KEY,
-      dangerouslyAllowBrowser: true
-    })
-  }
-
-  private getModel(tier: SubscriptionTier): string {
-    return tier === "thinker_pro" ? CLAUDE_CONFIG.MODEL_PRO : CLAUDE_CONFIG.MODEL_DEFAULT
-  }
-
-  private extractMessageText(response: unknown): string {
-    const firstBlock = (response as { content?: Array<{ text?: string }> })?.content?.[0]
-    return String(firstBlock?.text ?? "").trim()
-  }
-
   private buildPromptOptionFallbacks(
     userPrompt: string
   ): Array<{ title: string; prompt: string }> {
@@ -107,66 +153,30 @@ class AIService {
     ]
   }
 
-  private normalizePromptOptions(
-    rawOptions: unknown,
-    userPrompt: string
-  ): Array<{ title: string; prompt: string }> {
-    const fallback = this.buildPromptOptionFallbacks(userPrompt)
-
-    if (!Array.isArray(rawOptions)) {
-      return fallback
-    }
-
-    const normalized = rawOptions
-      .slice(0, 3)
-      .map((item, index) => {
-        const title =
-          String((item as { title?: string })?.title ?? "").trim() || fallback[index].title
-        const prompt = String((item as { prompt?: string })?.prompt ?? "").trim()
-
-        if (!prompt) {
-          return fallback[index]
-        }
-
-        return {
-          title,
-          prompt
-        }
-      })
-
-    while (normalized.length < 3) {
-      normalized.push(fallback[normalized.length])
-    }
-
-    return normalized
-  }
-
   async improvePrompt(userPrompt: string): Promise<string> {
-    const client = this.getClient()
+    const normalizedPrompt = normalizeWhitespace(userPrompt)
+    if (!normalizedPrompt) {
+      return ""
+    }
 
-    const systemPrompt = `You are an expert prompt engineer for Google NotebookLM.
-Your task is to rewrite the user's prompt so it produces a stronger answer in NotebookLM.
-
-Rules:
-- Keep the user's original intent.
-- Make the prompt clearer, more specific, and more useful.
-- Add a concrete objective, output expectations, and quality criteria when helpful.
-- The final rewritten prompt must be in English only.
-- Return only the rewritten prompt, with no explanation.`
-
-    const response = await client.messages.create({
-      model: this.getModel("thinker"),
-      max_tokens: 500,
-      system: systemPrompt,
-      messages: [
-        {
-          role: "user",
-          content: `Rewrite this prompt in better English for NotebookLM:\n\n${userPrompt}`
-        }
-      ]
-    })
-
-    return this.extractMessageText(response)
+    return [
+      `Question to answer: "${normalizedPrompt}"`,
+      "",
+      "Goal:",
+      "- Provide a clear, direct answer first.",
+      "",
+      "Context to use:",
+      "- Use the notebook sources as the primary evidence base.",
+      "- Separate source-backed facts from inference when uncertainty exists.",
+      "",
+      "Required output:",
+      "- Direct answer in one paragraph.",
+      "- Key evidence as bullet points.",
+      "- Final section: practical implications and next steps.",
+      "",
+      "Quality bar:",
+      "- Be precise, concise, and explicit about limitations."
+    ].join("\n")
   }
 
   async atomizeContent(
@@ -177,172 +187,59 @@ Rules:
       "id" | "userId" | "notebookId" | "linkedNoteIds" | "backlinks" | "createdAt" | "updatedAt"
     >[]
   > {
-    const client = this.getClient()
-
-    const systemPrompt = `You are a Zettelkasten specialist.
-
-Split the provided text into atomic notes, where each note contains exactly one concept or idea.
-
-Return a JSON array in this format:
-[
-  {
-    "title": "concise note title (max 60 chars)",
-    "content": "complete self-contained note content in markdown",
-    "tags": ["tag1", "tag2"],
-    "source": "zettel_maker"
-  }
-]
-
-Rules:
-- One idea per note.
-- Each note must make sense on its own.
-- Titles must be short and precise.
-- Content should be markdown and between 50 and 300 words.
-- Use 2 to 5 relevant tags.
-- Return at least 3 notes and at most 15 notes.`
-
-    const response = await client.messages.create({
-      model: this.getModel("thinker"),
-      max_tokens: CLAUDE_CONFIG.MAX_TOKENS,
-      system: systemPrompt,
-      messages: [
-        {
-          role: "user",
-          content: `Atomize this content into Zettelkasten notes:\n\n${content.slice(0, 8000)}`
-        }
-      ]
-    })
-
-    try {
-      const text = this.extractMessageText(response)
-      const jsonMatch = text.match(/\[[\s\S]*\]/)
-      if (!jsonMatch) return []
-      return JSON.parse(jsonMatch[0])
-    } catch {
-      console.error("[MindDock] Failed to parse atomic notes")
+    const normalized = normalizeWhitespace(content)
+    if (!normalized) {
       return []
     }
+
+    const paragraphChunks = normalized
+      .split(/\n{2,}/u)
+      .map((chunk) => chunk.trim())
+      .filter(Boolean)
+
+    const chunks = (paragraphChunks.length > 0 ? paragraphChunks : [normalized]).slice(0, 15)
+
+    return chunks.map((chunk, index) => {
+      const chunkTokens = tokenize(chunk)
+      const tags = Array.from(new Set(chunkTokens)).slice(0, 5)
+      return {
+        title: buildTitleFromChunk(chunk, index),
+        content: chunk.slice(0, 2500),
+        tags,
+        source: "zettel_maker"
+      }
+    })
   }
 
   async generatePromptOptions(
     userPrompt: string
   ): Promise<Array<{ title: string; prompt: string }>> {
-    const client = this.getClient()
-    const safePrompt = userPrompt.trim().slice(0, 900)
-
-    if (!safePrompt) {
-      return this.buildPromptOptionFallbacks(userPrompt)
-    }
-
-    const systemPrompt = `You are a senior prompt architect for Google NotebookLM.
-Your job is to transform the user's exact question into exactly 3 excellent prompt options that are ready to paste into NotebookLM.
-
-Critical requirements:
-- Preserve the user's true intent.
-- Use the user's real question as the core task in every option.
-- Write everything in English only.
-- Return exactly 3 options.
-- Return JSON only, with no markdown and no extra commentary.
-
-The 3 options must use these fixed angles:
-1. "Deep analysis" -> rigorous analysis, comparisons, evidence, nuance.
-2. "Structured brief" -> clear sections, scan-friendly formatting, strong organization.
-3. "Practical synthesis" -> practical implications, examples, decisions, next steps.
-
-Every prompt must:
-- Be fully self-contained.
-- Explicitly tell NotebookLM to rely on the notebook sources first.
-- Explicitly tell NotebookLM to separate source-backed statements from inference when needed.
-- Be significantly better than the user's original wording.
-- Be between 120 and 220 words.
-
-Each prompt body must contain these exact sections:
-- Goal:
-- Context to use:
-- Required output:
-- Quality bar:
-
-Return this exact JSON shape:
-[
-  {"title":"Deep analysis","prompt":"..."},
-  {"title":"Structured brief","prompt":"..."},
-  {"title":"Practical synthesis","prompt":"..."}
-]`
-
-    const response = await client.messages.create({
-      model: this.getModel("thinker"),
-      max_tokens: 1200,
-      system: systemPrompt,
-      messages: [
-        {
-          role: "user",
-          content: [
-            "Build 3 prompt options for this exact user question.",
-            "Do not answer the question itself.",
-            "Do not drift away from the user's intent.",
-            "",
-            "<user_question>",
-            safePrompt,
-            "</user_question>"
-          ].join("\n")
-        }
-      ]
-    })
-
-    try {
-      const text = this.extractMessageText(response)
-      const jsonMatch = text.match(/\[[\s\S]*\]/)
-      if (!jsonMatch) {
-        return this.buildPromptOptionFallbacks(userPrompt)
-      }
-
-      const parsed = JSON.parse(jsonMatch[0])
-      return this.normalizePromptOptions(parsed, userPrompt)
-    } catch {
-      console.error("[MindDock] Failed to parse prompt options")
-      return this.buildPromptOptionFallbacks(userPrompt)
-    }
+    return this.buildPromptOptionFallbacks(userPrompt)
   }
 
   async suggestLinks(
     noteContent: string,
     existingNotes: Array<{ id: string; title: string; content: string }>
   ): Promise<Array<{ noteId: string; noteTitle: string; relevance: number }>> {
-    if (existingNotes.length === 0) return []
-
-    const client = this.getClient()
-
-    const notesSummary = existingNotes
-      .slice(0, 30)
-      .map((note) => `ID:${note.id} | Title: ${note.title}`)
-      .join("\n")
-
-    const response = await client.messages.create({
-      model: this.getModel("thinker"),
-      max_tokens: 500,
-      messages: [
-        {
-          role: "user",
-          content: [
-            `Given this note:\n"${noteContent.slice(0, 500)}"`,
-            "",
-            `And these existing notes:\n${notesSummary}`,
-            "",
-            'Return a JSON array with the most relevant notes to link (max 5):',
-            '[{"noteId": "...", "noteTitle": "...", "relevance": 0.0}]'
-          ].join("\n")
-        }
-      ]
-    })
-
-    try {
-      const text = this.extractMessageText(response)
-      const jsonMatch = text.match(/\[[\s\S]*\]/)
-      if (!jsonMatch) return []
-      return JSON.parse(jsonMatch[0])
-    } catch {
+    if (!Array.isArray(existingNotes) || existingNotes.length === 0) {
       return []
     }
+
+    const sourceTokens = tokenize(noteContent)
+
+    return existingNotes
+      .map((note) => {
+        const noteTokens = tokenize(`${note.title} ${note.content}`)
+        const relevance = jaccardSimilarity(sourceTokens, noteTokens)
+        return {
+          noteId: String(note.id ?? "").trim(),
+          noteTitle: String(note.title ?? "").trim() || "Untitled note",
+          relevance: Math.round(relevance * 1000) / 1000
+        }
+      })
+      .filter((candidate) => candidate.noteId && candidate.relevance > 0)
+      .sort((left, right) => right.relevance - left.relevance)
+      .slice(0, 5)
   }
 }
 
