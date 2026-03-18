@@ -16,7 +16,7 @@ const CORS_HEADERS = {
   "Access-Control-Allow-Methods": "POST, OPTIONS"
 }
 
-const AI_ACTIONS = ["improvePrompt", "atomizeContent", "generatePromptOptions", "suggestLinks"] as const
+const AI_ACTIONS = ["improvePrompt", "atomizeContent", "generatePromptOptions", "suggestLinks", "brainMerge"] as const
 type AIAction = (typeof AI_ACTIONS)[number]
 
 // Tiers that can use AI features
@@ -99,8 +99,7 @@ Deno.serve(async (req: Request) => {
 
   // ── 4. Call Claude API ──────────────────────────────────────────────────────
   const claude = new Anthropic({ apiKey: claudeApiKey })
-  const tier = profile.subscription_tier as "thinker" | "thinker_pro"
-  const model = tier === "thinker_pro" ? "claude-opus-4-6" : "claude-sonnet-4-6"
+  const model = "claude-sonnet-4-6"
 
   try {
     const result = await dispatchAction(claude, model, body.action, body.payload)
@@ -204,6 +203,44 @@ Return: [{"title":"...","prompt":"..."},{"title":"...","prompt":"..."},{"title":
       const text = extractText(response)
       const match = text.match(/\[[\s\S]*\]/)
       return match ? JSON.parse(match[0]) : []
+    }
+
+    case "brainMerge": {
+      const sources = (payload.sources as Array<{ notebookTitle: string; sourceTitle: string; content: string }> ?? [])
+        .slice(0, 20)
+        .map((s) => ({
+          notebookTitle: String(s.notebookTitle ?? "").slice(0, 120),
+          sourceTitle: String(s.sourceTitle ?? "").slice(0, 120),
+          content: String(s.content ?? "").slice(0, 6000)
+        }))
+
+      const goal = String(payload.goal ?? "").slice(0, 600)
+
+      const sourcesBlock = sources.map((s, i) =>
+        `### Source ${i + 1}: ${s.sourceTitle} (from notebook: ${s.notebookTitle})\n\n${s.content}`
+      ).join("\n\n---\n\n")
+
+      const response = await claude.messages.create({
+        model,
+        max_tokens: 4096,
+        system: `You are a knowledge synthesis expert.
+You receive content from multiple knowledge sources (from different notebooks) and a user goal.
+Your task is to produce a single, coherent, well-structured document that synthesizes the most relevant information from all sources specifically to serve the user's goal.
+
+Rules:
+- Focus strictly on what is relevant to the goal.
+- Combine and connect insights from different notebooks when they complement each other.
+- Structure the output as a clear markdown document with sections.
+- Start with a brief "Brain Merge Summary" section explaining what was synthesized and why.
+- Be specific — cite which notebook or source each insight comes from.
+- Do NOT pad. Only include what is genuinely useful for the goal.
+- Write in the same language the user used for the goal.`,
+        messages: [{
+          role: "user",
+          content: `Goal: ${goal}\n\n## Sources\n\n${sourcesBlock}`
+        }]
+      })
+      return extractText(response)
     }
   }
 }

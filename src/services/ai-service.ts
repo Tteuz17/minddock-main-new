@@ -81,6 +81,13 @@ class AIService {
       { noteContent, existingNotes }
     )
   }
+
+  async brainMerge(
+    sources: Array<{ notebookTitle: string; sourceTitle: string; content: string }>,
+    goal: string
+  ): Promise<string> {
+    return callAiProxy<string>("brainMerge", { sources, goal })
+  }
 }
 
 export const aiService = new AIService()

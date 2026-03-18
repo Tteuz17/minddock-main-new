@@ -6,13 +6,18 @@ import { ImportsHub } from "~/popup/components/ImportsHub"
 import { AgilePromptsHub } from "~/popup/components/AgilePromptsHub"
 import { DocksHub } from "~/popup/components/DocksHub"
 import { HighlightHub } from "~/popup/components/HighlightHub"
+import { UsageHub } from "~/popup/components/UsageHub"
+import { PlanSelector } from "~/popup/components/PlanSelector"
+import { ZettelHub } from "~/popup/components/ZettelHub"
+import { PromptLab } from "~/popup/components/PromptLab"
+import { BrainMergeHub } from "~/popup/components/BrainMergeHub"
 import { useAuth } from "~/hooks/useAuth"
 import { AuthScreen } from "~/popup/components/AuthScreen"
 import { LoadingSpinner } from "~/components/LoadingSpinner"
 import { STORAGE_KEYS } from "~/lib/constants"
 import type { SidePanelLaunchTarget } from "~/lib/types"
 
-type PopupView = "home" | "imports" | "agile" | "docks" | "highlights"
+type PopupView = "home" | "imports" | "agile" | "docks" | "highlights" | "usage" | "plans" | "zettel" | "prompt-lab" | "brain-merge"
 
 export default function PopupApplication() {
   const { isAuthenticated, isLoading } = useAuth()
@@ -78,6 +83,56 @@ export default function PopupApplication() {
             className="flex h-full flex-col">
             <HighlightHub onBack={() => setView("home")} />
           </motion.div>
+        ) : view === "usage" ? (
+          <motion.div
+            key="usage"
+            initial={{ opacity: 0, x: 20 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: 20 }}
+            transition={{ duration: 0.18 }}
+            className="flex h-full flex-col">
+            <UsageHub onBack={() => setView("home")} />
+          </motion.div>
+        ) : view === "plans" ? (
+          <motion.div
+            key="plans"
+            initial={{ opacity: 0, x: 20 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: 20 }}
+            transition={{ duration: 0.18 }}
+            className="flex h-full flex-col">
+            <PlanSelector onBack={() => setView("home")} />
+          </motion.div>
+        ) : view === "zettel" ? (
+          <motion.div
+            key="zettel"
+            initial={{ opacity: 0, x: 20 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: 20 }}
+            transition={{ duration: 0.18 }}
+            className="flex h-full flex-col">
+            <ZettelHub onBack={() => setView("home")} />
+          </motion.div>
+        ) : view === "prompt-lab" ? (
+          <motion.div
+            key="prompt-lab"
+            initial={{ opacity: 0, x: 20 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: 20 }}
+            transition={{ duration: 0.18 }}
+            className="flex h-full flex-col">
+            <PromptLab onBack={() => setView("home")} />
+          </motion.div>
+        ) : view === "brain-merge" ? (
+          <motion.div
+            key="brain-merge"
+            initial={{ opacity: 0, x: 20 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: 20 }}
+            transition={{ duration: 0.18 }}
+            className="flex h-full flex-col">
+            <BrainMergeHub onBack={() => setView("home")} />
+          </motion.div>
         ) : (
           <motion.div
             key="home"
@@ -88,9 +143,14 @@ export default function PopupApplication() {
             className="flex h-full flex-col">
             <HomeDashboard
               onOpenSidePanel={openSidePanel}
-              onOpenZettelHub={() => setView("docks")}
+              onOpenZettelHub={() => setView("zettel")}
+              onOpenPromptLab={() => setView("prompt-lab")}
+              onOpenBrainMerge={() => setView("brain-merge")}
             />
-            <UserMenu />
+            <UserMenu
+              onOpenUsage={() => setView("usage")}
+              onOpenPlans={() => setView("plans")}
+            />
           </motion.div>
         )}
       </AnimatePresence>

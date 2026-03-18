@@ -8,8 +8,7 @@ import {
   BookOpenText,
   Eye,
   EyeOff,
-  Network,
-  NotebookPen,
+  GitMerge,
   RefreshCw,
   Settings2,
   Workflow
@@ -31,6 +30,8 @@ import type { SidePanelLaunchTarget } from "~/lib/types"
 interface HomeDashboardProps {
   onOpenSidePanel: (target: SidePanelLaunchTarget) => void | Promise<void>
   onOpenZettelHub?: () => void
+  onOpenPromptLab?: () => void
+  onOpenBrainMerge?: () => void
 }
 
 interface DailyUsageSnapshot {
@@ -143,7 +144,7 @@ function resolveDefaultNotebookIdFromSnapshot(
   )
 }
 
-export function HomeDashboard({ onOpenSidePanel, onOpenZettelHub }: HomeDashboardProps) {
+export function HomeDashboard({ onOpenSidePanel, onOpenZettelHub, onOpenPromptLab, onOpenBrainMerge }: HomeDashboardProps) {
   const { limits } = useSubscription()
   const {
     notebooks: fetchedNotebooks,
@@ -153,7 +154,7 @@ export function HomeDashboard({ onOpenSidePanel, onOpenZettelHub }: HomeDashboar
   const [dailyUsage, setDailyUsage] = useState<DailyUsageSnapshot>(EMPTY_USAGE)
   const [componentsVisible, setComponentsVisible] = useState(true)
   const [defaultNotebookId, setDefaultNotebookId] = useState("")
-  const [notebookAccountLabel, setNotebookAccountLabel] = useState("Conta NotebookLM nao confirmada")
+  const [notebookAccountLabel, setNotebookAccountLabel] = useState("NotebookLM account not confirmed")
   const [isSavingDefaultNotebook, setIsSavingDefaultNotebook] = useState(false)
   const [isDefaultNotebookMenuOpen, setIsDefaultNotebookMenuOpen] = useState(false)
 
@@ -201,7 +202,7 @@ export function HomeDashboard({ onOpenSidePanel, onOpenZettelHub }: HomeDashboar
 
       const accountScope = resolveNotebookAccountScope(snapshot)
       const label = accountScope.accountEmail ?? (accountScope.authUser ? `authuser:${accountScope.authUser}` : "")
-      setNotebookAccountLabel(label || "Conta NotebookLM nao confirmada")
+      setNotebookAccountLabel(label || "NotebookLM account not confirmed")
       setDefaultNotebookId(resolveDefaultNotebookIdFromSnapshot(snapshot, accountScope))
     }
 
@@ -340,7 +341,7 @@ export function HomeDashboard({ onOpenSidePanel, onOpenZettelHub }: HomeDashboar
       icon: BookMarked,
       accent: "rgba(250,204,21,0.18)",
       accentEdge: "rgba(250,204,21,0.24)",
-      onClick: () => chrome.tabs.create({ url: `${URLS.MINDDOCK_LANDING}/pricing` })
+      onClick: () => onOpenPromptLab ? onOpenPromptLab() : chrome.tabs.create({ url: `${URLS.MINDDOCK_LANDING}/pricing` })
     },
     {
       title: "Focus Dock",
@@ -348,23 +349,15 @@ export function HomeDashboard({ onOpenSidePanel, onOpenZettelHub }: HomeDashboar
       icon: Workflow,
       accent: "rgba(59,130,246,0.16)",
       accentEdge: "rgba(96,165,250,0.22)",
-      onClick: () => onOpenZettelHub?.()
-    },
-    {
-      title: "Modo Zettel",
-      note: "Create atomic notes and connect core ideas.",
-      icon: NotebookPen,
-      accent: "rgba(244,114,182,0.14)",
-      accentEdge: "rgba(244,114,182,0.2)",
       onClick: () => onOpenSidePanel("create_note")
     },
     {
-      title: "Smart Video Import",
-      note: "Import and process video context automatically.",
-      icon: Network,
-      accent: "rgba(16,185,129,0.16)",
-      accentEdge: "rgba(52,211,153,0.22)",
-      comingSoon: true
+      title: "Brain Merge",
+      note: "Combine multiple notebooks with AI for a specific goal.",
+      icon: GitMerge,
+      accent: "rgba(168,85,247,0.16)",
+      accentEdge: "rgba(192,132,252,0.22)",
+      onClick: () => onOpenBrainMerge ? onOpenBrainMerge() : undefined
     }
   ]
 
@@ -435,8 +428,8 @@ export function HomeDashboard({ onOpenSidePanel, onOpenZettelHub }: HomeDashboar
                 }}
                 title={
                   componentsVisible
-                    ? "Desligar visualizacoes do MindDock no NotebookLM"
-                    : "Ligar visualizacoes do MindDock no NotebookLM"
+                    ? "Turn off MindDock overlays in NotebookLM"
+                    : "Turn on MindDock overlays in NotebookLM"
                 }
                 data-active={componentsVisible ? "true" : "false"}
                 className="liquid-metal-button">
@@ -466,14 +459,14 @@ export function HomeDashboard({ onOpenSidePanel, onOpenZettelHub }: HomeDashboar
               <div className="flex items-start justify-between gap-2">
                 <div>
                   <p className="text-[9px] font-medium uppercase tracking-[0.15em] text-zinc-500">
-                    Importacao diaria
+                    Daily imports
                   </p>
                   <div className="mt-0.5 flex items-end gap-1.5">
                     <span className="text-[21px] font-semibold leading-none tracking-[-0.05em] text-white">
                       {usedImports}
                     </span>
                     <span className="pb-0.5 text-[10px] text-zinc-400">
-                      {importLimit ? `/ ${importLimit}` : "hoje"}
+                      {importLimit ? `/ ${importLimit}` : "today"}
                     </span>
                   </div>
                 </div>
@@ -504,8 +497,8 @@ export function HomeDashboard({ onOpenSidePanel, onOpenZettelHub }: HomeDashboar
 
               <div className="mt-1 text-[9px] text-zinc-500">
                 {importLimit
-                  ? `${remainingImports} restante${remainingImports === 1 ? "" : "s"} hoje`
-                  : `${usedImports} ${usedImports === 1 ? "importacao" : "importacoes"} hoje`}
+                  ? `${remainingImports} remaining today`
+                  : `${usedImports} ${usedImports === 1 ? "import" : "imports"} today`}
               </div>
             </div>
           </motion.section>
@@ -518,7 +511,7 @@ export function HomeDashboard({ onOpenSidePanel, onOpenZettelHub }: HomeDashboar
             <div className="liquid-glass-content">
               <div className="flex items-center justify-between gap-2">
                 <p className="text-[9px] font-medium uppercase tracking-[0.15em] text-zinc-500">
-                  Caderno padrao
+                  Default notebook
                 </p>
                 <p className="max-w-[180px] truncate text-[9px] text-zinc-400" title={notebookAccountLabel}>
                   {notebookAccountLabel}
@@ -534,8 +527,8 @@ export function HomeDashboard({ onOpenSidePanel, onOpenZettelHub }: HomeDashboar
                     className="flex h-8 w-full items-center justify-between gap-2 rounded-[10px] border border-white/10 bg-black/30 px-2 text-left text-[11px] text-zinc-100 transition hover:border-white/20 disabled:cursor-not-allowed disabled:opacity-60">
                     <span className="truncate">
                       {isLoadingNotebooks
-                        ? "Carregando cadernos..."
-                        : selectedNotebookTitle || "Selecionar caderno padrao"}
+                        ? "Loading notebooks..."
+                        : selectedNotebookTitle || "Select default notebook"}
                     </span>
                     <ChevronDown
                       size={13}
@@ -577,7 +570,7 @@ export function HomeDashboard({ onOpenSidePanel, onOpenZettelHub }: HomeDashboar
                     void reloadNotebooks()
                   }}
                   className="liquid-glass-soft inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-[10px] border border-white/8 text-zinc-200 transition hover:text-white disabled:cursor-not-allowed disabled:opacity-60"
-                  title="Atualizar cadernos">
+                  title="Refresh notebooks">
                   <RefreshCw
                     size={12}
                     strokeWidth={1.8}
@@ -655,16 +648,16 @@ export function HomeDashboard({ onOpenSidePanel, onOpenZettelHub }: HomeDashboar
           <div className="liquid-glass-content flex w-full items-center justify-between gap-3">
             <div className="min-w-0">
               <p className="text-[10px] font-medium uppercase tracking-[0.16em] text-zinc-500">
-                Modo Marca Texto
+                Highlight Mode
               </p>
-              <p className="mt-1 text-[10px] text-zinc-400">Suas citacoes ficam prontas para revisao.</p>
+              <p className="mt-1 text-[10px] text-zinc-400">Your citations are ready for review.</p>
             </div>
 
             <button
               type="button"
               onClick={() => onOpenSidePanel("notes")}
               className="liquid-glass-soft inline-flex h-8 shrink-0 items-center rounded-[12px] px-3 text-[10px] font-medium text-zinc-100 hover:-translate-y-px hover:text-white">
-              Ver todas as citacoes salvas
+              View all saved citations
             </button>
           </div>
         </motion.section>

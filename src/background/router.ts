@@ -239,6 +239,8 @@ class MessageRouter {
     this.register(MESSAGE_ACTIONS.THREAD_SAVE_MESSAGES, this.handleThreadSaveMessages)
     this.register(MESSAGE_ACTIONS.OPEN_SIDEPANEL, this.handleOpenSidePanel)
     this.register(MESSAGE_ACTIONS.CMD_RENDER_PDF_OFFSCREEN, this.handleRenderPdfOffscreen)
+    this.register(MESSAGE_ACTIONS.CMD_CREATE_CHECKOUT, this.handleCreateCheckout)
+    this.register(MESSAGE_ACTIONS.CMD_BRAIN_MERGE, this.handleBrainMerge)
 
     void this.compactChatSourceBindings()
   }
@@ -2445,17 +2447,17 @@ class MessageRouter {
     if (!canUseAI) {
       return this.fail("Melhoria de prompts requer plano Thinker ou superior.", {
         tier_required: "thinker",
-        upgrade_url: "https://minddock.app/#pricing"
+        upgrade_url: "https://minddocklm.digital/#pricing"
       })
     }
+    const limits = await subscriptionManager.getLimits()
     const canCallAI = await storageManager.checkUsageLimit(
       "aiCalls",
-      (await subscriptionManager.getLimits()).ai_calls_per_day ?? 0
+      limits.ai_calls_per_day ?? "unlimited"
     )
     if (!canCallAI) {
       return this.fail("Limite de chamadas de IA atingido para hoje.")
     }
-    
     // TODO: Descomentar quando tiver a chave da API do Claude
     // const improved = await aiService.improvePrompt(prompt)
     // await storageManager.incrementUsage("aiCalls")
@@ -2480,18 +2482,27 @@ class MessageRouter {
     if (!canUseAI) {
       return this.fail("Geração de opções requer plano Thinker ou superior.", {
         tier_required: "thinker",
-        upgrade_url: "https://minddock.app/#pricing"
+        upgrade_url: "https://minddocklm.digital/#pricing"
       })
     }
+    const limits = await subscriptionManager.getLimits()
     const canCallAI = await storageManager.checkUsageLimit(
       "aiCalls",
-      (await subscriptionManager.getLimits()).ai_calls_per_day ?? 0
+      limits.ai_calls_per_day ?? "unlimited"
     )
     if (!canCallAI) {
       return this.fail("Limite de chamadas de IA atingido para hoje.")
     }
+    const canUseMonthlyAgile = await storageManager.checkAiMonthlyLimit(
+      "agilePrompts",
+      limits.agile_prompts_per_month ?? "unlimited"
+    )
+    if (!canUseMonthlyAgile) {
+      return this.fail("Limite mensal do Agile Prompts atingido (50/mes).")
+    }
     const options = await aiService.generatePromptOptions(prompt)
     await storageManager.incrementUsage("aiCalls")
+    await storageManager.incrementAiMonthlyUsage("agilePrompts")
     return this.ok({ options })
   }
 
@@ -2608,16 +2619,24 @@ class MessageRouter {
     if (!canUseZettel) {
       return this.fail("Zettelkasten requer plano Thinker ou superior.", {
         tier_required: "thinker",
-        upgrade_url: "https://minddock.app/#pricing"
+        upgrade_url: "https://minddocklm.digital/#pricing"
       })
     }
 
+    const limits = await subscriptionManager.getLimits()
     const canCallAI = await storageManager.checkUsageLimit(
       "aiCalls",
-      (await subscriptionManager.getLimits()).ai_calls_per_day ?? 0
+      limits.ai_calls_per_day ?? "unlimited"
     )
     if (!canCallAI) {
       return this.fail("Limite de chamadas de IA atingido para hoje.")
+    }
+    const canUseMonthlyDocksSummary = await storageManager.checkAiMonthlyLimit(
+      "docksSummaries",
+      limits.docks_summaries_per_month ?? "unlimited"
+    )
+    if (!canUseMonthlyDocksSummary) {
+      return this.fail("Limite mensal de resumos do Docks atingido (12/mes).")
     }
 
     const user = await authManager.getCurrentUser()
@@ -2628,6 +2647,7 @@ class MessageRouter {
     const notes = await aiService.atomizeContent(content)
     await zettelkastenService.saveAtomicNotes(user.id, notes)
     await storageManager.incrementUsage("aiCalls")
+    await storageManager.incrementAiMonthlyUsage("docksSummaries")
     return this.ok({ count: notes.length })
   }
 
@@ -2713,20 +2733,29 @@ class MessageRouter {
     if (!canUseZettel) {
       return this.fail("Zettelkasten requer plano Thinker ou superior.", {
         tier_required: "thinker",
-        upgrade_url: "https://minddock.app/#pricing"
+        upgrade_url: "https://minddocklm.digital/#pricing"
       })
     }
 
+    const limits = await subscriptionManager.getLimits()
     const canCallAI = await storageManager.checkUsageLimit(
       "aiCalls",
-      (await subscriptionManager.getLimits()).ai_calls_per_day ?? 0
+      limits.ai_calls_per_day ?? "unlimited"
     )
     if (!canCallAI) {
       return this.fail("Limite de chamadas de IA atingido para hoje.")
     }
+    const canUseMonthlyDocksSummary = await storageManager.checkAiMonthlyLimit(
+      "docksSummaries",
+      limits.docks_summaries_per_month ?? "unlimited"
+    )
+    if (!canUseMonthlyDocksSummary) {
+      return this.fail("Limite mensal de resumos do Docks atingido (12/mes).")
+    }
 
     const notes = await aiService.atomizeContent(content)
     await storageManager.incrementUsage("aiCalls")
+    await storageManager.incrementAiMonthlyUsage("docksSummaries")
     return this.ok({ notes })
   }
 
@@ -3404,6 +3433,105 @@ class MessageRouter {
     await this.persistDefaultNotebookIdByAccount(scoped.accountKey, fallbackNotebookId)
 
     return fallbackNotebookId
+  }
+
+  private async handleCreateCheckout(payload: unknown): Promise<StandardResponse> {
+    const { priceId } = (payload ?? {}) as { priceId?: string }
+    if (!priceId) {
+      return this.fail("priceId ausente.")
+    }
+
+    const supabaseUrl = process.env.PLASMO_PUBLIC_SUPABASE_URL
+    if (!supabaseUrl) {
+      return this.fail("Supabase URL não configurada.")
+    }
+
+    const token = await authManager.getAccessToken()
+    if (!token) {
+      return this.fail("Não autenticado.")
+    }
+
+    try {
+      const res = await fetch(`${supabaseUrl}/functions/v1/create-checkout`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({ priceId })
+      })
+
+      const json = await res.json() as { url?: string; error?: string }
+
+      if (!res.ok || !json.url) {
+        return this.fail(json.error ?? `Erro ao criar checkout (${res.status})`)
+      }
+
+      return this.ok({ url: json.url })
+    } catch (err) {
+      return this.fail(`Falha ao criar sessão de checkout: ${String(err)}`)
+    }
+  }
+
+  private async handleBrainMerge(payload: unknown): Promise<StandardResponse> {
+    const data = (payload as {
+      notebookSources?: Array<{ notebookId: string; notebookTitle: string; sourceIds: string[] }>
+      goal?: string
+    }) ?? {}
+
+    const notebookSources = Array.isArray(data.notebookSources) ? data.notebookSources : []
+    const goal = String(data.goal ?? "").trim()
+
+    if (notebookSources.length === 0) {
+      return this.fail("Selecione pelo menos um notebook com fontes.")
+    }
+
+    if (!goal) {
+      return this.fail("Descreva o objetivo do Brain Merge.")
+    }
+
+    const canUseAI = await subscriptionManager.canUseFeature("ai_features")
+    if (!canUseAI) {
+      return this.fail("Brain Merge requer plano Thinker ou superior.", {
+        tier_required: "thinker",
+        upgrade_url: "https://minddocklm.digital/#pricing"
+      })
+    }
+
+    try {
+      const service = new NotebookLMService()
+      const flatSources: Array<{ notebookTitle: string; sourceTitle: string; content: string }> = []
+
+      for (const nb of notebookSources) {
+        const notebookId = String(nb.notebookId ?? "").trim()
+        const notebookTitle = String(nb.notebookTitle ?? "").trim()
+        const sourceIds = Array.isArray(nb.sourceIds)
+          ? nb.sourceIds.map((id) => String(id ?? "").trim()).filter(Boolean)
+          : []
+
+        if (!notebookId || sourceIds.length === 0) continue
+
+        const result = await service.getSourcesContent(notebookId, sourceIds)
+        const snippets = (result as { sourceSnippets?: Array<{ title?: string; content?: string }> }).sourceSnippets ?? []
+
+        for (const snippet of snippets) {
+          flatSources.push({
+            notebookTitle,
+            sourceTitle: String(snippet.title ?? "Untitled"),
+            content: String(snippet.content ?? "")
+          })
+        }
+      }
+
+      if (flatSources.length === 0) {
+        return this.fail("Nenhum conteudo encontrado nas fontes selecionadas.")
+      }
+
+      const document = await aiService.brainMerge(flatSources, goal)
+      return this.ok({ document })
+    } catch (error) {
+      return this.fail(error instanceof Error ? error.message : "Falha no Brain Merge.")
+    }
   }
 }
 
