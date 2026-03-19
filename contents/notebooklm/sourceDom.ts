@@ -120,12 +120,16 @@ export function queryDeepAll<T extends Element>(selectors: readonly string[], ro
     }
 
     for (const selector of selectors) {
-      for (const element of Array.from(currentRoot.querySelectorAll(selector))) {
-        if (seen.has(element)) {
-          continue
+      try {
+        for (const element of Array.from(currentRoot.querySelectorAll(selector))) {
+          if (seen.has(element)) {
+            continue
+          }
+          seen.add(element)
+          result.push(element as T)
         }
-        seen.add(element)
-        result.push(element as T)
+      } catch (error) {
+        console.warn("[MindDock] Seletor invalido ignorado", { selector, error })
       }
     }
   }
@@ -157,7 +161,7 @@ export function isVisible(element: HTMLElement | null | undefined): element is H
 
 function inInjectedTree(element: HTMLElement): boolean {
   return !!element.closest(
-    "#minddock-source-actions-root, #minddock-source-filters-root, #minddock-conversation-export-root"
+    "#minddock-source-actions-root, #minddock-source-filters-root, #minddock-conversation-export-root, #minddock-studio-export-root"
   )
 }
 
@@ -539,7 +543,7 @@ export function resolveSourceRows(): HTMLElement[] {
       return false
     }
 
-    if (/save view|salvar visualizacao|source groups|grupos de fontes|search saved views|visualizacoes da pesquisa/.test(merged)) {
+    if (/save view|salvar visualizacao|salvar grupo|source groups|grupos de fontes|search saved views|visualizacoes da pesquisa/.test(merged)) {
       return false
     }
 
@@ -2135,7 +2139,7 @@ function activateElementForInlineEdit(element: HTMLElement): boolean {
 
 function isMindDockInjectedElement(element: HTMLElement): boolean {
   return !!element.closest(
-    "#minddock-focus-threads-root, #minddock-agile-bar-root, #minddock-source-actions-root, #minddock-source-filters-root, #minddock-conversation-export-root"
+    "#minddock-focus-threads-root, #minddock-agile-bar-root, #minddock-source-actions-root, #minddock-source-filters-root, #minddock-conversation-export-root, #minddock-studio-export-root"
   )
 }
 
@@ -2632,12 +2636,40 @@ function resolveConversationOverflowMenuButton(labelRect?: DOMRect): HTMLElement
 }
 
 function resolveStudioLabel(): HTMLElement | null {
-  const labels = ["Studio", "Estudio", "Estúdio"]
+  const labels = ["studio", "estudio"]
+  const matchesLabel = (candidate: HTMLElement): boolean => {
+    const merged = [
+      candidate.innerText,
+      candidate.textContent,
+      candidate.getAttribute("aria-label"),
+      candidate.getAttribute("title"),
+      candidate.getAttribute("data-testid"),
+      candidate.getAttribute("data-tooltip")
+    ]
+      .map((value) => String(value ?? ""))
+      .join(" ")
+    const normalized = normalize(merged)
+    return labels.some((label) => {
+      if (normalized === label) {
+        return true
+      }
+      if (normalized.startsWith(`${label} `)) {
+        return true
+      }
+      if (normalized.endsWith(` ${label}`)) {
+        return true
+      }
+      return normalized.includes(` ${label} `)
+    })
+  }
+
+  const strictMatches: Array<{ element: HTMLElement; rect: DOMRect }> = []
+  const relaxedMatches: Array<{ element: HTMLElement; rect: DOMRect }> = []
 
   for (const root of getDeepRoots()) {
     const candidates = Array.from(
       "querySelectorAll" in root
-        ? (root as Document | ShadowRoot).querySelectorAll<HTMLElement>("span, div, h2, h3, button, a")
+        ? (root as Document | ShadowRoot).querySelectorAll<HTMLElement>("span, div, h2, h3, button, a, [role='tab'], [role='heading']")
         : []
     )
 
@@ -2645,25 +2677,40 @@ function resolveStudioLabel(): HTMLElement | null {
       if (!isVisible(candidate) || isMindDockInjectedElement(candidate)) {
         continue
       }
-
-      const text = String(candidate.innerText || candidate.textContent || "").trim()
-      if (!labels.some((label) => text === label)) {
+      if (!matchesLabel(candidate)) {
         continue
       }
 
       const rect = candidate.getBoundingClientRect()
-      if (rect.top > 260 || rect.left < window.innerWidth * 0.45) {
+      if (rect.left < window.innerWidth * 0.45) {
         continue
       }
 
-      return candidate
+      if (rect.top <= 240) {
+        strictMatches.push({ element: candidate, rect })
+      } else if (rect.top <= 420) {
+        relaxedMatches.push({ element: candidate, rect })
+      }
     }
   }
 
-  return null
+  const pickClosest = (items: Array<{ element: HTMLElement; rect: DOMRect }>): HTMLElement | null => {
+    if (items.length === 0) {
+      return null
+    }
+    const sorted = [...items].sort((left, right) => {
+      if (left.rect.top !== right.rect.top) {
+        return left.rect.top - right.rect.top
+      }
+      return left.rect.left - right.rect.left
+    })
+    return sorted[0]?.element ?? null
+  }
+
+  return pickClosest(strictMatches) ?? pickClosest(relaxedMatches)
 }
 
-function resolveStudioOverflowMenuButton(): HTMLElement | null {
+export function resolveStudioOverflowMenuButton(): HTMLElement | null {
   const studioLabel = resolveStudioLabel()
   const studioRect = studioLabel?.getBoundingClientRect()
   if (!studioRect) {
@@ -2726,6 +2773,75 @@ function resolveStudioOverflowMenuButton(): HTMLElement | null {
   })
 
   return sorted[0] ?? null
+}
+
+export function resolveStudioExportAnchor(): HTMLElement | null {
+  const studioLabel = resolveStudioLabel()
+  const studioRect = studioLabel?.getBoundingClientRect()
+  if (studioRect) {
+    const candidates = queryDeepAll<HTMLElement>([
+      "button",
+      "[role='button']",
+      "[aria-haspopup='menu']",
+      "[data-testid*='menu']"
+    ]).filter((candidate) => {
+      if (!isVisible(candidate) || isMindDockInjectedElement(candidate)) {
+        return false
+      }
+
+      const rect = candidate.getBoundingClientRect()
+      const sameRow = Math.abs(rect.top - studioRect.top) <= 44
+      const onRightSide = rect.left >= studioRect.right - 6
+      const inRightPane = rect.left >= window.innerWidth * 0.45
+      const compact = rect.width <= 64 && rect.height <= 64
+
+      return sameRow && onRightSide && inRightPane && compact
+    })
+
+    if (candidates.length > 0) {
+      const sorted = [...candidates].sort(
+        (left, right) => left.getBoundingClientRect().left - right.getBoundingClientRect().left
+      )
+      return sorted[0] ?? null
+    }
+
+    const sibling = studioLabel.nextElementSibling
+    if (sibling instanceof HTMLElement && isVisible(sibling)) {
+      return sibling
+    }
+
+    return studioLabel
+  }
+
+  const fallbackCandidates = queryDeepAll<HTMLElement>([
+    "button",
+    "[role='button']",
+    "[aria-haspopup='menu']",
+    "[data-testid*='menu']"
+  ]).filter((candidate) => {
+    if (!isVisible(candidate) || isMindDockInjectedElement(candidate)) {
+      return false
+    }
+    const rect = candidate.getBoundingClientRect()
+    const nearTop = rect.top <= 200
+    const inRightPane = rect.left >= window.innerWidth * 0.55
+    const compact = rect.width <= 64 && rect.height <= 64
+    return nearTop && inRightPane && compact
+  })
+
+  if (fallbackCandidates.length > 0) {
+    const sorted = [...fallbackCandidates].sort((left, right) => {
+      const leftRect = left.getBoundingClientRect()
+      const rightRect = right.getBoundingClientRect()
+      if (leftRect.top !== rightRect.top) {
+        return leftRect.top - rightRect.top
+      }
+      return leftRect.left - rightRect.left
+    })
+    return sorted[0] ?? null
+  }
+
+  return resolveStudioOverflowMenuButton()
 }
 
 function findDeleteConversationHistoryAction(labelRect?: DOMRect): HTMLElement | null {

@@ -1,7 +1,7 @@
 {
   "name": "minddock",
   "displayName": "MindDock — NotebookLM Supercharged",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "Transforma o Google NotebookLM num centro de conhecimento completo com importação de IA, Zettelkasten e Prompts Ágeis.",
   "private": true,
   "scripts": {
@@ -47,7 +47,8 @@
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "tailwind-merge": "^3.5.0",
-    "vis-network": "^9.1.9"
+    "vis-network": "^9.1.9",
+    "youtube-transcript": "^1.3.0"
   },
   "devDependencies": {
     "@ianvs/prettier-plugin-sort-imports": "^4.3.1",
@@ -80,11 +81,14 @@
       }
     },
     "permissions": [
+      "scripting",
+      "sidePanel",
       "identity",
       "storage",
       "tabs",
       "activeTab",
-      "offscreen"
+      "offscreen",
+      "cookies"
     ],
     "oauth2": {
       "client_id": "1094872455786-h89pq4vphut3t10sjihcktjqvlfk2bi5.apps.googleusercontent.com",

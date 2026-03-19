@@ -1,4 +1,4 @@
-"use strict"
+﻿"use strict"
 
 const fs = require("fs")
 const path = require("path")
@@ -28,9 +28,15 @@ const targets = [
       {
         search: /document\.head\.removeChild\(style\);/g,
         replace: "/* minddock-poplayout patched */ void 0;"
+      },
+      {
+        search: /if\s*\(\s*style\.sheet\s*\)\s*\{/g,
+        replace: "if (false && style.sheet) {"
       }
     ],
-    verify: (code) => code.includes("minddock-poplayout patched")
+    verify: (code) =>
+      code.includes("minddock-poplayout patched") ||
+      code.includes("if (false && style.sheet) {")
   },
   {
     label: "framer-motion cjs index",
@@ -47,11 +53,16 @@ const targets = [
       {
         search: /document\.head\.removeChild\(style\);/g,
         replace: "/* minddock-poplayout patched */ void 0;"
+      },
+      {
+        search: /if\s*\(\s*style\.sheet\s*\)\s*\{/g,
+        replace: "if (false && style.sheet) {"
       }
     ],
     verify: (code) =>
       code.includes('if (false && mode === "popLayout") {') ||
-      code.includes("minddock-poplayout patched")
+      code.includes("minddock-poplayout patched") ||
+      code.includes("if (false && style.sheet) {")
   }
 ]
 

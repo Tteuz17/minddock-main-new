@@ -112,6 +112,10 @@ function normalizeChatPlatformLabel(platform: string): string {
     return "PERPLEXITY"
   }
 
+  if (normalizedValue.includes("youtube")) {
+    return "Youtube"
+  }
+
   return rawValue.toUpperCase()
 }
 
