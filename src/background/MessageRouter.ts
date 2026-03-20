@@ -6,13 +6,14 @@ import {
   type NotebookCreateResult
 } from "./services/NotebookService"
 import { tokenStorage } from "./storage/TokenStorage"
+import { fetchStudioArtifactsByIds } from "./studioArtifacts"
 import type { ChromeMessage, ChromeMessageResponse } from "~/lib/types"
 import {
   probeAvailableAccounts,
   resolveActiveSessions,
   type NotebookProbeAccountResult
 } from "~/services/notebookDiscoveryService"
-import { formatChatAsReadableMarkdownV2 } from "~/lib/utils"
+import { formatChatAsReadableMarkdownV2, getFromSecureStorage } from "~/lib/utils"
 import {
   NOTEBOOK_ACCOUNT_DEFAULT,
   buildNotebookAccountKey,
@@ -487,6 +488,7 @@ async function resolveNotebookAccountScope(): Promise<{
   confirmed: boolean
 }> {
   try {
+    const secureSession = await getFromSecureStorage<Record<string, unknown>>(TOKEN_STORAGE_KEY)
     const snapshot = await chrome.storage.local.get([
       AUTH_USER_KEY,
       NOTEBOOK_ACCOUNT_EMAIL_KEY,
@@ -496,7 +498,7 @@ async function resolveNotebookAccountScope(): Promise<{
     const fixedAccountEmail = normalizeAccountEmail(snapshot[NOTEBOOK_ACCOUNT_EMAIL_KEY])
     const fromFixed = normalizeAuthUser(snapshot[AUTH_USER_KEY])
 
-    const session = snapshot[TOKEN_STORAGE_KEY]
+    const session = secureSession ?? snapshot[TOKEN_STORAGE_KEY]
     const sessionAccountEmail =
       session && typeof session === "object"
         ? normalizeAccountEmail((session as { accountEmail?: unknown }).accountEmail)
@@ -956,6 +958,28 @@ export function initializeMessageRouter(): void {
           return true
         }
 
+        case STUDIO_FETCH_MESSAGE: {
+          const { ids, notebookId, forceRefresh, rpcContext } = normalizeStudioArtifactRequest(message)
+          console.warn("[MindDock][BG] fetch studio ids:", ids, "force:", forceRefresh)
+          void fetchStudioArtifactsByIds(ids, notebookId, { forceRefresh, rpcContext })
+            .then((items) => {
+              sendResponse({
+                success: true,
+                payload: { items },
+                data: { items }
+              })
+            })
+            .catch((error) => {
+              sendResponse({
+                success: false,
+                error: resolveErrorMessage(error),
+                payload: { items: [] },
+                data: { items: [] }
+              })
+            })
+          return true
+        }
+
         default: {
           const legacyCommand = String(message?.command ?? "").trim()
           if (legacyCommand) {
@@ -975,4 +999,30 @@ export function initializeMessageRouter(): void {
   )
 
   messageRouterInitialized = true
+}
+
+const STUDIO_FETCH_MESSAGE = "MINDDOCK_FETCH_STUDIO_ARTIFACTS"
+
+function normalizeStudioArtifactRequest(message: IncomingMessage): {
+  ids: string[]
+  notebookId?: string
+  forceRefresh?: boolean
+  rpcContext?: Record<string, unknown>
+} {
+  const ids = Array.isArray(message?.payload?.ids) ? message.payload.ids : []
+  const notebookId =
+    typeof message?.payload?.notebookId === "string"
+      ? message.payload.notebookId
+      : undefined
+  const forceRefresh = Boolean(message?.payload?.forceRefresh)
+  const rpcContext =
+    message?.payload?.rpcContext && typeof message.payload.rpcContext === "object"
+      ? (message.payload.rpcContext as Record<string, unknown>)
+      : undefined
+  return {
+    ids: ids.filter((id: unknown) => typeof id === "string"),
+    notebookId,
+    forceRefresh,
+    rpcContext
+  }
 }

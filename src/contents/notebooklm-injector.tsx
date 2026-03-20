@@ -2,12 +2,21 @@ import type { PlasmoCSConfig } from "plasmo"
 import { Component, isValidElement, type ErrorInfo, type ReactNode } from "react"
 import { createRoot, type Root } from "react-dom/client"
 import "~/styles/globals.css"
-import { getFolders, saveSnippet, createFolder, FOLDER_ICONS } from "~/services/highlight-storage"
+import {
+  getFolders,
+  saveSnippet,
+  createFolder,
+  FOLDER_ICONS,
+  sanitizeFolderColor
+} from "~/services/highlight-storage"
 import { AgilePromptsBar } from "../../contents/notebooklm/AgilePromptsBar"
 import { ConversationExportMenu } from "../../contents/notebooklm/ConversationExportMenu"
 import { FocusThreadsBar } from "../../contents/notebooklm/FocusThreadsBar"
 import { SourceDownloadPanel } from "../../contents/notebooklm/SourceDownloadPanel"
+import { SourcePreviewPanel } from "../../contents/notebooklm/SourcePreviewPanel"
+import { ExportPreviewPanel } from "../../contents/notebooklm/ExportPreviewPanel"
 import { SourceFilterPanel } from "../../contents/notebooklm/SourceFilterPanel"
+import { StudioExportButton } from "../../contents/notebooklm/StudioExportButton"
 import { ZettelButton } from "../../contents/notebooklm/ZettelButton"
 import "~/content/features/VoiceInput/voiceInputInjector"
 import {
@@ -18,7 +27,8 @@ import {
   getDeepRoots,
   isVisible,
   resolveSourceActionsHost,
-  resolveSourceFiltersHost
+  resolveSourceFiltersHost,
+  resolveStudioExportAnchor
 } from "../../contents/notebooklm/sourceDom"
 
 export const config: PlasmoCSConfig = {
@@ -30,7 +40,7 @@ type InsertMode = "prepend" | "after" | "before"
 type DisplayMode = "contents" | "block"
 
 interface InjectionTarget {
-  key: "source-actions" | "source-filters" | "conversation-export"
+  key: "source-actions" | "source-filters" | "conversation-export" | "studio-export"
   rootId: string
   insertMode: InsertMode
   display: DisplayMode
@@ -161,6 +171,14 @@ const TARGETS: readonly InjectionTarget[] = [
     render: () => <ConversationExportMenu />
   },
   {
+    key: "studio-export",
+    rootId: "minddock-studio-export-root",
+    insertMode: "before",
+    display: "contents",
+    resolveHost: resolveStudioExportAnchor,
+    render: () => <StudioExportButton />
+  },
+  {
     key: "source-actions",
     rootId: "minddock-source-actions-root",
     insertMode: "prepend",
@@ -181,6 +199,7 @@ const TARGETS: readonly InjectionTarget[] = [
 const mountedRoots = new Map<string, MountedRootRecord>()
 const AGILE_BAR_ROOT_ID = "minddock-agile-bar-root"
 const FOCUS_THREADS_ROOT_ID = "minddock-focus-threads-root"
+const PREVIEW_PANEL_ROOT_ID = "minddock-preview-panel-root"
 
 let domObserver: MutationObserver | null = null
 let refreshTimer: number | null = null
@@ -190,8 +209,19 @@ let zettelObserver: MutationObserver | null = null
 let sourceFilterApplyDepth = 0
 let sourceFilterApplyLockUntil = 0
 let isSourceDownloadModalOpen = false
+let isSourceCriticalOperationActive = false
+let sourceCriticalOperationLockUntil = 0
 const ENABLE_NOTEBOOK_HIGHLIGHT_CLIPPER = false
 const INJECTOR_GLOBAL_KEY = "__MINDDOCK_NOTEBOOKLM_INJECTOR_STATE__"
+
+export function setSourceCriticalOperation(active: boolean): void {
+  isSourceCriticalOperationActive = active
+  if (active) {
+    sourceCriticalOperationLockUntil = Date.now() + 3000
+  } else {
+    sourceCriticalOperationLockUntil = 0
+  }
+}
 
 function resolveGlobalState(): NotebooklmInjectorGlobalState {
   const globalRecord = window as typeof window & Record<string, unknown>
@@ -356,6 +386,14 @@ function renderSafely(targetKey: string, renderFn: () => ReactNode): ReactNode {
 }
 
 function cleanupDetachedRoots(): void {
+  if (
+    isSourceDownloadModalOpen ||
+    isSourceCriticalOperationActive ||
+    Date.now() < sourceCriticalOperationLockUntil
+  ) {
+    return
+  }
+
   for (const [key, mounted] of mountedRoots.entries()) {
     if (mounted.host.isConnected && mounted.container.isConnected) {
       continue
@@ -393,12 +431,16 @@ function shouldSkipRefreshForMutations(mutations: MutationRecord[]): boolean {
     return true
   }
 
+  if (isSourceCriticalOperationActive || Date.now() < sourceCriticalOperationLockUntil) {
+    return true
+  }
+
   if (isSourceFilterApplyLocked()) {
     return true
   }
 
   const ignoredRootSelector =
-    "#minddock-source-actions-root, #minddock-source-filters-root, [data-minddock-target], [data-minddock-source-overlay='true'], section[role='dialog'][aria-modal='true'][aria-label='Download de fontes'], [data-minddock-source-toast='true']"
+    "#minddock-source-actions-root, #minddock-source-filters-root, [data-minddock-target], [data-minddock-source-overlay='true'], section[role='dialog'][aria-modal='true'][aria-label='Download de fontes'], [data-minddock-source-toast='true'], [data-minddock-shadow-host]"
 
   const allInsideMindDockRoots = mutations.every((record) => {
     const target = record.target instanceof Element ? record.target : null
@@ -458,6 +500,49 @@ function mountAgileBar(): void {
   )
   mountedRoots.set("agile-bar", { root, host: rootElement, container: rootElement })
   updateAgileBarPosition()
+}
+
+function mountPreviewPanel(): void {
+  let rootElement = document.getElementById(PREVIEW_PANEL_ROOT_ID) as HTMLElement | null
+  if (!rootElement) {
+    rootElement = document.createElement("div")
+    rootElement.id = PREVIEW_PANEL_ROOT_ID
+    rootElement.style.position = "fixed"
+    rootElement.style.top = "0"
+    rootElement.style.left = "0"
+    rootElement.style.width = "0"
+    rootElement.style.height = "0"
+    rootElement.style.pointerEvents = "none"
+    document.body.appendChild(rootElement)
+  }
+
+  const mounted = mountedRoots.get("preview-panel")
+  if (mounted) {
+    mounted.root.render(
+      <InjectionErrorBoundary targetKey="preview-panel">
+        {renderSafely("preview-panel", () => (
+          <div>
+            <SourcePreviewPanel />
+            <ExportPreviewPanel />
+          </div>
+        ))}
+      </InjectionErrorBoundary>
+    )
+    return
+  }
+
+  const root = createRoot(rootElement)
+  root.render(
+    <InjectionErrorBoundary targetKey="preview-panel">
+      {renderSafely("preview-panel", () => (
+        <div>
+          <SourcePreviewPanel />
+          <ExportPreviewPanel />
+        </div>
+      ))}
+    </InjectionErrorBoundary>
+  )
+  mountedRoots.set("preview-panel", { root, host: rootElement, container: rootElement })
 }
 
 function resolveVisibleComposerTop(): number | null {
@@ -971,7 +1056,7 @@ function renderClipperMain(
 
     const dot = document.createElement("span")
     dot.className = "md-clipper-card-dot"
-    dot.style.background = folder.color
+    dot.style.background = sanitizeFolderColor(folder.color)
     dot.style.flexShrink = "0"
 
     const name = document.createElement("span")
@@ -990,7 +1075,18 @@ function renderClipperMain(
       panel.innerHTML = ""
       const saved = document.createElement("div")
       saved.className = "md-clipper-saved"
-      saved.innerHTML = `<span class="md-clipper-saved-icon">✓</span><span class="md-clipper-saved-text">Saved to ${folder.name}</span><span class="md-clipper-saved-sub">${folder.icon || "📌"} ${folder.name}</span>`
+      const savedIcon = document.createElement("span")
+      savedIcon.className = "md-clipper-saved-icon"
+      savedIcon.textContent = "✓"
+      const savedText = document.createElement("span")
+      savedText.className = "md-clipper-saved-text"
+      savedText.textContent = `Saved to ${folder.name}`
+      const savedSub = document.createElement("span")
+      savedSub.className = "md-clipper-saved-sub"
+      savedSub.textContent = `${folder.icon || "📌"} ${folder.name}`
+      saved.appendChild(savedIcon)
+      saved.appendChild(savedText)
+      saved.appendChild(savedSub)
       panel.appendChild(saved)
       setTimeout(removeClipperPanel, 1400)
     })
@@ -1004,7 +1100,11 @@ function renderClipperMain(
   const newBtn = document.createElement("button")
   newBtn.type = "button"
   newBtn.className = "md-clipper-new-btn"
-  newBtn.innerHTML = `<span style="font-size:13px">+</span> New folder`
+  const plusIcon = document.createElement("span")
+  plusIcon.style.fontSize = "13px"
+  plusIcon.textContent = "+"
+  newBtn.appendChild(plusIcon)
+  newBtn.appendChild(document.createTextNode(" New folder"))
   newBtn.addEventListener("mousedown", (e) => { e.preventDefault(); e.stopPropagation() })
   newBtn.addEventListener("click", (e) => {
     e.stopPropagation()
@@ -1127,7 +1227,18 @@ function renderCreateForm(
     panel.innerHTML = ""
     const saved = document.createElement("div")
     saved.className = "md-clipper-saved"
-    saved.innerHTML = `<span class="md-clipper-saved-icon">✓</span><span class="md-clipper-saved-text">Saved to ${folder.name}</span><span class="md-clipper-saved-sub">${selectedIcon} Folder created</span>`
+    const savedIcon2 = document.createElement("span")
+    savedIcon2.className = "md-clipper-saved-icon"
+    savedIcon2.textContent = "✓"
+    const savedText2 = document.createElement("span")
+    savedText2.className = "md-clipper-saved-text"
+    savedText2.textContent = `Saved to ${folder.name}`
+    const savedSub2 = document.createElement("span")
+    savedSub2.className = "md-clipper-saved-sub"
+    savedSub2.textContent = `${selectedIcon} Folder created`
+    saved.appendChild(savedIcon2)
+    saved.appendChild(savedText2)
+    saved.appendChild(savedSub2)
     panel.appendChild(saved)
     setTimeout(removeClipperPanel, 1400)
   })
@@ -1224,6 +1335,7 @@ function onHighlightKeyDown(e: KeyboardEvent) {
 function refreshUi(): void {
   mountTargets()
   mountAgileBar()
+  mountPreviewPanel()
   mountFocusThreadsBar()
   updateAgileBarPosition()
   updateFocusThreadsBarPosition()

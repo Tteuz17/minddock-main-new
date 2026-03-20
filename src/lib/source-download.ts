@@ -3,6 +3,7 @@ import {
   renderMarkdownOut,
   renderPlainTextOut
 } from "~/lib/text-formatting-engine"
+import { cleanRawText, densityParagraphChunker, formatMetadataKeys } from "~/lib/PdfContentFormatter"
 import { zipSync } from "fflate"
 
 export type DownloadFormat = "markdown" | "text" | "pdf" | "docx"
@@ -151,15 +152,16 @@ export function formatAsDocxText(record: SourceExportRecord): string {
 export async function buildDocxBytesFromText(text: string): Promise<Uint8Array> {
   const normalized = String(text ?? "").replace(/\r\n?/g, "\n").trim()
   const safeText = normalized || "Sem conteudo disponivel."
-  const paragraphXml = safeText
-    .split("\n")
-    .map((line) => {
-      if (!line.trim()) {
-        return "<w:p/>"
-      }
-      return `<w:p><w:r><w:t xml:space="preserve">${escapeXml(line)}</w:t></w:r></w:p>`
-    })
-    .join("")
+  const isChatExport = looksLikeChatExportText(safeText)
+
+  let paragraphXml = ""
+  if (isChatExport) {
+    const chatText = normalizeChatExportTextForDocx(safeText)
+    paragraphXml = buildChatDocxParagraphs(chatText)
+  } else {
+    const structured = parseStructuredDocxContent(safeText)
+    paragraphXml = structured ? buildStructuredDocxParagraphs(structured) : buildPlainDocxParagraphs(safeText)
+  }
 
   const contentTypesXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
@@ -193,6 +195,350 @@ export async function buildDocxBytesFromText(text: string): Promise<Uint8Array> 
     },
     { level: 0 }
   )
+}
+
+interface StructuredDocxContent {
+  title: string
+  metadataLines: string[]
+  bodyText: string
+}
+
+interface DocxRunSegment {
+  text: string
+  isBold: boolean
+}
+
+const DOCX_METADATA_SEPARATOR_REGEX = /^[-=]{4,}$/
+const DOCX_TITLE_FONT_SIZE = 36
+const DOCX_METADATA_FONT_SIZE = 22
+const DOCX_BODY_FONT_SIZE = 24
+const DOCX_BODY_LINE_SPACING = 384
+const DOCX_BODY_MARGIN_AFTER = 360
+const DOCX_DIVIDER_MARGIN = 600
+const DOCX_CHAT_ROLE_REGEX = /^\d+\.\s+(User|NotebookLM)\b/
+const DOCX_CHAT_FONT_SIZE = 28
+
+function looksLikeChatExportText(text: string): boolean {
+  const lines = String(text ?? "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+
+  if (lines.length < 4) {
+    return false
+  }
+
+  const hasMessageCount = lines.some((line) => /^mensagens:\s*\d+/i.test(line))
+  const hasNumberedTurn = lines.some((line) => /^\d+\.\s+\S+/.test(line))
+
+  return hasMessageCount && hasNumberedTurn
+}
+
+function normalizeChatExportTextForDocx(text: string): string {
+  const rawLines = String(text ?? "").split("\n")
+  const normalizedLines: string[] = []
+
+  for (const rawLine of rawLines) {
+    const trimmed = rawLine.trim()
+    if (!trimmed) {
+      normalizedLines.push("")
+      continue
+    }
+
+    const exportedWithMessages = splitExportedAtAndMessages(trimmed)
+    if (exportedWithMessages.length > 1) {
+      normalizedLines.push(...exportedWithMessages, "")
+      continue
+    }
+
+    const splitBySeparator = splitSeparatorLine(trimmed)
+    if (splitBySeparator.length > 1) {
+      normalizedLines.push(...splitBySeparator, "")
+      continue
+    }
+
+    if (DOCX_CHAT_ROLE_REGEX.test(trimmed)) {
+      normalizedLines.push(trimmed.endsWith(":") ? trimmed : `${trimmed}:`)
+      continue
+    }
+
+    normalizedLines.push(rawLine)
+  }
+
+  return normalizedLines.join("\n").replace(/\n{3,}/g, "\n\n").trim()
+}
+
+function buildChatDocxParagraphs(text: string): string {
+  const lines = String(text ?? "").split("\n")
+  const firstContentIndex = lines.findIndex((line) => line.trim().length > 0)
+  const paragraphs: string[] = []
+
+  lines.forEach((line, index) => {
+    const trimmed = line.trim()
+    if (!trimmed) {
+      paragraphs.push("<w:p/>")
+      return
+    }
+
+    const isTitle = index === firstContentIndex
+    const isExported = /^Exported at:/i.test(trimmed)
+    const isMessages = /^Mensagens:/i.test(trimmed)
+    const isRoleLine = DOCX_CHAT_ROLE_REGEX.test(trimmed)
+    const shouldBold = isTitle || isExported || isMessages || isRoleLine
+
+    paragraphs.push(buildChatDocxParagraph(trimmed, shouldBold))
+  })
+
+  return paragraphs.join("")
+}
+
+function buildChatDocxParagraph(text: string, bold: boolean): string {
+  const run = buildChatDocxRun(text, {
+    bold,
+    size: DOCX_CHAT_FONT_SIZE
+  })
+  return `<w:p>${run}</w:p>`
+}
+
+interface ChatDocxRunOptions {
+  size: number
+  bold?: boolean
+}
+
+function buildChatDocxRun(text: string, options: ChatDocxRunOptions): string {
+  const safeText = escapeXml(text)
+  const boldMarkup = options.bold ? "<w:b/><w:bCs/>" : ""
+  return `<w:r><w:rPr>${boldMarkup}<w:sz w:val="${options.size}"/><w:szCs w:val="${options.size}"/></w:rPr><w:t xml:space="preserve">${safeText}</w:t></w:r>`
+}
+
+function splitExportedAtAndMessages(line: string): string[] {
+  const match = line.match(/^(?<exported>Exported at:.*?)(?<messages>\bMensagens:\s*\d+.*)$/i)
+  if (!match?.groups) {
+    return [line]
+  }
+
+  const exported = match.groups.exported.trim()
+  const messages = match.groups.messages.trim()
+  if (!exported || !messages) {
+    return [line]
+  }
+
+  return [exported, messages]
+}
+
+function splitSeparatorLine(line: string): string[] {
+  const separatorMatch = line.match(/-{4,}/)
+  if (!separatorMatch) {
+    return [line]
+  }
+
+  const separator = separatorMatch[0]
+  const index = line.indexOf(separator)
+  const before = line.slice(0, index).trim()
+  const after = line.slice(index + separator.length).trim()
+
+  const parts: string[] = []
+  if (before) {
+    parts.push(before)
+  }
+  parts.push(separator)
+  if (after) {
+    parts.push(after)
+  }
+
+  return parts.length > 1 ? parts : [line]
+}
+
+function parseStructuredDocxContent(text: string): StructuredDocxContent | null {
+  const lines = String(text ?? "").split("\n")
+  const dividerIndex = lines.findIndex((line) => DOCX_METADATA_SEPARATOR_REGEX.test(line.trim()))
+  if (dividerIndex === -1) {
+    return null
+  }
+
+  const titleIndex = lines.findIndex((line) => line.trim().length > 0)
+  if (titleIndex === -1 || titleIndex > dividerIndex) {
+    return null
+  }
+
+  const metadataLines = lines
+    .slice(titleIndex + 1, dividerIndex)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+
+  const bodyText = lines.slice(dividerIndex + 1).join("\n").trim()
+
+  return {
+    title: lines[titleIndex].trim(),
+    metadataLines,
+    bodyText
+  }
+}
+
+function buildStructuredDocxParagraphs(content: StructuredDocxContent): string {
+  const paragraphs: string[] = []
+
+  paragraphs.push(
+    buildDocxParagraph(
+      buildDocxRun(content.title || "Documento", {
+        font: "Inter",
+        bold: true,
+        size: DOCX_TITLE_FONT_SIZE
+      }),
+      {
+        spacingAfter: 160
+      }
+    )
+  )
+
+  for (const metadataLine of content.metadataLines) {
+    const formatted = formatMetadataKeys(metadataLine)
+    const segments = parseStrongMarkupSegments(formatted)
+    const runs = segments
+      .map((segment) =>
+        buildDocxRun(segment.text, {
+          font: "Inter",
+          bold: segment.isBold,
+          size: DOCX_METADATA_FONT_SIZE
+        })
+      )
+      .join("")
+
+    paragraphs.push(
+      buildDocxParagraph(runs, {
+        spacingAfter: 120
+      })
+    )
+  }
+
+  paragraphs.push(
+    buildDocxParagraph("", {
+      spacingBefore: DOCX_DIVIDER_MARGIN,
+      spacingAfter: DOCX_DIVIDER_MARGIN,
+      borderBottom: true
+    })
+  )
+
+  const cleanedBody = cleanRawText(content.bodyText || "Sem conteudo disponivel.")
+  const chunks = densityParagraphChunker(cleanedBody)
+  const resolvedChunks = chunks.length > 0 ? chunks : cleanedBody ? [cleanedBody] : []
+
+  for (const chunk of resolvedChunks) {
+    paragraphs.push(
+      buildDocxParagraph(
+        buildDocxRun(chunk, {
+          font: "Merriweather",
+          size: DOCX_BODY_FONT_SIZE
+        }),
+        {
+          spacingAfter: DOCX_BODY_MARGIN_AFTER,
+          lineSpacing: DOCX_BODY_LINE_SPACING,
+          justify: "both"
+        }
+      )
+    )
+  }
+
+  return paragraphs.join("")
+}
+
+function buildPlainDocxParagraphs(text: string): string {
+  return text
+    .split("\n")
+    .map((line) => {
+      if (!line.trim()) {
+        return "<w:p/>"
+      }
+      return `<w:p><w:r><w:t xml:space="preserve">${escapeXml(line)}</w:t></w:r></w:p>`
+    })
+    .join("")
+}
+
+interface DocxRunOptions {
+  font: string
+  size: number
+  bold?: boolean
+}
+
+function buildDocxRun(text: string, options: DocxRunOptions): string {
+  const safeText = escapeXml(text)
+  const boldMarkup = options.bold ? "<w:b/><w:bCs/>" : ""
+  return `<w:r><w:rPr>${boldMarkup}<w:rFonts w:ascii="${options.font}" w:hAnsi="${options.font}" w:cs="${options.font}"/><w:sz w:val="${options.size}"/><w:szCs w:val="${options.size}"/></w:rPr><w:t xml:space="preserve">${safeText}</w:t></w:r>`
+}
+
+interface DocxParagraphOptions {
+  spacingBefore?: number
+  spacingAfter?: number
+  lineSpacing?: number
+  justify?: "left" | "both"
+  borderBottom?: boolean
+}
+
+function buildDocxParagraph(runsXml: string, options: DocxParagraphOptions): string {
+  const spacingParts: string[] = []
+  if (options.spacingBefore !== undefined) {
+    spacingParts.push(`w:before="${options.spacingBefore}"`)
+  }
+  if (options.spacingAfter !== undefined) {
+    spacingParts.push(`w:after="${options.spacingAfter}"`)
+  }
+  if (options.lineSpacing !== undefined) {
+    spacingParts.push(`w:line="${options.lineSpacing}"`, `w:lineRule="auto"`)
+  }
+  const spacingMarkup = spacingParts.length > 0 ? `<w:spacing ${spacingParts.join(" ")}/>` : ""
+  const justifyMarkup = options.justify ? `<w:jc w:val="${options.justify}"/>` : ""
+  const borderMarkup = options.borderBottom
+    ? `<w:pBdr><w:bottom w:val="single" w:sz="6" w:space="1" w:color="D1D5DB"/></w:pBdr>`
+    : ""
+
+  const paragraphProps = spacingMarkup || justifyMarkup || borderMarkup
+    ? `<w:pPr>${spacingMarkup}${justifyMarkup}${borderMarkup}</w:pPr>`
+    : ""
+
+  return `<w:p>${paragraphProps}${runsXml}</w:p>`
+}
+
+function parseStrongMarkupSegments(markup: string): DocxRunSegment[] {
+  const segments: DocxRunSegment[] = []
+  const matcher = /<strong>(.*?)<\/strong>/gi
+  let cursor = 0
+  let match: RegExpExecArray | null
+
+  while ((match = matcher.exec(markup)) !== null) {
+    const start = match.index
+    if (start > cursor) {
+      const text = decodeHtmlEntities(markup.slice(cursor, start))
+      if (text) {
+        segments.push({ text, isBold: false })
+      }
+    }
+
+    const strongText = decodeHtmlEntities(match[1])
+    if (strongText) {
+      segments.push({ text: strongText, isBold: true })
+    }
+
+    cursor = start + match[0].length
+  }
+
+  if (cursor < markup.length) {
+    const tail = decodeHtmlEntities(markup.slice(cursor))
+    if (tail) {
+      segments.push({ text: tail, isBold: false })
+    }
+  }
+
+  return segments
+}
+
+function decodeHtmlEntities(value: string): string {
+  return String(value ?? "")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, "\"")
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, "&")
 }
 
 export async function buildZip(files: ZipFileRecord[]): Promise<Uint8Array> {
@@ -232,12 +578,24 @@ export function sanitizeFilename(name: string): string {
   return base.length > 0 ? base.slice(0, 90) : "fonte"
 }
 
+export type MindDuckFilenameKind = "Font" | "Chat" | "Studio"
+
+export function buildMindDuckFilenameBase(
+  kind: MindDuckFilenameKind,
+  title: string,
+  date: Date = new Date()
+): string {
+  const shortTitle = buildFourWordTitleSlug(title)
+  const dateStamp = buildDateStamp(date)
+  return `MindDock-${kind}-${shortTitle}-${dateStamp}`
+}
+
 export function buildUniqueFilename(
   title: string,
   extension: string,
   usedNames: Set<string>
 ): string {
-  const safeBase = sanitizeFilename(title)
+  const safeBase = buildMindDuckFilenameBase("Font", title)
   const ext = extension.startsWith(".") ? extension : `.${extension}`
 
   let candidate = `${safeBase}${ext}`
@@ -249,6 +607,29 @@ export function buildUniqueFilename(
 
   usedNames.add(candidate)
   return candidate
+}
+
+function buildFourWordTitleSlug(title: string): string {
+  const normalized = String(title ?? "")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-zA-Z0-9]+/g, " ")
+    .trim()
+    .toLowerCase()
+
+  if (!normalized) {
+    return "notebooklm"
+  }
+
+  const words = normalized.split(/\s+/).filter(Boolean)
+  const limited = words.slice(0, 4)
+  const slug = limited.length > 0 ? limited.join("-") : "notebooklm"
+  return slug.slice(0, 40)
+}
+
+function buildDateStamp(date: Date): string {
+  const pad = (value: number) => String(value).padStart(2, "0")
+  return `${pad(date.getDate())}_${pad(date.getMonth() + 1)}_${date.getFullYear()}`
 }
 
 export function snippetsToSummaryText(

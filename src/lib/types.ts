@@ -200,6 +200,7 @@ export type MessageCommand =
   | "MINDDOCK_IMPROVE_PROMPT"
   | "MINDDOCK_ATOMIZE_NOTE"
   | "MINDDOCK_EXPORT_SOURCES"
+  | "MINDDOCK_FETCH_STUDIO_ARTIFACTS"
   | "MINDDOCK_HIGHLIGHT_SNIPE"
   | "MINDDOCK_OPEN_SIDEPANEL"
 
@@ -299,6 +300,8 @@ export interface Thread {
   userId: string
   notebookId: string
   name: string
+  topic?: string
+  icon?: string
   createdAt: string
   updatedAt: string
 }

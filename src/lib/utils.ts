@@ -112,6 +112,10 @@ function normalizeChatPlatformLabel(platform: string): string {
     return "PERPLEXITY"
   }
 
+  if (normalizedValue.includes("youtube")) {
+    return "Youtube"
+  }
+
   return rawValue.toUpperCase()
 }
 
@@ -225,6 +229,80 @@ export async function removeFromStorage(key: string): Promise<void> {
   })
 }
 
+function getSecureStorageArea(): chrome.storage.StorageArea {
+  const storageWithSession = chrome.storage as typeof chrome.storage & {
+    session?: chrome.storage.StorageArea
+  }
+  return storageWithSession.session ?? chrome.storage.local
+}
+
+async function getFromArea<T>(
+  area: chrome.storage.StorageArea,
+  key: string
+): Promise<T | null> {
+  return new Promise((resolve) => {
+    area.get(key, (result) => {
+      resolve((result[key] as T) ?? null)
+    })
+  })
+}
+
+async function setInArea<T>(
+  area: chrome.storage.StorageArea,
+  key: string,
+  value: T
+): Promise<void> {
+  return new Promise((resolve) => {
+    area.set({ [key]: value }, resolve)
+  })
+}
+
+async function removeFromArea(area: chrome.storage.StorageArea, key: string): Promise<void> {
+  return new Promise((resolve) => {
+    area.remove(key, resolve)
+  })
+}
+
+export async function getFromSecureStorage<T>(key: string): Promise<T | null> {
+  const secureArea = getSecureStorageArea()
+  const secureValue = await getFromArea<T>(secureArea, key)
+  if (secureValue !== null) {
+    return secureValue
+  }
+
+  if (secureArea === chrome.storage.local) {
+    return null
+  }
+
+  const localValue = await getFromArea<T>(chrome.storage.local, key)
+  if (localValue === null) {
+    return null
+  }
+
+  // One-time migration from local to session-backed storage.
+  await setInArea(secureArea, key, localValue)
+  await removeFromArea(chrome.storage.local, key)
+  return localValue
+}
+
+export async function setInSecureStorage<T>(key: string, value: T): Promise<void> {
+  const secureArea = getSecureStorageArea()
+  await setInArea(secureArea, key, value)
+
+  if (secureArea !== chrome.storage.local) {
+    // Ensure sensitive entries are not persisted in local storage.
+    await removeFromArea(chrome.storage.local, key)
+  }
+}
+
+export async function removeFromSecureStorage(key: string): Promise<void> {
+  const secureArea = getSecureStorageArea()
+  await removeFromArea(secureArea, key)
+  if (secureArea !== chrome.storage.local) {
+    await removeFromArea(chrome.storage.local, key)
+  }
+}
+
 // ─── Debounce ────────────────────────────────────────────────────────────────
 
 export function debounce<TArgs extends unknown[]>(
@@ -267,13 +345,23 @@ export function extractWikilinks(content: string): string[] {
   return [...new Set(matches)]
 }
 
+function escapeHtml(str: string): string {
+  return str
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;")
+}
+
 export function renderWikilinks(
   content: string,
   noteMap: Record<string, string>
 ): string {
   return content.replace(/\[\[([^\]]+)\]\]/g, (_, title) => {
+    const safe = escapeHtml(String(title))
     const id = noteMap[title.trim()]
-    if (id) return `<span class="wikilink" data-note-id="${id}">${title}</span>`
-    return `<span class="wikilink wikilink--broken">${title}</span>`
+    if (id) return `<span class="wikilink" data-note-id="${escapeHtml(id)}">${safe}</span>`
+    return `<span class="wikilink wikilink--broken">${safe}</span>`
   })
 }

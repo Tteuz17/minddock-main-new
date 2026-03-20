@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import { Eye, ListFilter, X } from "lucide-react"
+﻿import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { ListFilter } from "lucide-react"
 import {
   MESSAGE_ACTIONS,
   type StandardResponse
@@ -8,6 +8,7 @@ import { base64ToBytes } from "~/lib/base64-bytes"
 import type { Source } from "~/lib/types"
 import {
   buildDocxBytesFromText,
+  buildMindDuckFilenameBase,
   buildUniqueFilename,
   formatAsDocxText,
   formatAsPdfText,
@@ -35,10 +36,18 @@ import {
   type SourcePanelRefreshCandidate,
   type SourcePanelRefreshDetail
 } from "./sourceDom"
+import { setSourceCriticalOperation } from "~/contents/notebooklm-injector"
 import {
   IsolatedResourceViewerDialog,
   type IsolatedResourceAssetData
 } from "./IsolatedResourceViewerDialog"
+import { SourceDownloadModal } from "./SourceDownloadModal"
+import {
+  SOURCE_PREVIEW_CLOSE_EVENT,
+  SOURCE_PREVIEW_OPEN_EVENT,
+  type PreviewDraftItem,
+  type PreviewDownloadFormat
+} from "./SourcePreviewPanel"
 import { resolveSourceDownloadUiCopy } from "./notebooklmI18n"
 
 interface SourceRow {
@@ -106,6 +115,9 @@ export function SourceDownloadPanel() {
   const selectAllCheckboxRef = useRef<HTMLInputElement | null>(null)
   const previewBlobUrlRef = useRef<string | null>(null)
   const uiCopy = useMemo(() => resolveSourceDownloadUiCopy(), [])
+  const replaceSelection = useCallback((sourceIds: string[]) => {
+    setSelectedSourceIds(new Set(sourceIds))
+  }, [])
 
   const selectedCount = selectedSourceIds.size
   const downloadFormatMeta = useMemo<Record<DownloadFormat, { label: string; subtitle: string; noTranslate?: boolean }>>(
@@ -202,6 +214,29 @@ export function SourceDownloadPanel() {
     )
   }, [isOpen])
 
+  useEffect(() => {
+    const handlePreviewOpen = () => setIsPreviewMode(true)
+    const handlePreviewClose = () => setIsPreviewMode(false)
+    window.addEventListener(SOURCE_PREVIEW_OPEN_EVENT, handlePreviewOpen)
+    window.addEventListener(SOURCE_PREVIEW_CLOSE_EVENT, handlePreviewClose)
+    return () => {
+      window.removeEventListener(SOURCE_PREVIEW_OPEN_EVENT, handlePreviewOpen)
+      window.removeEventListener(SOURCE_PREVIEW_CLOSE_EVENT, handlePreviewClose)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (isOpen) {
+      setSourceCriticalOperation(true)
+    } else {
+      setSourceCriticalOperation(false)
+    }
+
+    return () => {
+      setSourceCriticalOperation(false)
+    }
+  }, [isOpen])
+
   useEffect(
     () => () => {
       window.dispatchEvent(
@@ -271,7 +306,7 @@ export function SourceDownloadPanel() {
       )
 
       setSources(validSources)
-      setSelectedSourceIds(new Set())
+      setSelectedSourceIds(new Set(validSources.map((source) => source.sourceId)))
       setSourceLoadError(null)
 
       return notebookId
@@ -279,7 +314,7 @@ export function SourceDownloadPanel() {
       const fallbackSources = resolveSourceRowsFromDom()
       if (fallbackSources.length > 0) {
         setSources(fallbackSources)
-        setSelectedSourceIds(new Set())
+        setSelectedSourceIds(new Set(fallbackSources.map((source) => source.sourceId)))
         setSourceLoadError(null)
         const fallbackReason = error instanceof Error ? error.message : String(error)
         console.debug(
@@ -320,14 +355,14 @@ export function SourceDownloadPanel() {
     }
   }, [loadSources, uiCopy.openModalFailed])
 
-  const closeModal = useCallback(() => {
-    if (isRunningDownload || isSyncingGDocs) {
-      return
-    }
 
+
+  const closeModal = useCallback(() => {
     setActivePreviewAsset(null)
+    window.dispatchEvent(new CustomEvent(SOURCE_PREVIEW_CLOSE_EVENT))
+    setIsPreviewMode(false)
     setIsOpen(false)
-  }, [isRunningDownload, isSyncingGDocs])
+  }, [])
 
   const toggleSourceSelection = (sourceId: string): void => {
     setSelectedSourceIds((currentSet) => {
@@ -337,7 +372,6 @@ export function SourceDownloadPanel() {
       } else {
         next.add(sourceId)
       }
-
       return next
     })
   }
@@ -679,6 +713,7 @@ export function SourceDownloadPanel() {
 
     const focusedSource = selectedSources[0]
     setIsPreparingPreview(true)
+    setSourceCriticalOperation(true)
     setPreviewLoadError(null)
 
     try {
@@ -702,11 +737,13 @@ export function SourceDownloadPanel() {
       })
     } finally {
       setIsPreparingPreview(false)
+      setTimeout(() => setSourceCriticalOperation(false), 500)
     }
   }, [
     fetchExportRecordsForSelection,
     isPreparingPreview,
     isRunningDownload,
+    setSourceCriticalOperation,
     releaseManagedPreviewBlob,
     selectedSourceIds,
     sources,
@@ -715,65 +752,217 @@ export function SourceDownloadPanel() {
     uiCopy.selectAtLeastOnePreview
   ])
 
-  const handlePreparePreview = useCallback(async () => {
-    if (isPreparingPreview || isRunningDownload) {
+  const handlePreviewDownload = useCallback(async (items: PreviewDraftItem[], previewFormat: PreviewDownloadFormat) => {
+    if (isRunningDownload) {
       return
     }
 
-    setToast({ status: "idle", message: "", progress: 0 })
-    setPreviewLoadError(null)
-    setPreviewSkippedCount(0)
-    setIsPreviewMode(true)
-    setPreviewDrafts([])
-    setIsPreparingPreview(true)
+    setIsRunningDownload(true)
+    setSourceCriticalOperation(true)
+    setToast({
+      status: "running",
+      message: uiCopy.preparingDownloadFiles,
+      progress: 4
+    })
 
     try {
-      const selected =
-        selectedCount > 0
-          ? sources.filter((source) => selectedSourceIds.has(source.sourceId))
-          : sources
-      if (selected.length === 0) {
-        throw new Error(uiCopy.noSourcesAvailablePreview)
-      }
-      if (selectedCount === 0) {
-        setSelectedSourceIds(new Set(selected.map((source) => source.sourceId)))
+      const selectedInOrder = selectedCount > 0
+        ? sources.filter((source) => selectedSourceIds.has(source.sourceId))
+        : sources
+
+      if (selectedInOrder.length === 0) {
+        throw new Error(uiCopy.selectAtLeastOneDownload)
       }
 
-      const previewSupportedSources = selected.filter(isSourceSupportedForStructuredPreview)
-      const previewSkippedSources = selected.filter((source) => !isSourceSupportedForStructuredPreview(source))
-      setPreviewSkippedCount(previewSkippedSources.length)
+      const downloadFormat = previewFormat as DownloadFormat
+      const editableDraftBySourceId = new Map<string, PreviewDraft>(
+        items.map((item) => [
+          item.sourceId,
+          {
+            sourceId: item.sourceId,
+            sourceTitle: item.sourceTitle,
+            sourceKind: item.sourceKind,
+            summaryText: item.summaryText,
+            editableContent: item.editableContent
+          }
+        ])
+      )
 
-      if (previewSupportedSources.length === 0) {
-        throw new Error(uiCopy.previewSupportedOnly)
+      const sourcesWithoutEditable = selectedInOrder.filter(
+        (source) => !editableDraftBySourceId.has(source.sourceId)
+      )
+
+      const nonPreviewDraftBySourceId = new Map<string, PreviewDraft>()
+      if (sourcesWithoutEditable.length > 0) {
+        const nonPreviewRecords = await fetchExportRecordsForSelection(sourcesWithoutEditable)
+        for (const record of nonPreviewRecords) {
+          nonPreviewDraftBySourceId.set(record.sourceId, {
+            ...record,
+            editableContent: buildPreviewText(record, downloadFormat)
+          })
+        }
       }
 
-      const exportRecords = await fetchExportRecordsForSelection(previewSupportedSources)
-      const nextDrafts: PreviewDraft[] = exportRecords.map((record) => ({
-        ...record,
-        editableContent: buildPreviewText(record, format)
-      }))
-      if (nextDrafts.length === 0) {
-        throw new Error(uiCopy.noPreviewContentReturned)
+      const draftsToExport: PreviewDraft[] = []
+      for (const source of selectedInOrder) {
+        const editable = editableDraftBySourceId.get(source.sourceId)
+        if (editable) {
+          draftsToExport.push(editable)
+          continue
+        }
+
+        const fallback = nonPreviewDraftBySourceId.get(source.sourceId)
+        if (fallback) {
+          draftsToExport.push(fallback)
+        }
       }
 
-      setPreviewDrafts(nextDrafts)
+      if (draftsToExport.length === 0) {
+        throw new Error(uiCopy.selectedNoDownloadContent)
+      }
+
+      if (draftsToExport.length === 1) {
+        const singleDraft = draftsToExport[0]
+        const singleFile = await buildPreparedFile(singleDraft, downloadFormat, new Set(), singleDraft.editableContent)
+        triggerDownload(
+          new Blob([toArrayBuffer(singleFile.bytes)], { type: singleFile.mimeType }),
+          singleFile.filename
+        )
+        setToast({
+          status: "success",
+          message: uiCopy.downloadSuccess,
+          progress: 100
+        })
+        return
+      }
+
+      const files: DownloadPreparedFile[] = []
+      const usedNames = new Set<string>()
+      for (let index = 0; index < draftsToExport.length; index += 1) {
+        const draft = draftsToExport[index]
+        files.push(await buildPreparedFile(draft, downloadFormat, usedNames, draft.editableContent))
+        setToast({
+          status: "running",
+          message: uiCopy.preparingProgress(index + 1, draftsToExport.length),
+          progress: Math.round(((index + 1) / draftsToExport.length) * 88)
+        })
+      }
+
+      setToast({
+        status: "running",
+        message: uiCopy.zippingFiles,
+        progress: 96
+      })
+      const zipBytes = await buildZip(files.map((file) => ({ filename: file.filename, bytes: file.bytes })))
+      triggerDownload(
+        new Blob([toArrayBuffer(zipBytes)], { type: "application/zip" }),
+        `${buildMindDuckFilenameBase("Font", "Fontes")}.zip`
+      )
+
+      setToast({
+        status: "success",
+        message: uiCopy.downloadSuccess,
+        progress: 100
+      })
     } catch (error) {
-      setPreviewLoadError(error instanceof Error ? error.message : uiCopy.previewBuildFailed)
+      setToast({
+        status: "error",
+        message: error instanceof Error ? error.message : uiCopy.downloadFailed,
+        progress: 0
+      })
+      throw error
+    } finally {
+      setIsRunningDownload(false)
+      setTimeout(() => setSourceCriticalOperation(false), 500)
+    }
+  }, [
+    fetchExportRecordsForSelection,
+    isRunningDownload,
+    selectedCount,
+    selectedSourceIds,
+    setSourceCriticalOperation,
+    sources,
+    uiCopy.downloadFailed,
+    uiCopy.downloadSuccess,
+    uiCopy.preparingDownloadFiles,
+    uiCopy.preparingProgress,
+    uiCopy.selectAtLeastOneDownload,
+    uiCopy.selectedNoDownloadContent,
+    uiCopy.zippingFiles
+  ])
+
+  const handlePreparePreview = useCallback(async () => {
+    if (isPreparingPreview || isRunningDownload) return
+
+    setIsPreparingPreview(true)
+    setSourceCriticalOperation(true)
+
+    try {
+      const selected = selectedCount > 0
+        ? sources.filter((source) => selectedSourceIds.has(source.sourceId))
+        : sources
+
+      if (selected.length === 0) throw new Error(uiCopy.noSourcesAvailablePreview)
+
+      const supported = selected.filter(isSourceSupportedForStructuredPreview)
+      const skippedCount = selected.length - supported.length
+
+      if (supported.length === 0) throw new Error(uiCopy.previewSupportedOnly)
+
+      const exportRecords = await fetchExportRecordsForSelection(supported)
+      const kindById = new Map(supported.map((source) => [source.sourceId, source.sourceKind]))
+      const drafts = exportRecords.map((record) => ({
+        sourceId: record.sourceId,
+        sourceTitle: record.sourceTitle,
+        sourceUrl: record.sourceUrl,
+        sourceKind: kindById.get(record.sourceId) ?? "document",
+        summaryText: record.summaryText,
+        editableContent: buildPreviewText(record, format),
+        previewFormat: format
+      }))
+
+      window.dispatchEvent(new CustomEvent(SOURCE_PREVIEW_OPEN_EVENT, {
+        detail: {
+          drafts,
+          format,
+          skippedCount,
+          onDownload: handlePreviewDownload,
+          labels: {
+            previewLabTitle: "PREVIEW LAB",
+            title: uiCopy.modalTitle,
+            subtitle: uiCopy.modalSubtitlePreview,
+            sourceKindYoutube: uiCopy.sourceKindYoutube,
+            sourceKindDocument: uiCopy.sourceKindDocument,
+            previewTextareaPlaceholder: uiCopy.previewTextareaPlaceholder,
+            skippedLabel: uiCopy.previewSkippedLabel(skippedCount),
+            noPreview: uiCopy.noPreviewAvailable,
+            backButton: uiCopy.backButton,
+            downloadButton: uiCopy.downloadButton(selected.length),
+            downloadingButton: uiCopy.downloadRunningButton
+          }
+        }
+      }))
+    } catch (error) {
+      setToast({
+        status: "error",
+        message: error instanceof Error ? error.message : uiCopy.previewBuildFailed,
+        progress: 0
+      })
     } finally {
       setIsPreparingPreview(false)
+      setTimeout(() => setSourceCriticalOperation(false), 300)
     }
   }, [
     fetchExportRecordsForSelection,
     format,
+    handlePreviewDownload,
     isPreparingPreview,
     isRunningDownload,
     selectedCount,
     selectedSourceIds,
+    setSourceCriticalOperation,
     sources,
-    uiCopy.noPreviewContentReturned,
-    uiCopy.noSourcesAvailablePreview,
-    uiCopy.previewBuildFailed,
-    uiCopy.previewSupportedOnly
+    uiCopy
   ])
 
   const handlePreviewContentChange = useCallback((sourceId: string, nextContent: string) => {
@@ -793,6 +982,7 @@ export function SourceDownloadPanel() {
     if (isRunningDownload) {
       return
     }
+    window.dispatchEvent(new CustomEvent(SOURCE_PREVIEW_CLOSE_EVENT))
     setIsPreviewMode(false)
     setPreviewLoadError(null)
     setPreviewSkippedCount(0)
@@ -804,6 +994,7 @@ export function SourceDownloadPanel() {
     }
 
     setIsRunningDownload(true)
+    setSourceCriticalOperation(true)
     setToast({
       status: "running",
       message: uiCopy.preparingDownloadFiles,
@@ -812,7 +1003,7 @@ export function SourceDownloadPanel() {
 
     try {
       let draftsToExport: PreviewDraft[] = []
-      if (isPreviewMode) {
+      if (isPreviewMode && previewDrafts.length > 0) {
         const selectedInOrder = sources.filter((source) => selectedSourceIds.has(source.sourceId))
         if (selectedInOrder.length === 0) {
           throw new Error(uiCopy.selectAtLeastOneDownload)
@@ -916,12 +1107,14 @@ export function SourceDownloadPanel() {
       })
     } finally {
       setIsRunningDownload(false)
+      setTimeout(() => setSourceCriticalOperation(false), 500)
     }
   }, [
     fetchExportRecordsForSelection,
     format,
     isPreviewMode,
     isRunningDownload,
+    setSourceCriticalOperation,
     previewDrafts,
     selectedSourceIds,
     sources,
@@ -944,6 +1137,12 @@ export function SourceDownloadPanel() {
     .replace(/\bbaixe\b/gi, "Download")
     .replace(/\bbaixado\b/gi, "Download")
   const isPreviewToast = /\bpre[-\s]?visual/i.test(toastDisplayMessage)
+  const toastStatusLabel =
+    toast.status === "error"
+      ? "Error"
+      : toast.status === "success"
+        ? "Completed"
+        : "In progress"
 
   return (
     <>
@@ -958,345 +1157,51 @@ export function SourceDownloadPanel() {
         </div>
       )}
 
-      {isOpen && (
-        <div
-            data-minddock-source-overlay="true"
-            className="fixed inset-0 z-[2147483647] flex items-center justify-center bg-[#020204]/80 px-4 backdrop-blur-sm"
-            onClick={(event) => {
-              event.stopPropagation()
-            }}
-            onMouseDown={(event) => {
-              event.stopPropagation()
-              if (event.target === event.currentTarget) {
-                closeModal()
-              }
-            }}>
-            <section
-              role="dialog"
-              aria-modal="true"
-              aria-label={uiCopy.modalAriaLabel}
-              onClick={(event) => {
-                event.stopPropagation()
-              }}
-              onMouseDown={(event) => {
-                event.stopPropagation()
-              }}
-              className="relative flex max-h-[88vh] w-full max-w-[960px] flex-col overflow-hidden rounded-[22px] border border-white/[0.08] bg-[#08090b] text-[#d6dae0] shadow-[0_24px_64px_rgba(0,0,0,0.45)]">
-              <div
-                aria-hidden="true"
-                className="pointer-events-none absolute inset-0 rounded-[inherit] opacity-90"
-                style={{
-                  backgroundImage: "radial-gradient(circle, rgba(255, 255, 255, 0.07) 1px, transparent 1px)",
-                  backgroundSize: "14px 14px",
-                  backgroundPosition: "0 0"
-                }}
-              />
-
-              <div className="relative z-[1] flex flex-1 flex-col">
-                <header className="flex items-start justify-between gap-3 border-b border-white/[0.06] px-5 pb-3 pt-5">
-                  <div>
-                    <h2 className="text-[28px] font-semibold leading-none tracking-tight text-white">
-                      {uiCopy.modalTitle}
-                    </h2>
-                    <p className="mt-1 text-sm text-[#9ca3af]">
-                      {isPreviewMode
-                        ? uiCopy.modalSubtitlePreview
-                        : uiCopy.modalSubtitleSelection}
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    onMouseDown={swallowInteraction}
-                    onClick={(event) => {
-                      swallowInteraction(event)
-                      closeModal()
-                    }}
-                    disabled={isRunningDownload || isSyncingGDocs || isPreparingPreview}
-                    className="inline-flex h-9 w-9 items-center justify-center rounded-[11px] border border-white/[0.12] bg-[#111318] text-[#a5acb8] transition-colors hover:text-white disabled:cursor-not-allowed disabled:opacity-50">
-                    <X size={15} strokeWidth={1.8} />
-                  </button>
-                </header>
-
-                <div className="px-5 pb-2 pt-3">
-                  {!isPreviewMode && (
-                    <div className="rounded-xl border border-white/[0.1] bg-[#0e1116] px-3 py-2">
-                      <input
-                        type="search"
-                        value={sourceSearch}
-                        onChange={(event) => setSourceSearch(event.target.value)}
-                        placeholder={uiCopy.sourceFilterPlaceholder}
-                        className="w-full bg-transparent text-sm text-[#e5e7eb] outline-none placeholder:text-[#6b7280]"
-                      />
-                    </div>
-                  )}
-
-                  <div className={isPreviewMode ? "mt-0" : "mt-3"}>
-                    <div className="grid grid-cols-2 gap-2 rounded-xl border border-white/[0.1] bg-[#0e1116] p-2 sm:grid-cols-4">
-                      {DOWNLOAD_FORMAT_OPTIONS.map((item) => {
-                        const active = format === item
-                        const itemMeta = downloadFormatMeta[item]
-                        const preventTranslation = Boolean(itemMeta.noTranslate)
-
-                        return (
-                          <button
-                            key={item}
-                            type="button"
-                            translate={preventTranslation ? "no" : undefined}
-                            lang={preventTranslation ? "en" : undefined}
-                            onMouseDown={swallowInteraction}
-                            onClick={(event) => {
-                              swallowInteraction(event)
-                              updateFormat(item)
-                            }}
-                            className={[
-                              "flex min-h-[48px] flex-col justify-center gap-0.5 rounded-lg border px-2.5 py-2 text-left",
-                              preventTranslation ? "notranslate" : "",
-                              active
-                                ? "border-[#facc15]/40 bg-[#2a2208] text-[#fff1a6]"
-                                : "border-transparent bg-[#12161d] text-[#c7ced8]"
-                            ].join(" ")}>
-                            <span
-                              translate={preventTranslation ? "no" : undefined}
-                              className={["text-sm font-semibold leading-none", preventTranslation ? "notranslate" : ""].join(" ")}>
-                              {itemMeta.label}
-                            </span>
-                            <span
-                              translate={preventTranslation ? "no" : undefined}
-                              className={["text-[11px] leading-tight opacity-85", preventTranslation ? "notranslate" : ""].join(" ")}>
-                              {itemMeta.subtitle}
-                            </span>
-                          </button>
-                        )
-                      })}
-                    </div>
-                  </div>
-
-                  {!isPreviewMode && (
-                    <div className="mt-2 flex items-center justify-between gap-2 text-xs text-[#a5acb8]">
-                      <label className="inline-flex shrink-0 items-center gap-2 whitespace-nowrap text-[#c8d0db]">
-                        <input
-                          ref={selectAllCheckboxRef}
-                          type="checkbox"
-                          checked={areAllFilteredSourcesSelected}
-                          onChange={toggleSelectAllFilteredSources}
-                          disabled={!hasFilteredSources}
-                          className="h-4 w-4 cursor-pointer accent-[#facc15] disabled:cursor-not-allowed"
-                        />
-                        <span>{uiCopy.selectAllLabel}</span>
-                        <span className="text-[#7f8795]">
-                          ({`${filteredSelectedCount}/${filteredSources.length}`})
-                        </span>
-                      </label>
-                    </div>
-                  )}
-                </div>
-
-                {!isPreviewMode && (
-                  <div className="mx-5 mt-2 min-h-[210px] max-h-[320px] overflow-y-auto rounded-xl border border-white/[0.1] bg-[#0e1116]/90 p-1.5 scrollbar-thin">
-                    {isLoadingSources && (
-                      <div className="px-3 py-6 text-sm text-[#9ca3af]">{uiCopy.loadingBackendSources}</div>
-                    )}
-
-                    {!isLoadingSources && sourceLoadError && (
-                      <div className="px-3 py-6 text-sm text-red-300">{sourceLoadError}</div>
-                    )}
-
-                    {!isLoadingSources && !sourceLoadError && filteredSources.length === 0 && (
-                      <div className="px-3 py-6 text-sm text-[#9ca3af]">{uiCopy.noSourcesForFilter}</div>
-                    )}
-
-                    {!isLoadingSources &&
-                      !sourceLoadError &&
-                      filteredSources.map((source) => {
-                        const isChecked = selectedSourceIds.has(source.sourceId)
-
-                        return (
-                          <label
-                            key={source.sourceId}
-                            className="grid cursor-pointer grid-cols-[20px_minmax(0,1fr)] items-start gap-2 border-t border-white/[0.06] px-2 py-2.5">
-                            <input
-                              type="checkbox"
-                              checked={isChecked}
-                              onChange={() => toggleSourceSelection(source.sourceId)}
-                              className="mt-0.5 h-4 w-4 cursor-pointer accent-[#facc15]"
-                            />
-
-                            <span className="min-w-0">
-                              <span className="inline-flex min-w-0 items-center gap-2 text-sm font-semibold text-[#f3f4f6]">
-                                <span className="truncate" title={source.sourceTitle}>
-                                  {source.sourceTitle}
-                                </span>
-                              </span>
-                              <span className="mt-0.5 block text-xs text-[#9ca3af]">
-                                {source.sourceKind === "youtube"
-                                  ? uiCopy.sourceKindYoutube
-                                  : uiCopy.sourceKindDocument}
-                                {source.isGDoc ? " - GDoc" : ""}
-                              </span>
-                            </span>
-                          </label>
-                        )
-                      })}
-                  </div>
-                )}
-
-                {isPreviewMode && (
-                  <div className="mx-5 mt-2 min-h-[320px] max-h-[420px] overflow-y-auto rounded-xl border border-white/[0.1] bg-[#0e1116]/90 p-2.5 scrollbar-thin">
-                    {previewSkippedCount > 0 && (
-                      <div className="mb-2 rounded-lg border border-white/[0.08] bg-[#10151d] px-3 py-2 text-xs text-[#c7ced8]">
-                        {uiCopy.previewSkippedLabel(previewSkippedCount)}
-                      </div>
-                    )}
-                    {isPreparingPreview ? (
-                      <div className="px-3 py-6 text-sm text-[#9ca3af]">{uiCopy.loadingPreview}</div>
-                    ) : previewLoadError ? (
-                      <div className="px-3 py-6 text-sm text-red-300">{previewLoadError}</div>
-                    ) : previewDrafts.length === 0 ? (
-                      <div className="px-3 py-6 text-sm text-[#9ca3af]">
-                        {uiCopy.noPreviewAvailable}
-                      </div>
-                    ) : (
-                      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-                        {previewDrafts.map((draft) => (
-                          <article
-                            key={draft.sourceId}
-                            className="flex h-[320px] flex-col overflow-hidden rounded-lg border border-white/[0.08] bg-[#12161d]">
-                            <header className="flex items-center justify-between gap-2 border-b border-white/[0.08] px-3 py-2">
-                              <div className="min-w-0">
-                                <h3 className="truncate text-sm font-semibold text-white">{draft.sourceTitle}</h3>
-                                <p className="text-xs text-[#9ca3af]">
-                                  {draft.sourceKind === "youtube"
-                                    ? uiCopy.sourceKindYoutube
-                                    : uiCopy.sourceKindDocument}{" "}
-                                  |{" "}
-                                  {format === "markdown"
-                                    ? uiCopy.formatLabelMarkdown
-                                    : format === "text"
-                                      ? uiCopy.formatLabelText
-                                      : format === "pdf"
-                                        ? uiCopy.formatLabelPdf
-                                        : uiCopy.formatLabelDocx}
-                                </p>
-                              </div>
-                            </header>
-                            <textarea
-                              value={draft.editableContent}
-                              onChange={(event) => handlePreviewContentChange(draft.sourceId, event.target.value)}
-                              placeholder={uiCopy.previewTextareaPlaceholder}
-                              className="flex-1 resize-none overflow-y-auto bg-transparent px-3 py-3 text-[13px] leading-6 text-[#e5e7eb] outline-none placeholder:text-[#6b7280]"
-                            />
-                          </article>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {(() => {
-                  const downloadCount = selectedCount
-                  return (
-                    <footer className="mt-3 grid grid-cols-[250px_minmax(0,1fr)] gap-3 px-5 pb-5 pt-1">
-                      <button
-                        type="button"
-                        onMouseDown={swallowInteraction}
-                        onClick={(event) => {
-                          swallowInteraction(event)
-                          if (isPreviewMode) {
-                            goBackToSelection()
-                            return
-                          }
-                          void handlePreparePreview()
-                        }}
-                        disabled={
-                          isLoadingSources ||
-                          isRunningDownload ||
-                          isPreparingPreview ||
-                          sources.length === 0
-                        }
-                        className="inline-flex min-h-[54px] items-center justify-center gap-1.5 rounded-xl border border-white/[0.1] bg-[#12161d] px-5 text-base font-semibold text-[#d6dae0] disabled:cursor-not-allowed disabled:opacity-45">
-                        <Eye size={16} />
-                        {isPreviewMode ? uiCopy.backButton : uiCopy.previewButton}
-                      </button>
-
-                      <button
-                        type="button"
-                        onMouseDown={swallowInteraction}
-                        onClick={(event) => {
-                          swallowInteraction(event)
-                          void handleDownloadSelected()
-                        }}
-                        disabled={
-                          isRunningDownload ||
-                          isPreparingPreview ||
-                          downloadCount === 0
-                        }
-                        className="inline-flex min-h-[44px] items-center justify-center gap-1 rounded-xl bg-[#16a34a] px-4 text-base font-semibold text-[#052e16] shadow-[0_10px_24px_rgba(22,163,74,0.25)] disabled:cursor-not-allowed disabled:opacity-45">
-                        {isRunningDownload ? uiCopy.downloadRunningButton : uiCopy.downloadButton(downloadCount)}
-                      </button>
-                    </footer>
-                  )
-                })()}
-              </div>
-            </section>
-          </div>
-      )}
-
-      {toast.status !== "idle" && !isPreviewMode && (
-        <aside
-          data-minddock-source-toast="true"
-          className="fixed bottom-4 right-4 z-[2147483647] w-[min(370px,calc(100vw-28px))] overflow-hidden rounded-[18px] border border-white/[0.1] bg-[#08090b] text-[#d6dae0] shadow-[0_18px_44px_rgba(0,0,0,0.5)]">
-          <div
-            aria-hidden="true"
-            className="pointer-events-none absolute inset-0 rounded-[inherit] opacity-85"
-            style={{
-              backgroundImage: "radial-gradient(circle, rgba(255, 255, 255, 0.065) 1px, transparent 1px)",
-              backgroundSize: "14px 14px",
-              backgroundPosition: "0 0"
-            }}
-          />
-
-          <div className="relative z-[1] p-3.5">
-            <header className="mb-2 flex items-center justify-between gap-2">
-              <strong className="text-[20px] font-semibold leading-none tracking-tight text-white">
-                {isSyncingGDocs
-                  ? uiCopy.toastTitleUpdatingSources
-                  : isPreparingPreview || isPreviewToast
-                    ? uiCopy.toastTitlePreviewSources
-                    : isRunningDownload
-                      ? uiCopy.toastTitleDownloadingSources
-                      : uiCopy.toastTitleDownloadSources}
-              </strong>
-              <button
-                type="button"
-                aria-label={uiCopy.closeNoticeAriaLabel}
-                onMouseDown={swallowInteraction}
-                onClick={(event) => {
-                  swallowInteraction(event)
-                  setToast({ status: "idle", message: "", progress: 0 })
-                }}
-                className="inline-flex h-7 w-7 items-center justify-center rounded-[10px] border border-white/[0.12] bg-[#101319] text-[#8f98a6] transition-colors hover:text-white">
-                <X size={14} strokeWidth={1.8} />
-              </button>
-            </header>
-
-            <p className="mb-2 text-sm text-[#b5bcc8]">{toastDisplayMessage}</p>
-
-            <div className="h-2 overflow-hidden rounded-full bg-white/[0.1]">
-              <div
-                className={[
-                  "h-full rounded-full transition-all duration-200",
-                  toast.status === "error"
-                    ? "bg-[linear-gradient(90deg,#ef4444_0%,#f97316_100%)]"
-                    : "bg-[linear-gradient(90deg,#60a5fa_0%,#22c55e_100%)]"
-                ].join(" ")}
-                style={{
-                  width: `${Math.max(0, Math.min(100, toast.progress))}%`
-                }}
-              />
-            </div>
-          </div>
-        </aside>
-      )}
+      <SourceDownloadModal
+        isOpen={isOpen}
+        isPreviewMode={isPreviewMode}
+        isLoadingSources={isLoadingSources}
+        isRunningDownload={isRunningDownload}
+        isPreparingPreview={isPreparingPreview}
+        isSyncingGDocs={isSyncingGDocs}
+        format={format}
+        sourceSearch={sourceSearch}
+        sources={sources}
+        sourceLoadError={sourceLoadError}
+        selectedSourceIds={selectedSourceIds}
+        filteredSources={filteredSources}
+        filteredSelectedCount={filteredSelectedCount}
+        areAllFilteredSourcesSelected={areAllFilteredSourcesSelected}
+        hasFilteredSources={hasFilteredSources}
+        hasPartialFilteredSelection={hasPartialFilteredSelection}
+        previewDrafts={previewDrafts}
+        previewLoadError={previewLoadError}
+        previewSkippedCount={previewSkippedCount}
+        selectedCount={selectedCount}
+        toast={toast}
+        toastDisplayMessage={toastDisplayMessage}
+        toastStatusLabel={toastStatusLabel}
+        isPreviewToast={isPreviewToast}
+        downloadFormatMeta={downloadFormatMeta}
+        downloadFormatOptions={DOWNLOAD_FORMAT_OPTIONS}
+        uiCopy={uiCopy}
+        selectAllCheckboxRef={selectAllCheckboxRef}
+        onClose={closeModal}
+        onSetSourceSearch={setSourceSearch}
+        onUpdateFormat={updateFormat}
+        onToggleSelectAll={toggleSelectAllFilteredSources}
+        onToggleSource={toggleSourceSelection}
+        onReplaceSelection={replaceSelection}
+        onPreparePreview={() => {
+          void handlePreparePreview()
+        }}
+        onGoBackToSelection={goBackToSelection}
+        onDownloadSelected={() => {
+          void handleDownloadSelected()
+        }}
+        onPreviewContentChange={handlePreviewContentChange}
+        onDismissToast={() => setToast({ status: "idle", message: "", progress: 0 })}
+      />
 
       <IsolatedResourceViewerDialog
         isOpen={activePreviewAsset !== null}

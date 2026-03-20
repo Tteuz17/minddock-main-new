@@ -5,20 +5,20 @@ import {
   Code2,
   Copy,
   Download,
-  Eye,
   File,
   FileCode2,
   FileText,
   Loader2,
-  X
+  Wand2
 } from "lucide-react"
 import { zipSync } from "fflate"
 import { DocsExportAction } from "~/content/features/Export/DocsExportAction"
 import { NotionExportAction } from "~/content/features/Export/NotionExportAction"
 import { base64ToBytes } from "~/lib/base64-bytes"
 import { MESSAGE_ACTIONS, type StandardResponse } from "~/lib/contracts"
-import { buildDocxBytesFromText, triggerDownload } from "~/lib/source-download"
+import { buildDocxBytesFromText, buildMindDuckFilenameBase, triggerDownload } from "~/lib/source-download"
 import { showMindDockToast } from "../common/minddock-ui"
+import { PreviewExportModal } from "./PreviewExportModal"
 import {
   captureVisibleMessages,
   isVisible,
@@ -122,7 +122,7 @@ interface EpubBuildOptions {
 const FORMAT_OPTIONS: readonly FormatOption[] = [
   { id: "markdown", label: "Markdown", icon: FileCode2 },
   { id: "html", label: "HTML", icon: Code2 },
-  { id: "text", label: "Texto simples", icon: FileText },
+  { id: "text", label: "Plain text", icon: FileText },
   { id: "word", label: "Word", icon: FileText },
   { id: "epub", label: "EPUB", icon: FileText },
   { id: "pdf", label: "PDF", icon: File },
@@ -192,6 +192,7 @@ const BAD_SOURCE_NAMES_REGEX = /^(video_audio_call|video_youtube|article|drive_p
 const GENERIC_SOURCE_TITLE_REGEX = /^(documento|document|source|fonte|untitled source|fonte sem titulo|article|arquivo)$/i
 const GENERIC_CITATION_LABEL_REGEX =
   /^(source|fonte|citation|citacao|citar|reference|referencia)\s*[:#-]?\s*\d*\s*$/i
+const MINDDOCK_WORDMARK_SRC = new URL("../../public/images/logo/logo minddock sem fundo.png", import.meta.url).href
 
 function isExtensionContextInvalidatedError(error: unknown): boolean {
   const normalizedMessage = String(error instanceof Error ? error.message : error ?? "")
@@ -506,8 +507,8 @@ export function ConversationExportMenu() {
 
   const isBusy = busyFormat !== null || isCopying || isPreviewLoading || isPreviewExporting
   const selectedCount = selectedTurnIds.size
-  const exportLabel = selectedCount > 0 ? `Exportar (${selectedCount})` : "Exportar"
-  const copyLabel = selectedCount > 0 ? `Copia (${selectedCount})` : "Copia"
+  const exportLabel = selectedCount > 0 ? `Export (${selectedCount})` : "Export"
+  const copyLabel = selectedCount > 0 ? `Copy (${selectedCount})` : "Copy"
   const previewRenderState = buildModalPreviewRenderState(previewDebouncedText, previewFormat)
 
   const handleFormatExport = async (format: ExportFormat): Promise<void> => {
@@ -581,7 +582,7 @@ export function ConversationExportMenu() {
     } catch (error) {
       console.error("[MindDock] Nao foi possivel abrir preview de exportacao", error)
       showMindDockToast({
-        message: error instanceof Error ? error.message : "Falha ao abrir preview de exportacao.",
+        message: error instanceof Error ? error.message : "Failed to open export preview.",
         variant: "error",
         timeoutMs: 3200
       })
@@ -613,7 +614,7 @@ export function ConversationExportMenu() {
     const cleaned = normalizeForExportDisplay(previewText)
     if (!cleaned) {
       showMindDockToast({
-        message: "Conteudo vazio. Ajuste o texto antes de exportar.",
+        message: "Content is empty. Edit the text before exporting.",
         variant: "error",
         timeoutMs: 3000
       })
@@ -630,14 +631,14 @@ export function ConversationExportMenu() {
         format: previewFormat
       })
       showMindDockToast({
-        message: "Exportacao concluida.",
+        message: "Export completed.",
         variant: "success"
       })
       handleClosePreviewEditor()
     } catch (error) {
       console.error("[MindDock] Exportacao via preview falhou", error)
       showMindDockToast({
-        message: error instanceof Error ? error.message : "Falha ao exportar conteudo editado.",
+        message: error instanceof Error ? error.message : "Failed to export edited content.",
         variant: "error",
         timeoutMs: 3200
       })
@@ -651,7 +652,7 @@ export function ConversationExportMenu() {
       ref={containerRef}
       data-minddock-conversation-export="true"
       className="relative mr-1 inline-flex shrink-0 items-center">
-      <div className="inline-flex shrink-0 items-center gap-1 rounded-[16px] border border-white/[0.08] bg-[#11161e] p-1">
+      <div className="inline-flex shrink-0 items-center gap-1 rounded-[12px] border border-white/[0.08] bg-[#06080c] p-[3px]">
         <button
           type="button"
           title={exportLabel}
@@ -666,21 +667,25 @@ export function ConversationExportMenu() {
           }}
           disabled={isBusy}
           className={[
-            "inline-flex h-8 shrink-0 items-center gap-2 rounded-[11px] border px-3 text-[13px] font-medium transition-colors",
+            "inline-flex h-8 shrink-0 items-center gap-1.5 rounded-[9px] border px-3 text-[13px] font-medium transition-colors",
             isOpen
-              ? "border-white/[0.2] bg-[#1a2230] text-white"
-              : "border-white/[0.08] bg-[#131a24] text-[#d5dbe7] hover:bg-[#1a2230] hover:text-white",
+              ? "border-white/[0.16] bg-[#11151c] text-white"
+              : "border-transparent bg-transparent text-[#cfd6e3] hover:bg-white/[0.04] hover:text-white",
             isBusy ? "cursor-not-allowed opacity-70" : "cursor-pointer"
           ].join(" ")}>
-          {busyFormat ? <Loader2 size={14} strokeWidth={2} className="animate-spin" /> : <Download size={14} strokeWidth={1.9} />}
+          {busyFormat ? (
+            <Loader2 size={14} strokeWidth={2} className="animate-spin" />
+          ) : (
+            <Download size={14} strokeWidth={1.9} className={isOpen ? "text-[#facc15]" : "text-[#d7deea]"} />
+          )}
           <span className="whitespace-nowrap">{exportLabel}</span>
           <ChevronDown size={14} strokeWidth={1.9} className={["transition-transform", isOpen ? "rotate-180" : ""].join(" ")} />
         </button>
 
         <button
           type="button"
-          title={copyDone ? "Copiado!" : copyLabel}
-          aria-label={copyDone ? "Copiado!" : copyLabel}
+          title={copyDone ? "Copied!" : copyLabel}
+          aria-label={copyDone ? "Copied!" : copyLabel}
           onMouseDown={swallowInteraction}
           onClick={(event) => {
             swallowInteraction(event)
@@ -688,108 +693,137 @@ export function ConversationExportMenu() {
           }}
           disabled={isBusy}
           className={[
-            "inline-flex h-8 shrink-0 items-center gap-2 rounded-[11px] border border-white/[0.08] bg-[#131a24] px-3 text-[13px] font-medium transition-colors",
-            copyDone ? "text-[#8fd6ff]" : "text-[#d5dbe7] hover:bg-[#1a2230] hover:text-white",
+            "inline-flex h-8 shrink-0 items-center gap-1.5 rounded-[9px] border border-transparent bg-transparent px-3 text-[13px] font-medium transition-colors",
+            copyDone
+              ? "text-[#facc15]"
+              : "text-[#cfd6e3] hover:bg-white/[0.04] hover:text-white",
             isBusy ? "cursor-not-allowed opacity-70" : "cursor-pointer"
           ].join(" ")}>
-          {isCopying ? <Loader2 size={14} strokeWidth={2} className="animate-spin" /> : <Copy size={14} strokeWidth={1.9} />}
-          <span className="whitespace-nowrap">{copyDone ? "Copiado!" : copyLabel}</span>
+          {isCopying ? (
+            <Loader2 size={14} strokeWidth={2} className="animate-spin" />
+          ) : (
+            <Copy size={14} strokeWidth={1.9} className={copyDone ? "text-[#facc15]" : "text-[#aab4c7]"} />
+          )}
+          <span className="whitespace-nowrap">{copyDone ? "Copied!" : copyLabel}</span>
         </button>
       </div>
 
       {isOpen ? (
         <section
           role="menu"
-          aria-label="Menu de exportacao"
-          className="absolute right-0 top-[calc(100%+8px)] z-[2147483646] w-[296px] rounded-[16px] border border-white/[0.1] bg-[#11161e] p-2 shadow-[0_18px_40px_rgba(0,0,0,0.45)]">
-          <div className="overflow-hidden rounded-[12px] border border-white/[0.08] bg-[#0f141c]">
-            <MenuToggleRow
-              label="Incluir turnos do usuario"
-              checked={includeUserTurns}
-              onToggle={() => setIncludeUserTurns((previous) => !previous)}
-            />
-            <MenuToggleRow
-              label="Incluir fontes"
-              checked={includeSources}
-              onToggle={() => setIncludeSources((previous) => !previous)}
-            />
-          </div>
+          aria-label="Export menu"
+          className="absolute right-0 top-[calc(100%+10px)] z-[2147483646] w-[324px] rounded-[18px] border border-white/[0.08] bg-[#000000] p-2 shadow-[0_24px_56px_rgba(0,0,0,0.52)]">
+          <div className="space-y-2">
+            <div className="rounded-[14px] border border-white/[0.08] bg-[#050505] p-2.5">
+              <div className="mb-2 inline-flex items-center gap-1.5 rounded-full border border-white/[0.1] bg-white/[0.03] px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-[#93a0b6]">
+                <Download size={11} strokeWidth={2} className="text-[#facc15]" />
+                Configuration
+              </div>
+              <div className="space-y-1.5">
+                <MenuToggleRow
+                  label="Include user turns"
+                  description="Adds your prompts and commands to the export."
+                  kind="turns"
+                  checked={includeUserTurns}
+                  onToggle={() => setIncludeUserTurns((previous) => !previous)}
+                />
+                <MenuToggleRow
+                  label="Include sources"
+                  description="Attaches citations and source references."
+                  kind="sources"
+                  checked={includeSources}
+                  onToggle={() => setIncludeSources((previous) => !previous)}
+                />
+              </div>
+            </div>
 
-          <button
-            type="button"
-            role="menuitem"
-            onMouseDown={swallowInteraction}
-            onClick={(event) => {
-              swallowInteraction(event)
-              void handleOpenPreviewEditor()
-            }}
-            disabled={isBusy}
-            className={[
-              "mt-2 flex w-full items-center justify-between rounded-[11px] border border-white/[0.08] bg-[#101722] px-3 py-2.5 text-left text-[13px] text-[#d6dce8] transition-colors",
-              isBusy ? "cursor-not-allowed opacity-70" : "cursor-pointer hover:bg-[#151b24]"
-            ].join(" ")}>
-            <span className="inline-flex items-center gap-2.5">
-              {isPreviewLoading ? (
-                <Loader2 size={15} strokeWidth={1.8} className="animate-spin text-[#8fd6ff]" />
-              ) : (
-                <Eye size={15} strokeWidth={1.8} className="text-[#9aa5ba]" />
-              )}
-              <span>Pre-visualizar e editar</span>
-            </span>
-            <span className="rounded-full border border-[#facc15]/30 bg-[#2a2208] px-2 py-[1px] text-[10px] font-semibold tracking-[0.04em] text-[#f6d860]">
-              PRO
-            </span>
-          </button>
+            <button
+              type="button"
+              role="menuitem"
+              onMouseDown={swallowInteraction}
+              onClick={(event) => {
+                swallowInteraction(event)
+                void handleOpenPreviewEditor()
+              }}
+              disabled={isBusy}
+              className={[
+                "flex w-full items-center justify-between rounded-[12px] border border-[#eab308] bg-[#facc15] px-3 py-2.5 text-left text-[13px] text-[#0f0b00] shadow-[0_10px_26px_rgba(250,204,21,0.24)] transition-colors",
+                isBusy ? "cursor-not-allowed opacity-70" : "cursor-pointer hover:bg-[#fbbf24]"
+              ].join(" ")}>
+              <span className="inline-flex items-center gap-2.5 font-semibold">
+                {isPreviewLoading ? (
+                  <Loader2 size={15} strokeWidth={1.8} className="animate-spin text-[#0f0b00]" />
+                ) : (
+                  <Wand2 size={15} strokeWidth={1.9} className="text-[#0f0b00]" />
+                )}
+                <span>Preview and edit</span>
+              </span>
+            </button>
 
-          <DocsExportAction
-            className="mt-2"
-            disabled={isBusy}
-            onExportFinished={() => {
-              setIsOpen(false)
-            }}
-          />
+            <div className="rounded-[14px] border border-white/[0.08] bg-[#050505] p-2">
+              <div className="mb-1 px-1.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-[#8390a5]">
+                Integrations
+              </div>
+              <DocsExportAction
+                className="border-white/[0.08] bg-[#050505] hover:border-[#facc15]/20 hover:bg-[#121212]"
+                disabled={isBusy}
+                onExportFinished={() => {
+                  setIsOpen(false)
+                }}
+              />
 
-          <NotionExportAction
-            className="mt-2"
-            disabled={isBusy}
-            includeUserTurns={includeUserTurns}
-            includeSources={includeSources}
-            onExportFinished={() => {
-              setIsOpen(false)
-            }}
-          />
+              <NotionExportAction
+                className="mt-1.5 border-white/[0.08] bg-[#050505] hover:border-[#facc15]/20 hover:bg-[#121212]"
+                disabled={isBusy}
+                includeUserTurns={includeUserTurns}
+                includeSources={includeSources}
+                onExportFinished={() => {
+                  setIsOpen(false)
+                }}
+              />
+            </div>
 
-          <div className="mt-2 overflow-hidden rounded-[12px] border border-white/[0.08] bg-[#0f141c]">
-            {FORMAT_OPTIONS.map((option) => {
-              const Icon = option.icon
-              const isRunning = busyFormat === option.id
+            <div className="overflow-hidden rounded-[14px] border border-white/[0.08] bg-[#050505]">
+              <div className="flex items-center justify-between border-b border-white/[0.08] px-3 py-2">
+                <span className="text-[10px] font-semibold uppercase tracking-[0.08em] text-[#8390a5]">Formats</span>
+                <span className="text-[10px] text-[#728098]">{FORMAT_OPTIONS.length} options</span>
+              </div>
+              {FORMAT_OPTIONS.map((option) => {
+                const Icon = option.icon
+                const isRunning = busyFormat === option.id
 
-              return (
-                <button
-                  key={option.id}
-                  type="button"
-                  role="menuitem"
-                  onMouseDown={swallowInteraction}
-                  onClick={(event) => {
-                    swallowInteraction(event)
-                    void handleFormatExport(option.id)
-                  }}
-                  disabled={isBusy}
-                  className={[
-                    "flex w-full items-center gap-3 border-t border-white/[0.06] px-3 py-2.5 text-left text-[13px] transition-colors first:border-t-0",
-                    "text-[#d0d6e1]",
-                    isBusy ? "cursor-not-allowed opacity-70" : "cursor-pointer hover:bg-[#151b24] hover:text-white"
-                  ].join(" ")}>
-                  <span className="inline-flex h-[18px] w-[18px] items-center justify-center rounded-[6px] border border-white/[0.12] bg-[#0a0f16] text-[#a8b2c6]">
-                    <Icon size={12} strokeWidth={2} />
-                  </span>
-                  <span className="flex-1" translate={option.id === "word" || option.id === "epub" ? "no" : "yes"}>
-                    {option.label}
-                  </span>
-                  {isRunning ? <Loader2 size={13} strokeWidth={2} className="animate-spin text-[#8fd6ff]" /> : null}
-                </button>
-              )
-            })}
+                return (
+                  <button
+                    key={option.id}
+                    type="button"
+                    role="menuitem"
+                    onMouseDown={swallowInteraction}
+                    onClick={(event) => {
+                      swallowInteraction(event)
+                      void handleFormatExport(option.id)
+                    }}
+                    disabled={isBusy}
+                    className={[
+                      "group flex w-full items-center gap-3 border-t border-white/[0.06] px-3 py-2.5 text-left text-[13px] transition-colors first:border-t-0",
+                      "text-[#d0d6e1]",
+                      isBusy ? "cursor-not-allowed opacity-70" : "cursor-pointer hover:bg-[#121212] hover:text-white"
+                    ].join(" ")}>
+                    <span className="inline-flex h-[20px] w-[20px] items-center justify-center rounded-[6px] border border-white/[0.12] bg-[#0a0f16] text-[#facc15] transition-colors group-hover:border-[#facc15]/35 group-hover:bg-[#1f1a08]">
+                      <Icon size={12} strokeWidth={2} />
+                    </span>
+                    <span className="flex-1" translate={option.id === "word" || option.id === "epub" ? "no" : "yes"}>
+                      {option.label}
+                    </span>
+                    {isRunning ? <Loader2 size={13} strokeWidth={2} className="animate-spin text-[#facc15]" /> : null}
+                  </button>
+                )
+              })}
+            </div>
+
+            <div className="flex items-center justify-between rounded-[10px] border border-white/[0.06] bg-[#050505] px-3 py-2">
+              <span className="text-[10px] uppercase tracking-[0.08em] text-[#6f7c93]">Powered by</span>
+              <img src={MINDDOCK_WORDMARK_SRC} alt="MindDock" className="h-4 w-auto object-contain opacity-95" />
+            </div>
           </div>
         </section>
       ) : null}
@@ -802,11 +836,13 @@ export function ConversationExportMenu() {
           text={previewText}
           renderState={previewRenderState}
           busy={isPreviewExporting}
+          formatOptions={FORMAT_OPTIONS}
           onTextChange={setPreviewText}
           onChangeFormat={setPreviewFormat}
           onClose={handleClosePreviewEditor}
           onReset={handleResetPreviewEditor}
           onExport={handleExportFromPreview}
+          formatExportTimestamp={formatExportTimestamp}
         />
       ) : null}
     </div>
@@ -815,15 +851,27 @@ export function ConversationExportMenu() {
 
 interface MenuToggleRowProps {
   label: string
+  description?: string
+  kind?: "turns" | "sources"
   checked: boolean
   onToggle: () => void
 }
 
 function MenuToggleRow(props: MenuToggleRowProps) {
-  const { label, checked, onToggle } = props
+  const { label, description, kind = "turns", checked, onToggle } = props
+  const Icon = kind === "sources" ? File : FileText
+
   return (
-    <div className="flex items-center justify-between border-t border-white/[0.06] px-3 py-2.5 first:border-t-0">
-      <span className="text-[13px] font-medium text-[#d1d7e2]">{label}</span>
+    <div className="flex items-center justify-between gap-3 rounded-[11px] border border-white/[0.06] bg-white/[0.02] px-2.5 py-2">
+      <div className="min-w-0 flex items-center gap-2.5">
+        <span className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-[8px] border border-white/[0.1] bg-[#0a0a0a]">
+          <Icon size={13} strokeWidth={2} className="text-[#facc15]" />
+        </span>
+        <span className="min-w-0">
+          <span className="block truncate text-[12px] font-medium text-[#dfe5f1]">{label}</span>
+          {description ? <span className="mt-[1px] block text-[10px] text-[#7f8aa0]">{description}</span> : null}
+        </span>
+      </div>
       <button
         type="button"
         role="switch"
@@ -834,178 +882,17 @@ function MenuToggleRow(props: MenuToggleRowProps) {
           onToggle()
         }}
         className={[
-          "relative h-5 w-9 rounded-full border transition-colors",
-          checked
-            ? "border-[#60a5fa]/45 bg-[#1d2a3a]"
-            : "border-white/[0.14] bg-[#161d28]"
+          "relative h-5 w-9 shrink-0 rounded-full border transition-colors",
+          checked ? "border-[#eab308] bg-[#facc15]" : "border-white/[0.14] bg-[#161a21]"
         ].join(" ")}>
         <span
           className={[
-            "absolute left-[1.5px] top-[1.5px] h-[14px] w-[14px] rounded-full bg-[#e4ebf8] shadow-[0_1px_2px_rgba(0,0,0,0.4)] transition-transform",
+            "absolute left-[1.5px] top-[1.5px] h-[14px] w-[14px] rounded-full shadow-[0_1px_2px_rgba(0,0,0,0.4)] transition-transform",
+            checked ? "bg-[#120f08]" : "bg-[#e4ebf8]",
             checked ? "translate-x-[14px]" : ""
           ].join(" ")}
         />
       </button>
-    </div>
-  )
-}
-
-interface PreviewExportModalProps {
-  title: string
-  generatedAtIso: string
-  format: ExportFormat
-  text: string
-  renderState: ModalPreviewRenderState
-  busy: boolean
-  onTextChange: (value: string) => void
-  onChangeFormat: (format: ExportFormat) => void
-  onClose: () => void
-  onReset: () => void
-  onExport: () => void
-}
-
-function PreviewExportModal(props: PreviewExportModalProps) {
-  const {
-    title,
-    generatedAtIso,
-    format,
-    text,
-    renderState,
-    busy,
-    onTextChange,
-    onChangeFormat,
-    onClose,
-    onReset,
-    onExport
-  } = props
-
-  return (
-    <div
-      className="fixed inset-0 z-[2147483647] flex items-center justify-center bg-[#070b12]/80 p-4 backdrop-blur-[2px]"
-      onMouseDown={stopEventPropagation}
-      onClick={(event) => {
-        if (event.target === event.currentTarget) {
-          onClose()
-        }
-      }}>
-      <section
-        role="dialog"
-        aria-modal="true"
-        aria-label="Pre-visualizar e editar exportacao"
-        onMouseDown={stopEventPropagation}
-        className="flex h-[min(82vh,760px)] w-[min(1100px,96vw)] flex-col overflow-hidden rounded-[18px] border border-white/[0.11] bg-[#0d131d] shadow-[0_24px_56px_rgba(0,0,0,0.54)]">
-        <header className="border-b border-white/[0.08] bg-[#101824] px-4 py-3">
-          <div className="flex items-start justify-between gap-3">
-            <div className="min-w-0">
-              <h3 className="truncate text-[14px] font-semibold text-[#e9edf7]">Pre-visualizar e editar</h3>
-              <p className="mt-0.5 truncate text-[12px] text-[#9ca8bf]">
-                {title} · {formatExportTimestamp(generatedAtIso)}
-              </p>
-            </div>
-            <button
-              type="button"
-              title="Fechar"
-              onClick={onClose}
-              className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-[8px] border border-white/[0.1] bg-[#111b29] text-[#b7c2d8] transition-colors hover:bg-[#1a2536] hover:text-white">
-              <X size={14} strokeWidth={2} />
-            </button>
-          </div>
-          <div className="mt-3 flex flex-wrap gap-1.5">
-            {FORMAT_OPTIONS.map((option) => {
-              const Icon = option.icon
-              const selected = option.id === format
-              return (
-                <button
-                  key={`preview-format-${option.id}`}
-                  type="button"
-                  onClick={() => onChangeFormat(option.id)}
-                  className={[
-                    "inline-flex h-7 items-center gap-1.5 rounded-[9px] border px-2.5 text-[12px] font-medium transition-colors",
-                    selected
-                      ? "border-[#8ab4f8]/50 bg-[#18253a] text-[#dce8ff]"
-                      : "border-white/[0.08] bg-[#101722] text-[#adb7ca] hover:bg-[#151f2e] hover:text-[#e7edf9]"
-                  ].join(" ")}>
-                  <Icon size={12} strokeWidth={2} />
-                  <span translate={option.id === "word" || option.id === "epub" ? "no" : "yes"}>{option.label}</span>
-                </button>
-              )
-            })}
-          </div>
-        </header>
-
-        <div className="grid min-h-0 flex-1 grid-cols-1 gap-0 border-t border-white/[0.04] md:grid-cols-2">
-          <div className="min-h-0 border-b border-white/[0.07] bg-[#0d141f] md:border-b-0 md:border-r">
-            <div className="flex h-full min-h-0 flex-col">
-              <div className="border-b border-white/[0.08] px-4 py-2 text-[12px] font-medium text-[#9eabc0]">Editor</div>
-              <textarea
-                value={text}
-                onChange={(event) => onTextChange(event.target.value)}
-                spellCheck={false}
-                className="h-full min-h-0 w-full resize-none bg-transparent px-4 py-3 text-[13px] leading-relaxed text-[#dce4f2] outline-none placeholder:text-[#6f7f97]"
-              />
-            </div>
-          </div>
-
-          <div className="min-h-0 bg-[#0a111a]">
-            <div className="flex h-full min-h-0 flex-col">
-              <div className="border-b border-white/[0.08] px-4 py-2 text-[12px] font-medium text-[#9eabc0]">Preview</div>
-              <div className="min-h-0 flex-1 overflow-auto px-4 py-3">
-                {renderState.error ? <p className="mb-2 text-[12px] text-[#fca5a5]">{renderState.error}</p> : null}
-                {renderState.mode === "html" ? (
-                  <div
-                    className="prose prose-invert max-w-none text-[13px] text-[#dbe4f5] [&_a]:text-[#93c5fd] [&_code]:rounded [&_code]:bg-[#162238] [&_code]:px-1 [&_code]:py-0.5 [&_h1]:text-[22px] [&_h2]:text-[18px] [&_h3]:text-[15px] [&_li]:my-1 [&_pre]:rounded-[10px] [&_pre]:bg-[#0e1828] [&_pre]:p-3 [&_pre_code]:bg-transparent [&_pre_code]:p-0 [&_ul]:pl-5"
-                    dangerouslySetInnerHTML={{ __html: renderState.html }}
-                  />
-                ) : (
-                  <pre className="whitespace-pre-wrap break-words text-[13px] leading-relaxed text-[#dbe4f5]">{renderState.text}</pre>
-                )}
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <footer className="flex items-center justify-between border-t border-white/[0.08] bg-[#0f1724] px-4 py-3">
-          <button
-            type="button"
-            onClick={onReset}
-            disabled={busy}
-            className={[
-              "inline-flex h-8 items-center rounded-[9px] border px-3 text-[12px] font-medium transition-colors",
-              busy
-                ? "cursor-not-allowed border-white/[0.08] bg-[#101722] text-[#7f8aa0] opacity-70"
-                : "border-white/[0.1] bg-[#121b29] text-[#cad5e8] hover:bg-[#182436] hover:text-white"
-            ].join(" ")}>
-            Restaurar
-          </button>
-          <div className="inline-flex items-center gap-2">
-            <button
-              type="button"
-              onClick={onClose}
-              disabled={busy}
-              className={[
-                "inline-flex h-8 items-center rounded-[9px] border px-3 text-[12px] font-medium transition-colors",
-                busy
-                  ? "cursor-not-allowed border-white/[0.08] bg-[#101722] text-[#7f8aa0] opacity-70"
-                  : "border-white/[0.1] bg-[#121b29] text-[#cad5e8] hover:bg-[#182436] hover:text-white"
-              ].join(" ")}>
-              Fechar
-            </button>
-            <button
-              type="button"
-              onClick={onExport}
-              disabled={busy}
-              className={[
-                "inline-flex h-8 min-w-[118px] items-center justify-center gap-2 rounded-[9px] border px-3 text-[12px] font-semibold transition-colors",
-                busy
-                  ? "cursor-not-allowed border-[#8ab4f8]/35 bg-[#18335c] text-[#d4e3fd] opacity-75"
-                  : "border-[#8ab4f8]/45 bg-[#1d3d69] text-[#e6f0ff] hover:bg-[#274b7d]"
-              ].join(" ")}>
-              {busy ? <Loader2 size={13} strokeWidth={2} className="animate-spin" /> : <Download size={13} strokeWidth={2} />}
-              <span>Exportar</span>
-            </button>
-          </div>
-        </footer>
-      </section>
     </div>
   )
 }
@@ -1036,7 +923,7 @@ function buildModalPreviewRenderState(rawValue: string, format: ExportFormat): M
     return {
       mode: "text",
       html: "",
-      text: "Sem conteudo para pre-visualizar."
+      text: "No content available for preview."
     }
   }
 
@@ -1165,7 +1052,7 @@ function renderMarkdownToPreviewHtml(rawMarkdown: string): string {
   flushList()
   flushCode()
 
-  return out.join("\n").trim() || "<p>Sem conteudo.</p>"
+  return out.join("\n").trim() || "<p>No content.</p>"
 }
 
 function renderMarkdownInline(rawLine: string): string {
@@ -1240,7 +1127,7 @@ function buildEditedHtmlDocument(title: string, generatedAtIso: string, content:
     "<body>",
     "  <main class=\"wrap\">",
     `    <h1>${escapeHtml(title)}</h1>`,
-    `    <p class="meta">Exportado em: ${escapeHtml(formatExportTimestamp(generatedAtIso))}</p>`,
+    `    <p class="meta">Exported at: ${escapeHtml(formatExportTimestamp(generatedAtIso))}</p>`,
     `    <section class="paper">${preparedHtml}</section>`,
     "  </main>",
     "</body>",
@@ -1290,7 +1177,7 @@ function buildEpubBytes(options: EpubBuildOptions): Uint8Array {
           id: "chapter-1",
           filename: "chapter-1.xhtml",
           title,
-          htmlFragment: "<p>Sem conteudo.</p>"
+          htmlFragment: "<p>No content.</p>"
         }
       ]
 
@@ -1352,9 +1239,11 @@ function buildEpubBytes(options: EpubBuildOptions): Uint8Array {
   ].join("\n")
 
   const css = [
-    "body{font-family:'Segoe UI',Arial,sans-serif;color:#111827;line-height:1.65;margin:0;padding:1.2rem;}",
-    "h1,h2,h3{line-height:1.3;margin:1rem 0 .6rem;}",
-    "p{margin:.55rem 0;}",
+    "body{font-family:'Segoe UI',Arial,sans-serif;color:#111827;line-height:1.65;margin:0;padding:.7rem 1rem 1rem;}",
+    "h1{font-size:1.4rem;line-height:1.25;margin:.4rem 0 .6rem;}",
+    "h2{font-size:1.05rem;line-height:1.3;margin:.6rem 0 .4rem;}",
+    "h3{font-size:.98rem;line-height:1.3;margin:.5rem 0 .35rem;}",
+    "p{margin:.5rem 0;}",
     "ul,ol{margin:.4rem 0 .7rem 1.2rem;}",
     "pre{background:#f3f4f6;border:1px solid #e5e7eb;border-radius:.45rem;padding:.75rem;overflow:auto;white-space:pre-wrap;}",
     "code{background:#f3f4f6;border-radius:.3rem;padding:.08rem .3rem;}",
@@ -1386,7 +1275,9 @@ function buildEpubBytes(options: EpubBuildOptions): Uint8Array {
 }
 
 function buildEpubChapterDocument(chapter: EpubChapter, language: string): string {
-  const chapterBody = chapter.htmlFragment.trim() || "<p>Sem conteudo.</p>"
+  const rawBody = chapter.htmlFragment.trim() || "<p>No content.</p>"
+  const hasInlineTitle = /^\s*<h1\b/i.test(rawBody)
+  const chapterBody = rawBody
   return [
     "<?xml version=\"1.0\" encoding=\"utf-8\"?>",
     "<!DOCTYPE html>",
@@ -1398,7 +1289,7 @@ function buildEpubChapterDocument(chapter: EpubChapter, language: string): strin
     "</head>",
     "<body>",
     `  <section id="${escapeXml(chapter.id)}">`,
-    `    <h1>${escapeXml(chapter.title)}</h1>`,
+    hasInlineTitle ? "" : `    <h1>${escapeXml(chapter.title)}</h1>`,
     `    ${chapterBody}`,
     "  </section>",
     "</body>",
@@ -1432,7 +1323,7 @@ function normalizeHtmlFragmentForEpub(rawHtml: string): string {
 
   let html = root.innerHTML.trim()
   if (!html) {
-    html = "<p>Sem conteudo.</p>"
+    html = "<p>No content.</p>"
   }
 
   html = closeXhtmlVoidTag(html, "br")
@@ -1472,7 +1363,7 @@ async function downloadEditedContentByFormat(options: {
 }): Promise<void> {
   const text = normalizeForExportDisplay(options.content)
   if (!text) {
-    throw new Error("Conteudo vazio para exportacao.")
+    throw new Error("Empty content for export.")
   }
 
   if (options.format === "markdown") {
@@ -1544,7 +1435,7 @@ function buildExportBundle(options: {
   const scopedTurns = filterTurnsBySelection(turnRecords, options.selectedTurnIds, options.selectedTurnCache, options.includeSources)
   const turns = flattenTurnsForExport(scopedTurns, options.includeUserTurns)
   if (turns.length === 0) {
-    throw new Error("Nenhuma mensagem visivel encontrada para exportacao.")
+    throw new Error("No visible messages found for export.")
   }
 
   return {
@@ -1561,7 +1452,7 @@ function buildCopyBundle(selectedTurnIds: Set<string>, selectedTurnCache: Map<st
   const scopedTurns = filterTurnsBySelection(turnRecords, selectedTurnIds, selectedTurnCache, true)
   const turns = flattenTurnsForCopy(scopedTurns)
   if (turns.length === 0) {
-    throw new Error("Nenhuma mensagem visivel encontrada para copia.")
+    throw new Error("No visible messages found for copy.")
   }
 
   return {
@@ -1970,7 +1861,7 @@ function resolveNotebookTitle(): string {
 }
 
 function resolveRoleLabel(role: "user" | "assistant"): string {
-  return role === "user" ? "Usuario" : "NotebookLM"
+  return role === "user" ? "User" : "NotebookLM"
 }
 
 function prepareRenderedBundle(bundle: ExportBundle): RenderedExportBundle {
@@ -2187,7 +2078,7 @@ function buildMarkdown(bundle: ExportBundle): string {
   const lines: string[] = []
   lines.push(`# ${rendered.title}`)
   lines.push("")
-  lines.push(`Exportado em: ${formatExportTimestamp(rendered.generatedAtIso)}`)
+  lines.push(`Exported at: ${formatExportTimestamp(rendered.generatedAtIso)}`)
   lines.push("")
   lines.push("---")
   lines.push("")
@@ -2212,7 +2103,7 @@ function buildText(bundle: ExportBundle): string {
 
   lines.push(rendered.title.toUpperCase())
   lines.push("=".repeat(Math.max(22, rendered.title.length)))
-  lines.push(`Exportado em: ${formatExportTimestamp(rendered.generatedAtIso)}`)
+  lines.push(`Exported at: ${formatExportTimestamp(rendered.generatedAtIso)}`)
   lines.push(`Mensagens: ${rendered.turns.length}`)
   lines.push("")
 
@@ -2269,7 +2160,7 @@ function buildHtml(bundle: ExportBundle): string {
     "<body>",
     "  <div class=\"wrap\">",
     `    <h1>${escapeHtml(rendered.title)}</h1>`,
-    `    <p class="meta">Exportado em: ${escapeHtml(formatExportTimestamp(rendered.generatedAtIso))}</p>`,
+    `    <p class="meta">Exported at: ${escapeHtml(formatExportTimestamp(rendered.generatedAtIso))}</p>`,
     `    ${renderedTurns}`,
     "  </div>",
     "</body>",
@@ -2421,7 +2312,7 @@ async function buildPdfBytesViaBackground(text: string): Promise<Uint8Array> {
   )
 
   if (!response.success) {
-    throw new Error(response.error ?? "Falha ao gerar PDF.")
+    throw new Error(response.error ?? "Failed to generate PDF.")
   }
 
   const payload = response.payload ?? response.data
@@ -2468,15 +2359,7 @@ function formatExportTimestamp(isoDate: string): string {
 }
 
 function buildFilenameBase(title: string): string {
-  const slug = String(title ?? "")
-    .normalize("NFKD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 64)
-
-  return `minddock-chat-${slug || "notebooklm"}-${Date.now()}`
+  return buildMindDuckFilenameBase("Chat", title)
 }
 
 function resolveStableTurnKey(anchor: HTMLElement, userContent?: string, assistantContent?: string): string {
@@ -2746,8 +2629,7 @@ function syncTurnSelectionControls(options: SelectionControlSyncOptions): void {
       continue
     }
 
-    const hasExplicitAnchor = turn.saveControl instanceof HTMLElement && turn.saveControl.isConnected
-    if (!hasExplicitAnchor) {
+    if (!(turn.saveControl instanceof HTMLElement) || !turn.saveControl.isConnected) {
       continue
     }
 
@@ -2877,7 +2759,17 @@ function insertSelectionButtonNearAnchor(
     if (selectionButton.parentElement === actionHost && selectionButton.nextSibling === anchorControl) {
       return
     }
-    actionHost.insertBefore(selectionButton, anchorControl)
+    try {
+      actionHost.insertBefore(selectionButton, anchorControl)
+    } catch {
+      // NotebookLM re-renders quickly; if the anchor moved between checks,
+      // fall back to appending instead of throwing a DOMException.
+      try {
+        actionHost.appendChild(selectionButton)
+      } catch {
+        // Ignore: host might be in flux during virtualization.
+      }
+    }
     return
   }
 

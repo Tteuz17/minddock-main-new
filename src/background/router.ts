@@ -2,7 +2,6 @@ import { authManager } from "./auth-manager"
 import { storageManager } from "./storage-manager"
 import { subscriptionManager } from "./subscription"
 import { renderPdfBase64ViaOffscreen } from "./services/offscreen-pdf-service"
-import { aiService } from "~/services/ai-service"
 import { exportService } from "~/services/export-service"
 import { NotebookLMService, type SyncVerificationResult } from "~/services/NotebookLMService"
 import { zettelkastenService } from "~/services/zettelkasten"
@@ -94,6 +93,10 @@ function normalizePlatformLabel(value: string): string {
     return "PERPLEXITY"
   }
 
+  if (normalizedValue.includes("youtube")) {
+    return "Youtube"
+  }
+
   return rawValue.toUpperCase()
 }
 
@@ -145,7 +148,7 @@ function stripTrailingContextSnippet(value: string): string {
   const [fullMatch, innerRaw] = parentheticalMatch
   const inner = String(innerRaw ?? "").trim()
   const words = inner.split(/\s+/u).filter(Boolean)
-  const hasLetters = /[A-Za-zÀ-ÖØ-öø-ÿ]/u.test(inner)
+  const hasLetters = /[A-Za-z\u00c0-\u00ff]/u.test(inner)
   const looksLikeContextSnippet = hasLetters && (words.length >= 3 || inner.length >= 22)
 
   if (!looksLikeContextSnippet) {
@@ -215,6 +218,10 @@ class MessageRouter {
     this.register(MESSAGE_ACTIONS.PROMPT_OPTIONS, this.handlePromptOptions)
     this.register("MINDDOCK_EXPORT_SOURCES", this.handleExportSources)
     this.register("MINDDOCK_HIGHLIGHT_SNIPE", this.handleHighlightSnipe)
+    this.register(
+      MESSAGE_ACTIONS.FETCH_SNIPER_TRANSCRIPT,
+      this.handleFetchSniperTranscript.bind(this)
+    )
     this.register(MESSAGE_ACTIONS.THREAD_LIST, this.handleThreadList)
     this.register(MESSAGE_ACTIONS.THREAD_CREATE, this.handleThreadCreate)
     this.register(MESSAGE_ACTIONS.THREAD_DELETE, this.handleThreadDelete)
@@ -2018,9 +2025,22 @@ class MessageRouter {
       if (requestedResync) {
         this.emitResyncProgress(capturedFromUrl, "error")
       }
-      const errorMessage = error instanceof Error ? error.message : "Falha ao importar conversa."
+      const rawErrorMessage = error instanceof Error ? error.message : "Falha ao importar conversa."
+      const normalizedErrorMessageKey = String(rawErrorMessage ?? "")
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .toLowerCase()
+
+      const userFacingErrorMessage =
+        normalizedErrorMessageKey.includes("unexpected end of json input") ||
+        normalizedErrorMessageKey.includes("fim inesperado da entrada json") ||
+        normalizedErrorMessageKey.includes("json parse") ||
+        normalizedErrorMessageKey.includes("json.parse")
+          ? "Resposta invalida do NotebookLM/YouTube. Recarregue o YouTube e o NotebookLM e tente novamente."
+          : rawErrorMessage
+
       if (requestedResync) {
-        const normalizedErrorDetail = String(errorMessage ?? "").replace(/\s+/g, " ").trim()
+        const normalizedErrorDetail = String(rawErrorMessage ?? "").replace(/\s+/g, " ").trim()
         const errorCode = this.classifyResyncErrorCode(normalizedErrorDetail)
         return this.fail(
           errorCode,
@@ -2032,7 +2052,7 @@ class MessageRouter {
           )
         )
       }
-      return this.fail(errorMessage)
+      return this.fail(userFacingErrorMessage)
     } finally {
       if (requestedResync && resyncInFlightKey) {
         this.resyncInFlight.delete(resyncInFlightKey)
@@ -2065,7 +2085,9 @@ class MessageRouter {
     // await storageManager.incrementUsage("aiCalls")
     // return this.ok({ improved })
     
-    return this.fail("Funcionalidade de melhoria de prompts temporariamente desabilitada. Configure PLASMO_PUBLIC_CLAUDE_API_KEY no .env para ativar.")
+    return this.fail(
+      "Funcionalidade de melhoria de prompts temporariamente desabilitada no cliente. Use um proxy server-side para IA."
+    )
   }
 
   private async handlePromptOptions(payload: unknown): Promise<StandardResponse> {
@@ -2075,10 +2097,12 @@ class MessageRouter {
     // const options = await aiService.generatePromptOptions(prompt)
     // return this.ok({ options })
     
-    return this.fail("Funcionalidade de opcoes de prompt temporariamente desabilitada. Configure PLASMO_PUBLIC_CLAUDE_API_KEY no .env para ativar.")
+    return this.fail(
+      "Funcionalidade de opcoes de prompt temporariamente desabilitada no cliente. Use um proxy server-side para IA."
+    )
   }
 
-  // ─── Focus Threads ─────────────────────────────────────────────────────────
+  // ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ Focus Threads ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬
 
   private async handleThreadList(payload: unknown): Promise<StandardResponse> {
     const { userId, notebookId } = payload as { userId: string; notebookId: string }
@@ -2189,7 +2213,9 @@ class MessageRouter {
     // await storageManager.incrementUsage("aiCalls")
     // return this.ok({ count: notes.length })
     
-    return this.fail("Funcionalidade de atomizacao temporariamente desabilitada. Configure PLASMO_PUBLIC_CLAUDE_API_KEY no .env para ativar.")
+    return this.fail(
+      "Funcionalidade de atomizacao temporariamente desabilitada no cliente. Use um proxy server-side para IA."
+    )
   }
 
   private async handleExportSources(payload: unknown): Promise<StandardResponse> {
@@ -2264,7 +2290,9 @@ class MessageRouter {
     // const notes = await aiService.atomizeContent(content)
     // return this.ok({ notes })
     
-    return this.fail("Funcionalidade de atomizacao temporariamente desabilitada. Configure PLASMO_PUBLIC_CLAUDE_API_KEY no .env para ativar.")
+    return this.fail(
+      "Funcionalidade de atomizacao temporariamente desabilitada no cliente. Use um proxy server-side para IA."
+    )
   }
 
   private async handleSaveAtomicNotes(payload: unknown): Promise<StandardResponse> {
@@ -2880,6 +2908,263 @@ class MessageRouter {
 
     return fallbackNotebookId
   }
+
+  private async handleFetchSniperTranscript(
+    payload: unknown,
+    sender: MessageSender
+  ): Promise<StandardResponse> {
+    const data = payload as Record<string, unknown>
+    const videoId = String(data.videoId ?? "").trim()
+    const startSec = Number(data.startSec)
+    const endSec = Number(data.endSec)
+
+    console.log("[SNIPER][BG] handler chamado. payload:", JSON.stringify(data))
+
+    if (!videoId) return this.fail("videoId ausente")
+
+    const safeStart = Math.min(startSec, endSec)
+    const safeEnd = Math.max(startSec, endSec)
+
+    try {
+      const tabs = await chrome.tabs.query({ active: true, currentWindow: true })
+      const tabId = tabs.find((t) => t.url?.includes("youtube.com/watch"))?.id
+      console.log("[SNIPER][BG] tabId:", tabId)
+      if (!tabId) return this.fail("Aba do YouTube nao encontrada")
+
+      try {
+        const [result] = await chrome.scripting.executeScript({
+          target: { tabId },
+          world: "MAIN",
+          func: async (safeStart: number, safeEnd: number) => {
+            console.log("[SNIPER][FUNC] start:", safeStart, "end:", safeEnd)
+
+            const PANEL_MODERN  = 'ytd-engagement-panel-section-list-renderer[target-id="PAmodern_transcript_view"]'
+            const PANEL_LEGACY  = 'ytd-engagement-panel-section-list-renderer[target-id="engagement-panel-searchable-transcript"]'
+            const SEGMENT_NEW   = "TRANSCRIPT-SEGMENT-VIEW-MODEL"
+            const SEGMENT_OLD   = "ytd-transcript-segment-renderer"
+            const TS_NEW        = ".ytwTranscriptSegmentViewModelTimestamp"
+            const TS_OLD        = ".segment-timestamp"
+            const TXT_NEW       = ".yt-core-attributed-string"
+            const TXT_OLD       = ".segment-text"
+            const STYLE_ID      = "__sniper_hide__"
+
+            const OPEN_LABELS = [
+              "Mostrar transcri\u00e7\u00e3o", "Show transcript",
+              "Mostrar transcripci\u00f3n", "Afficher la transcription",
+              "Transkript anzeigen", "Transcript weergeven",
+              "Mostrar legendas", "Visa transkription",
+              "Vis transskription", "N\u00e4yt\u00e4 transkriptio",
+            ]
+            const CLOSE_LABELS = [
+              "Fechar transcri\u00e7\u00e3o", "Close transcript",
+              "Cerrar transcripci\u00f3n", "Fermer la transcription",
+              "Transkript schlie\u00dfen", "Transcript verbergen",
+              "DÃ¶lj transkription", "Skjul transskription",
+            ]
+
+            function timeToSeconds(raw: string): number {
+              const parts = raw.trim().split(":").map(Number)
+              if (parts.length === 2) return parts[0] * 60 + parts[1]
+              if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2]
+              return 0
+            }
+
+            function injectHideStyle(): void {
+              if (document.getElementById(STYLE_ID)) return
+              const style = document.createElement("style")
+              style.id = STYLE_ID
+              style.textContent = [
+                PANEL_MODERN + " { position: fixed !important; top: -9999px !important; left: -9999px !important; opacity: 0 !important; pointer-events: none !important; }",
+                PANEL_LEGACY + " { position: fixed !important; top: -9999px !important; left: -9999px !important; opacity: 0 !important; pointer-events: none !important; }",
+                "ytd-engagement-panel-section-list-renderer[visibility='ENGAGEMENT_PANEL_VISIBILITY_EXPANDED'] { position: fixed !important; top: -9999px !important; left: -9999px !important; opacity: 0 !important; pointer-events: none !important; }",
+              ].join("\n")
+              document.head.appendChild(style)
+            }
+
+            function removeHideStyle(): void {
+              document.getElementById(STYLE_ID)?.remove()
+            }
+
+            // Aguarda segmentos em QUALQUER painel (novo ou legado, qualquer target-id)
+            // Para videos longos, espera o numero de segmentos estabilizar.
+            function waitForSegmentsAnyPanel(timeout = 8000): Promise<{ segments: Element[], isNewFormat: boolean } | null> {
+              return new Promise((resolve) => {
+                let stabilizeTimer: any = null
+                let timeoutTimer: any = null
+                let lastCount = 0
+                let lastResult: { segments: Element[], isNewFormat: boolean } | null = null
+
+                function check() {
+                  for (const el of document.querySelectorAll("ytd-engagement-panel-section-list-renderer")) {
+                    const novo = Array.from(el.querySelectorAll(SEGMENT_NEW))
+                    const velho = Array.from(el.querySelectorAll(SEGMENT_OLD))
+                    const segs = novo.length > 0 ? novo : velho
+                    const isNew = novo.length > 0
+                    if (segs.length > 0) return { segments: segs, isNewFormat: isNew }
+                  }
+                  return null
+                }
+
+                function finalize(result: { segments: Element[], isNewFormat: boolean } | null) {
+                  if (stabilizeTimer) clearTimeout(stabilizeTimer)
+                  if (timeoutTimer) clearTimeout(timeoutTimer)
+                  observer.disconnect()
+                  resolve(result)
+                }
+
+                function updateIfNeeded() {
+                  const res = check()
+                  if (!res) return
+                  if (res.segments.length !== lastCount) {
+                    lastCount = res.segments.length
+                    lastResult = res
+                    if (stabilizeTimer) clearTimeout(stabilizeTimer)
+                    // Espera 800ms sem mudança antes de resolver
+                    stabilizeTimer = setTimeout(() => {
+                      finalize(lastResult)
+                    }, 800)
+                  }
+                }
+
+                const observer = new MutationObserver(() => {
+                  updateIfNeeded()
+                })
+                observer.observe(document.body, { childList: true, subtree: true })
+
+                updateIfNeeded()
+
+                timeoutTimer = setTimeout(() => finalize(null), timeout)
+              })
+            }
+
+            // 1. Fecha qualquer painel aberto primeiro
+            Array.from(document.querySelectorAll("ytd-engagement-panel-section-list-renderer"))
+              .forEach(el => {
+                if (el.getAttribute("visibility") === "ENGAGEMENT_PANEL_VISIBILITY_EXPANDED") {
+                  el.setAttribute("visibility", "ENGAGEMENT_PANEL_VISIBILITY_HIDDEN")
+                }
+              })
+
+            // Pequena pausa para o YouTube processar o fechamento
+            await new Promise((r) => setTimeout(r, 300))
+
+            // 2. Injeta CSS invisivel
+            injectHideStyle()
+            await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r as any)))
+
+            // 2. Encontra o botao — fallback universal por keyword
+            let openBtn: HTMLElement | null = null
+            openBtn = Array.from(
+              document.querySelectorAll<HTMLElement>('button[aria-label]')
+            ).find(b => {
+              if (b.closest('ytd-engagement-panel-section-list-renderer')) return false
+              // Exclui botoes do player de video (ficam dentro de .ytp-chrome-controls)
+              if (b.closest('.ytp-chrome-controls')) return false
+              if (b.closest('.ytp-right-controls')) return false
+              if (b.closest('.ytp-left-controls')) return false
+              const label = (b.getAttribute('aria-label') ?? '').toLowerCase()
+              return (
+                label.includes('transcript') || label.includes('transcri') ||
+                label.includes('\u5b57\u5e55') || label.includes('\uc790\ub9c9') ||
+                label.includes('legenda') || label.includes('caption')
+              )
+            }) ?? null
+
+            if (!openBtn) {
+              for (const label of OPEN_LABELS) {
+                const all = Array.from(
+                  document.querySelectorAll<HTMLElement>(`button[aria-label="${label}"]`)
+                ).filter(b => !b.closest("ytd-engagement-panel-section-list-renderer"))
+                if (all.length > 0) { openBtn = all[0]; break }
+              }
+            }
+            console.log("[SNIPER][FUNC] botao encontrado:", !!openBtn, openBtn?.getAttribute("aria-label"))
+
+            if (!openBtn) {
+              removeHideStyle()
+              return { totalSegments: 0, filteredSegments: 0, text: "__ERROR__:Bot\u00e3o de transcri\u00e7\u00e3o n\u00e3o encontrado. O v\u00eddeo possui legendas?" }
+            }
+
+            // 3. Abre painel via botao (sempre, ja garantimos fechamento acima)
+            openBtn.click()
+
+            // 4. Aguarda segmentos em qualquer painel
+            const found = await waitForSegmentsAnyPanel(8000)
+            console.log("[SNIPER][FUNC] formato:", found?.isNewFormat ? "novo" : "legado", "| segmentos:", found?.segments.length ?? 0)
+
+            if (!found || found.segments.length === 0) {
+              removeHideStyle()
+              return { totalSegments: 0, filteredSegments: 0, text: "__ERROR__:Nenhum segmento encontrado. O v\u00eddeo possui legenda?" }
+            }
+
+            const { segments, isNewFormat } = found
+
+            // 5. Filtrar pelo intervalo
+            const tsSelector  = isNewFormat ? TS_NEW  : TS_OLD
+            const txtSelector = isNewFormat ? TXT_NEW : TXT_OLD
+            const lines: string[] = []
+            for (const seg of segments) {
+              const tsEl  = seg.querySelector(tsSelector)
+              const txtEl = seg.querySelector(txtSelector)
+              if (!tsEl || !txtEl) continue
+              const seconds = timeToSeconds(tsEl.textContent ?? "")
+              const text    = (txtEl.textContent ?? "").trim()
+              if (seconds >= safeStart && seconds <= safeEnd && text) lines.push(text)
+            }
+            console.log("[SNIPER][FUNC] segmentos no intervalo:", lines.length)
+
+            // 6. Fechar painel
+            let closeBtn: HTMLElement | null = null
+            for (const label of CLOSE_LABELS) {
+              const all = Array.from(
+                document.querySelectorAll<HTMLElement>(`button[aria-label="${label}"]`)
+              ).filter(b => !b.closest("ytd-engagement-panel-section-list-renderer"))
+              if (all.length > 0) { closeBtn = all[0]; break }
+            }
+            if (closeBtn) {
+              closeBtn.click()
+            } else {
+              document.querySelectorAll("ytd-engagement-panel-section-list-renderer").forEach(el => {
+                if (el.getAttribute("visibility") === "ENGAGEMENT_PANEL_VISIBILITY_EXPANDED") {
+                  el.setAttribute("visibility", "ENGAGEMENT_PANEL_VISIBILITY_HIDDEN")
+                }
+              })
+            }
+            removeHideStyle()
+
+            // 7. Retornar
+            const text = lines.length > 0
+              ? lines.join(" ")
+              : "__ERROR__:Nenhuma legenda encontrada no intervalo selecionado."
+            return { totalSegments: segments.length, filteredSegments: lines.length, text }
+          },
+          args: [safeStart, safeEnd]
+        })
+
+        console.log("[SNIPER][BG] resultado:", JSON.stringify(result?.result))
+
+        const payloadResult = result?.result as
+          | { text?: string; totalSegments?: number; filteredSegments?: number }
+          | undefined
+
+        if (!payloadResult) return this.fail("Falha ao executar script na pagina do YouTube.")
+
+        const text = String(payloadResult.text ?? "")
+        if (!text || text.startsWith("__ERROR__:")) {
+          return this.fail(text.replace("__ERROR__:", "").trim() || "Erro desconhecido.")
+        }
+
+        return this.ok({ text: text.trim(), eventsCount: payloadResult.totalSegments ?? 0 })
+      } catch (err: any) {
+        console.error("[SNIPER][BG] executeScript falhou:", err?.message ?? err)
+        return this.fail("executeScript falhou: " + (err?.message ?? "erro desconhecido"))
+      }
+    } catch (err: any) {
+      console.error("[SNIPER][BG] erro:", err?.message ?? err)
+      return this.fail(err?.message ?? "erro desconhecido")
+    }
+  }
+
 }
 
 export const router = new MessageRouter()

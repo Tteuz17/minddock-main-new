@@ -1,0 +1,26 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": ".tmp-network-tests",
+    "rootDir": ".",
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "target": "ES2021",
+    "lib": ["ES2021", "DOM"],
+    "types": ["node", "chrome"],
+    "allowImportingTsExtensions": false,
+    "verbatimModuleSyntax": false,
+    "declaration": false,
+    "sourceMap": false,
+    "removeComments": true
+  },
+  "include": [
+    "src/services/network/SessionTokenVault.ts",
+    "src/services/security/SecureTokenVault.ts",
+    "src/services/network/SilentTelemetryEngine.ts",
+    "src/services/network/ExternalAuthLifecycleHandler.ts",
+    "tests/network/ExternalAuthLifecycleHandler.test.ts"
+  ],
+  "exclude": ["node_modules", "website"]
+}

@@ -14,6 +14,7 @@ const VOICE_SOURCE_SPACING_ATTRIBUTE = "data-nblm-voice-spacing-applied"
 const VOICE_SOURCE_ORIGINAL_MARGIN_ATTRIBUTE = "data-nblm-voice-original-inline-margin-right"
 const VOICE_SOURCE_BASE_MARGIN_ATTRIBUTE = "data-nblm-voice-base-margin-right"
 const VOICE_SOURCE_EXTRA_MARGIN_ATTRIBUTE = "data-nblm-voice-extra-margin-right"
+const MINDDOCK_MODAL_SELECTOR = "[data-minddock-preview-modal='true'], [data-minddock-source-overlay='true'], [data-minddock-studio-export-overlay='true']"
 
 let voiceUiObserver: MutationObserver | null = null
 let mountedVoiceRoot: Root | null = null
@@ -43,6 +44,10 @@ function resolveVisibleTextareaCandidate(): HTMLTextAreaElement | null {
   const allTextareaCandidates = Array.from(document.querySelectorAll<HTMLTextAreaElement>("main textarea, textarea"))
   const visibleTextareaCandidates = allTextareaCandidates.filter((candidate) => {
     if (candidate.disabled || candidate.readOnly) {
+      return false
+    }
+
+    if (candidate.closest(MINDDOCK_MODAL_SELECTOR)) {
       return false
     }
 
@@ -80,6 +85,10 @@ function resolveVisibleEditableCandidate(): HTMLElement | null {
       return false
     }
 
+    if (candidate.closest(MINDDOCK_MODAL_SELECTOR)) {
+      return false
+    }
+
     const rect = candidate.getBoundingClientRect()
     return rect.top > window.innerHeight * 0.35
   })
@@ -100,6 +109,11 @@ function resolveNotebookInputElement(): EditableInputElement | null {
 
   return resolveVisibleEditableCandidate()
 }
+
+function isMindDockModalOpen(): boolean {
+  return Boolean(document.querySelector(MINDDOCK_MODAL_SELECTOR))
+}
+
 
 function clearVoiceInputMarkers(): void {
   const markedTextareaElements = document.querySelectorAll(`textarea[${VOICE_TEXTAREA_ATTRIBUTE}]`)
@@ -376,7 +390,7 @@ function positionMicrophoneMountPoint(
   let calculatedLeft = inputRect.right - VOICE_BUTTON_SIZE - 56
   let calculatedTop = inputRect.top + (inputRect.height - VOICE_BUTTON_SIZE) / 2
 
-  if (sourceRect && sendRect) {
+  if (sourceRect && sendRect && sourceCounterElement && sendButtonElement) {
     const initialAvailableGap = sendRect.left - sourceRect.right
     ensureSourceCounterSpacing(sourceCounterElement, VOICE_LANE_MIN_GAP, initialAvailableGap)
 
@@ -399,10 +413,21 @@ function positionMicrophoneMountPoint(
 }
 
 function mountVoiceUi(): void {
+  if (isMindDockModalOpen()) {
+    clearVoiceInputMarkers()
+    clearAllSourceCounterSpacing()
+    if (mountedVoiceAnchor) {
+      mountedVoiceAnchor.style.display = "none"
+      mountedVoiceAnchor.style.left = "-9999px"
+      mountedVoiceAnchor.style.top = "-9999px"
+    }
+    return
+  }
   const notebookInputElement = resolveNotebookInputElement()
   if (!(notebookInputElement instanceof HTMLElement)) {
     clearAllSourceCounterSpacing()
     if (mountedVoiceAnchor) {
+      mountedVoiceAnchor.style.display = "none"
       mountedVoiceAnchor.style.left = "-9999px"
       mountedVoiceAnchor.style.top = "-9999px"
     }
@@ -410,6 +435,9 @@ function mountVoiceUi(): void {
   }
 
   clearVoiceInputMarkers()
+  if (mountedVoiceAnchor) {
+    mountedVoiceAnchor.style.display = ""
+  }
   if (notebookInputElement instanceof HTMLTextAreaElement) {
     notebookInputElement.setAttribute(VOICE_TEXTAREA_ATTRIBUTE, "true")
   } else {
@@ -525,3 +553,5 @@ if (document.readyState === "loading") {
 
 window.addEventListener("pagehide", teardownVoiceAssistantUI)
 window.addEventListener("beforeunload", teardownVoiceAssistantUI)
+
+
