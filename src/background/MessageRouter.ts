@@ -959,24 +959,45 @@ export function initializeMessageRouter(): void {
         }
 
         case STUDIO_FETCH_MESSAGE: {
-          const { ids, notebookId, forceRefresh, rpcContext } = normalizeStudioArtifactRequest(message)
-          console.warn("[MindDock][BG] fetch studio ids:", ids, "force:", forceRefresh)
-          void fetchStudioArtifactsByIds(ids, notebookId, { forceRefresh, rpcContext })
-            .then((items) => {
-              sendResponse({
-                success: true,
-                payload: { items },
-                data: { items }
+          try {
+            const { ids, notebookId, forceRefresh, rpcContext } = normalizeStudioArtifactRequest(message)
+            console.warn("[MindDock][BG] fetch studio ids:", ids, "force:", forceRefresh)
+            Promise.resolve(fetchStudioArtifactsByIds(ids, notebookId, { forceRefresh, rpcContext }))
+              .then((items) => {
+                sendResponse({
+                  success: true,
+                  artifacts: items,
+                  items,
+                  payload: { items },
+                  data: { items }
+                })
               })
-            })
-            .catch((error) => {
-              sendResponse({
-                success: false,
-                error: resolveErrorMessage(error),
-                payload: { items: [] },
-                data: { items: [] }
+              .catch((error) => {
+                sendResponse({
+                  success: false,
+                  error: resolveErrorMessage(error),
+                  artifacts: [],
+                  items: [],
+                  payload: { items: [] },
+                  data: { items: [] }
+                })
               })
+          } catch (error) {
+            sendResponse({
+              success: false,
+              error: resolveErrorMessage(error),
+              artifacts: [],
+              items: [],
+              payload: { items: [] },
+              data: { items: [] }
             })
+          }
+          return true
+        }
+
+        case "BG_LOG": {
+          console.warn("[BG_LOG]", message?.data ?? message)
+          sendResponse?.({ ok: true })
           return true
         }
 
@@ -1009,15 +1030,16 @@ function normalizeStudioArtifactRequest(message: IncomingMessage): {
   forceRefresh?: boolean
   rpcContext?: Record<string, unknown>
 } {
-  const ids = Array.isArray(message?.payload?.ids) ? message.payload.ids : []
-  const notebookId =
-    typeof message?.payload?.notebookId === "string"
-      ? message.payload.notebookId
-      : undefined
-  const forceRefresh = Boolean(message?.payload?.forceRefresh)
+  const payload = message?.payload && typeof message.payload === "object" ? message.payload : undefined
+  const data = message?.data && typeof message.data === "object" ? message.data : undefined
+  const source = (payload ?? data ?? {}) as Record<string, unknown>
+
+  const ids = Array.isArray(source.ids) ? source.ids : []
+  const notebookId = typeof source.notebookId === "string" ? source.notebookId : undefined
+  const forceRefresh = Boolean(source.forceRefresh)
   const rpcContext =
-    message?.payload?.rpcContext && typeof message.payload.rpcContext === "object"
-      ? (message.payload.rpcContext as Record<string, unknown>)
+    source.rpcContext && typeof source.rpcContext === "object"
+      ? (source.rpcContext as Record<string, unknown>)
       : undefined
   return {
     ids: ids.filter((id: unknown) => typeof id === "string"),

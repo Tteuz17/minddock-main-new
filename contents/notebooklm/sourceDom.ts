@@ -2776,9 +2776,14 @@ export function resolveStudioOverflowMenuButton(): HTMLElement | null {
 }
 
 export function resolveStudioExportAnchor(): HTMLElement | null {
+  const exportOverlay = document.querySelector("[data-minddock-host='export-preview-panel']")
+  if (exportOverlay) {
+    return null
+  }
+
   const studioLabel = resolveStudioLabel()
   const studioRect = studioLabel?.getBoundingClientRect()
-  if (studioRect) {
+  if (studioLabel && studioRect) {
     const candidates = queryDeepAll<HTMLElement>([
       "button",
       "[role='button']",

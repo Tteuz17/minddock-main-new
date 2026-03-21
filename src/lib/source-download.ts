@@ -590,6 +590,12 @@ export function buildMindDuckFilenameBase(
   return `MindDock-${kind}-${shortTitle}-${dateStamp}`
 }
 
+export function buildMindDockZipBase(label: string, date: Date = new Date()): string {
+  const shortLabel = buildFourWordTitleSlug(label)
+  const dateStamp = buildDateStamp(date)
+  return `MindDock-${shortLabel}-${dateStamp}`
+}
+
 export function buildUniqueFilename(
   title: string,
   extension: string,

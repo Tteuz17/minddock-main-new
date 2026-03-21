@@ -9,6 +9,7 @@ import type { Source } from "~/lib/types"
 import {
   buildDocxBytesFromText,
   buildMindDuckFilenameBase,
+  buildMindDockZipBase,
   buildUniqueFilename,
   formatAsDocxText,
   formatAsPdfText,
@@ -66,6 +67,7 @@ interface DownloadPreparedFile {
 }
 
 interface PreviewDraft extends SourceExportRecord {
+  sourceKind: "youtube" | "document"
   editableContent: string
 }
 
@@ -794,10 +796,13 @@ export function SourceDownloadPanel() {
 
       const nonPreviewDraftBySourceId = new Map<string, PreviewDraft>()
       if (sourcesWithoutEditable.length > 0) {
+        const kindById = new Map(selectedInOrder.map((source) => [source.sourceId, source.sourceKind]))
         const nonPreviewRecords = await fetchExportRecordsForSelection(sourcesWithoutEditable)
         for (const record of nonPreviewRecords) {
+          const sourceKind = record.sourceKind ?? kindById.get(record.sourceId) ?? "document"
           nonPreviewDraftBySourceId.set(record.sourceId, {
             ...record,
+            sourceKind,
             editableContent: buildPreviewText(record, downloadFormat)
           })
         }
@@ -856,7 +861,7 @@ export function SourceDownloadPanel() {
       const zipBytes = await buildZip(files.map((file) => ({ filename: file.filename, bytes: file.bytes })))
       triggerDownload(
         new Blob([toArrayBuffer(zipBytes)], { type: "application/zip" }),
-        `${buildMindDuckFilenameBase("Font", "Fontes")}.zip`
+        `${buildMindDockZipBase("Fontes")}.zip`
       )
 
       setToast({
@@ -1002,6 +1007,7 @@ export function SourceDownloadPanel() {
     })
 
     try {
+      const kindById = new Map(sources.map((source) => [source.sourceId, source.sourceKind]))
       let draftsToExport: PreviewDraft[] = []
       if (isPreviewMode && previewDrafts.length > 0) {
         const selectedInOrder = sources.filter((source) => selectedSourceIds.has(source.sourceId))
@@ -1020,8 +1026,10 @@ export function SourceDownloadPanel() {
         if (sourcesWithoutEditablePreview.length > 0) {
           const nonPreviewRecords = await fetchExportRecordsForSelection(sourcesWithoutEditablePreview)
           for (const record of nonPreviewRecords) {
+            const sourceKind = record.sourceKind ?? kindById.get(record.sourceId) ?? "document"
             nonPreviewDraftBySourceId.set(record.sourceId, {
               ...record,
+              sourceKind,
               editableContent: buildPreviewText(record, format)
             })
           }
@@ -1052,6 +1060,7 @@ export function SourceDownloadPanel() {
         const exportRecords = await fetchExportRecordsForSelection(selected)
         draftsToExport = exportRecords.map((record) => ({
           ...record,
+          sourceKind: record.sourceKind ?? kindById.get(record.sourceId) ?? "document",
           editableContent: buildPreviewText(record, format)
         }))
       }
@@ -1091,7 +1100,7 @@ export function SourceDownloadPanel() {
       const zipBytes = await buildZip(files.map((file) => ({ filename: file.filename, bytes: file.bytes })))
       triggerDownload(
         new Blob([toArrayBuffer(zipBytes)], { type: "application/zip" }),
-        `minddock_fontes_${Date.now()}.zip`
+        `${buildMindDockZipBase("Fontes")}.zip`
       )
 
       setToast({

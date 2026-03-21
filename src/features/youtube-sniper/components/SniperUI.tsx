@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react';
 import { extractTranscriptSlice } from '../utils/transcriptEngine';
 
-const TAG = '[YT-SNIPER][UI]';
 const MAX_INTERVALO = 3600; // 1 hora
 const SNIPER_BUTTON_ID = 'minddock-youtube-sniper-button';
 const PANEL_WIDTH = 340;
@@ -233,11 +232,8 @@ export function SniperUI({ onClose, defaultNotebookId }: SniperUIProps) {
 
         setStatus('success');
         setMessage(`${text.split(' ').length} palavras extraídas e salvas no caderno`);
-        console.log(`${TAG} sucesso na tentativa ${tentativa}:`, text.slice(0, 100));
         return; // Sucesso — para aqui
       } catch (err: any) {
-        console.warn(`${TAG} tentativa ${tentativa} falhou:`, err.message);
-
         if (tentativa === MAX_TENTATIVAS) {
           // Esgotou todas as tentativas
           setStatus('error');

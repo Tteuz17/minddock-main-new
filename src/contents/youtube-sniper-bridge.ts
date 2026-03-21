@@ -7,12 +7,9 @@ export const config = {
 // Roda no Main World — acesso total ao window da página
 // Captura videoId e baseUrl do player do YouTube
 
-const TAG = '[YT-SNIPER][BRIDGE]';
-
 function extractAndSend() {
   const videoId = new URLSearchParams(window.location.search).get('v');
   if (!videoId) {
-    console.warn(`${TAG} videoId não encontrado na URL`);
     return;
   }
 
@@ -27,10 +24,8 @@ function extractAndSend() {
       const track = tracks.find((t: any) => t.kind === 'asr') ?? tracks[0];
       if (track?.baseUrl) {
         baseUrl = track.baseUrl;
-        console.log(`${TAG} baseUrl capturado. lang=${track.languageCode} kind=${track.kind ?? 'manual'}`);
       }
     } catch (e) {
-      console.warn(`${TAG} erro ao ler getPlayerResponse:`, e);
     }
   }
 
@@ -42,15 +37,12 @@ function extractAndSend() {
       const track = tracks.find((t: any) => t.kind === 'asr') ?? tracks[0];
       if (track?.baseUrl) {
         baseUrl = track.baseUrl;
-        console.log(`${TAG} baseUrl via ytInitialPlayerResponse. lang=${track.languageCode}`);
       }
     } catch (e) {
-      console.warn(`${TAG} erro ao ler ytInitialPlayerResponse:`, e);
     }
   }
 
   if (!baseUrl) {
-    console.warn(`${TAG} nenhum baseUrl disponível ainda`);
     return;
   }
 
@@ -60,12 +52,9 @@ function extractAndSend() {
     payload: { videoId, baseUrl },
   }, '*');
 
-  console.log(`${TAG} SNIPER_DATA enviado para Isolated World. videoId=${videoId}`);
 }
 
 // Execução inicial
-console.log(`${TAG} script carregado. readyState=${document.readyState}`);
-
 if (document.readyState === 'complete') {
   extractAndSend();
 } else {
@@ -74,7 +63,6 @@ if (document.readyState === 'complete') {
 
 // SPA: re-executa a cada navegação entre vídeos
 window.addEventListener('yt-navigate-finish', () => {
-  console.log(`${TAG} yt-navigate-finish — re-extraindo`);
   setTimeout(extractAndSend, 800);
   setTimeout(extractAndSend, 2000);
 });
@@ -83,6 +71,5 @@ window.addEventListener('yt-navigate-finish', () => {
 window.addEventListener('message', (event) => {
   if (event.data?.source !== 'yt-sniper-isolated') return;
   if (event.data?.type !== 'REQUEST_SNIPER_DATA') return;
-  console.log(`${TAG} requisição sob demanda recebida`);
   extractAndSend();
 });

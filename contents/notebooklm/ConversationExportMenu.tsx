@@ -9,7 +9,8 @@ import {
   FileCode2,
   FileText,
   Loader2,
-  Wand2
+  Wand2,
+  type LucideIcon
 } from "lucide-react"
 import { zipSync } from "fflate"
 import { DocsExportAction } from "~/content/features/Export/DocsExportAction"
@@ -30,7 +31,7 @@ type ExportFormat = "markdown" | "html" | "text" | "word" | "epub" | "pdf" | "js
 interface FormatOption {
   id: ExportFormat
   label: string
-  icon: typeof FileCode2
+  icon: LucideIcon
 }
 
 interface ExportTurn {
