@@ -16,6 +16,8 @@ const MIME_RE = /^[a-z]+\/[a-z0-9.+-]+$/i
 const ASSET_EXT_RE =
   /\.(png|jpe?g|gif|webp|svg|pdf|mp3|wav|ogg|m4a|aac|flac|mp4|mkv|webm|mov|avi)(\?|#|$)/i
 
+// Mapeamento unificado baseado nos typeCodes reais do RPC do NotebookLM
+// Fonte: análise do gArtLc/cFji9 — typeCodes 3,5,7,8 são sempre visuais
 const LIST_TYPE_LABELS: Record<number, string> = {
   1: "Audio Overview",
   2: "Study Guide",
@@ -33,7 +35,9 @@ const LIST_TYPE_LABELS: Record<number, string> = {
   14: "Video Overview"
 }
 
+// typeCodes do payload de conteúdo (cFji9/gArtLc) — esses têm prioridade absoluta
 const CONTENT_TYPE_LABELS: Record<number, string> = {
+  1: "Audio Overview",
   3: "Video Overview",
   4: "Quiz",
   5: "Mind Map",
@@ -41,6 +45,9 @@ const CONTENT_TYPE_LABELS: Record<number, string> = {
   8: "Slides",
   9: "Data Table"
 }
+
+// typeCodes que SEMPRE indicam visual — inquebrável
+const VISUAL_TYPE_CODES = new Set([1, 3, 5, 7, 8])
 
 export const VISUAL_TYPES = new Set(["Slides", "Infographic", "Mind Map", "Video Overview", "Audio Overview"])
 
@@ -381,6 +388,92 @@ function pickBestContent(strings: string[], title?: string | null): string | nul
   return contentish.sort((a, b) => b.length - a.length)[0] ?? null
 }
 
+function extractOwnedMedia(
+  node: unknown,
+  ownerId: string,
+  mimePrefix: string,
+  ownerCtx: string | null = null
+): Array<{ url: string; mime: string }> {
+  if (!Array.isArray(node)) return []
+  let ctx = ownerCtx
+  if (typeof node[0] === "string" && UUID_RE.test(node[0])) {
+    ctx = node[0]
+  }
+  if (ctx && ctx !== ownerId) return []
+  const results: Array<{ url: string; mime: string }> = []
+  const url = typeof node[0] === "string" && looksLikeUrl(node[0]) ? node[0] : null
+  const mime = typeof node[2] === "string" ? node[2] : (typeof node[1] === "string" ? node[1] : null)
+  if (ctx === ownerId && url && mime && mime.toLowerCase().startsWith(mimePrefix)) {
+    results.push({ url: url.startsWith("//") ? `https:${url}` : url, mime })
+  }
+  for (const child of node) {
+    results.push(...extractOwnedMedia(child, ownerId, mimePrefix, ctx))
+  }
+  return results
+}
+
+function isVisualTypeCode(numericCandidates: number[]): boolean {
+  return numericCandidates.some((v) => VISUAL_TYPE_CODES.has(Math.round(v)))
+}
+
+function isMediaUrl(value?: string | null): boolean {
+  const normalized = normalizeUrl(value)
+  if (!normalized) return false
+  if (!looksLikeUrl(normalized)) return false
+  return ASSET_EXT_RE.test(normalized)
+}
+
+const URL_TEXT_RE = /^(https?:)?\/\//i
+const MIME_PREFIX_RE = /^(video|audio|image)\//i
+
+function scoreOwnedText(value: string): number {
+  let points = 0
+  if (value.length > 80) points += 3
+  if (value.length > 200) points += 3
+  if (/[#*_\-|]/u.test(value)) points += 1
+  if (/[.!?]/u.test(value)) points += 1
+  return points
+}
+
+function extractOwnedText(node: unknown, ownerId: string): string {
+  const blocks: string[] = []
+  const seen = new Set<string>()
+
+  const visit = (current: unknown, ownerCtx: string | null = null) => {
+    if (!Array.isArray(current)) return
+    let ctx = ownerCtx
+    if (typeof current[0] === "string" && UUID_RE.test(current[0])) {
+      ctx = current[0]
+    }
+    if (ctx && ctx !== ownerId) return
+
+    for (const value of current) {
+      if (typeof value === "string") {
+        const text = normalizeString(value)
+        if (!text) continue
+        if (UUID_RE.test(text)) continue
+        if (URL_TEXT_RE.test(text)) continue
+        if (MIME_PREFIX_RE.test(text)) continue
+        if (looksLikeMimeType(text)) continue
+        if (looksLikeMeta(text)) continue
+        if (text.length < 30) continue
+        if (seen.has(text)) continue
+        seen.add(text)
+        blocks.push(text)
+        continue
+      }
+      if (Array.isArray(value)) {
+        visit(value, ctx)
+      }
+    }
+  }
+
+  visit(node)
+  if (!blocks.length) return ""
+  blocks.sort((a, b) => scoreOwnedText(b) - scoreOwnedText(a) || b.length - a.length)
+  return blocks[0]
+}
+
 function pickBestUrl(strings: string[]): string | null {
   const urls = strings.map(normalizeUrl).filter(looksLikeUrl)
   if (urls.length === 0) return null
@@ -435,7 +528,7 @@ function inferTypeLabel(
   const lookup = context === "list" ? LIST_TYPE_LABELS : CONTENT_TYPE_LABELS
   for (const value of numericCandidates) {
     const asInt = Math.round(value)
-    if (context === "list" && CONTENT_TYPE_LABELS[asInt] && VISUAL_TYPES.has(CONTENT_TYPE_LABELS[asInt])) {
+    if (context === "content" && VISUAL_TYPE_CODES.has(asInt) && CONTENT_TYPE_LABELS[asInt]) {
       return CONTENT_TYPE_LABELS[asInt]
     }
     if (lookup[asInt]) return lookup[asInt]
@@ -462,11 +555,13 @@ function inferTypeLabel(
 
 function deriveKind(item: StudioArtifactItem): "text" | "asset" {
   const type = item.type ?? ""
-  const url = normalizeString(item.url)
-  const mime = normalizeString(item.mimeType).toLowerCase()
-  if (VISUAL_TYPES.has(type)) return "asset"
-  if (url && looksLikeAssetUrl(url)) return "asset"
-  if (mime && /(audio|video|image|pdf)/u.test(mime)) return "asset"
+  if (!VISUAL_TYPES.has(type)) return "text"
+  const url = normalizeUrl(item.url)
+  const contentUrl = typeof item.content === "string" ? normalizeUrl(item.content) : ""
+  const hasMediaUrl =
+    (url && isMediaUrl(url)) ||
+    (contentUrl && isMediaUrl(contentUrl))
+  if (hasMediaUrl) return "asset"
   return "text"
 }
 
@@ -524,32 +619,12 @@ function extractStudioItemFromNode(
   if (context === "list") {
     const listHit = findListIdTitle(node)
     if (listHit) {
-      let typeCandidate = inferTypeLabel(
-        listHit.title,
-        "",
-        typeof listHit.type === "number" ? [listHit.type] : [],
-        "list"
-      )
-      if (typeof listHit.type === "number") {
-        const contentTypeOverride = CONTENT_TYPE_LABELS[listHit.type]
-        if (contentTypeOverride && VISUAL_TYPES.has(contentTypeOverride)) {
-          typeCandidate = contentTypeOverride
-        }
-      }
-      const urlInNode = pickBestUrl(strings)
-      if (urlInNode) {
-        if (/\.pdf/i.test(urlInNode)) typeCandidate = "Slides"
-        else if (/\.png|\.jpg|\.jpeg|\.webp/i.test(urlInNode)) typeCandidate = "Infographic"
-        else if (/=mp2|=m22|=m140/i.test(urlInNode)) typeCandidate = "Video Overview"
-        else if (/\.mp3|\.m4a/i.test(urlInNode)) typeCandidate = "Audio Overview"
-        else if (/googleusercontent/i.test(urlInNode) && !typeCandidate) typeCandidate = "Infographic"
-      }
+      const typeCandidate =
+        typeof listHit.type === "number" ? LIST_TYPE_LABELS[listHit.type] ?? String(listHit.type) : undefined
       const item: StudioArtifactItem = {
         id: listHit.id,
         title: listHit.title,
         type: typeCandidate || undefined,
-        url: urlInNode || undefined,
-        content: urlInNode || undefined,
         updatedAt: new Date().toISOString()
       }
       item.kind = deriveKind(item)
@@ -562,9 +637,12 @@ function extractStudioItemFromNode(
   const preferredHits = preferredIds ? uniqueIds.filter((value) => preferredIds.has(value)) : []
   const hasPreferred = preferredHits.length > 0
   if (context === "content" && preferredIds) {
-    if (preferredHits.length !== 1) {
+    if (preferredHits.length === 0) {
       const hasAssetUrl = strings.some((value) => looksLikeAssetUrl(value))
-      if (!hasAssetUrl) return null
+      const hasLongContent = strings.some(
+        (value) => value.length > 200 && !looksLikeUrl(value) && !looksLikeMimeType(value)
+      )
+      if (!hasAssetUrl && !hasLongContent) return null
     }
   }
 
@@ -575,13 +653,14 @@ function extractStudioItemFromNode(
   const titleCandidate =
     (preferredTitles && preferredTitles.get(idCandidate)) || pickBestTitle(strings)
   let contentCandidate = pickBestContent(strings, titleCandidate)
+  if (!contentCandidate || contentCandidate.trim().length === 0) {
+    contentCandidate = extractOwnedText(node, idCandidate)
+  }
   console.log("[studioArtifacts][dbg] candidates", {
     title: titleCandidate,
     content: contentCandidate?.slice?.(0, 120),
     url: pickBestUrl(strings)
   })
-  const urlCandidate = pickBestUrl(strings)
-  const mimeCandidate = strings.find((value) => looksLikeMimeType(value)) ?? ""
   const metaCandidate = strings.find((value) => looksLikeMeta(value)) ?? ""
   const sourceCount = pickSourceCount(strings)
 
@@ -589,7 +668,28 @@ function extractStudioItemFromNode(
   collectNumbers(node, numericCandidates)
   let typeCandidate: string | undefined
   typeCandidate = inferTypeLabel(titleCandidate ?? "", "", numericCandidates, context)
-  if (!typeCandidate && urlCandidate) {
+
+  // só buscar url/mime se o typeCode indica visual — evita contaminação de vizinhos
+  const nodeIsVisual = isVisualTypeCode(numericCandidates)
+  let urlCandidate: string | null = null
+  let mimeCandidate = ""
+  if (nodeIsVisual) {
+    const ownedVideo = extractOwnedMedia(node, idCandidate, "video/")
+    const ownedAudio = extractOwnedMedia(node, idCandidate, "audio/")
+    const ownedImage = extractOwnedMedia(node, idCandidate, "image/")
+    const ownedPdf = extractOwnedMedia(node, idCandidate, "application/pdf")
+    const ownedAll = [...ownedVideo, ...ownedAudio, ...ownedImage, ...ownedPdf]
+    if (ownedAll.length > 0) {
+      urlCandidate = ownedAll[0].url
+      mimeCandidate = ownedAll[0].mime
+    }
+  } else {
+    urlCandidate = null
+    mimeCandidate = ""
+  }
+
+  const hasLongTextContent = typeof contentCandidate === "string" && contentCandidate.length > 100
+  if (!typeCandidate && urlCandidate && !hasLongTextContent) {
     if (/\.pdf/i.test(urlCandidate)) typeCandidate = "Slides"
     else if (/\.png|\.jpg|\.jpeg|\.webp/i.test(urlCandidate)) typeCandidate = "Infographic"
     else if (/=mp2|=m22|=m140/i.test(urlCandidate)) typeCandidate = "Video Overview"
@@ -642,13 +742,14 @@ function extractStudioItemFromNode(
   const isAsset =
     isAssetLike(typeCandidate, mimeCandidate, urlCandidate) ||
     (typeof urlCandidate === "string" && ASSET_EXT_RE.test(urlCandidate))
+  const isConfirmedVisual = typeCandidate ? VISUAL_TYPES.has(typeCandidate) : false
   let content =
     contentCandidate && urlCandidate && contentCandidate === urlCandidate ? undefined : contentCandidate ?? undefined
   if (!content && textFallback) {
     content = textFallback
   }
   const hasContent = typeof content === "string" && content.trim().length > 0
-  if (!hasContent && urlCandidate && isAsset) {
+  if (!hasContent && urlCandidate && isAsset && isConfirmedVisual) {
     content = urlCandidate
   }
 
@@ -668,12 +769,22 @@ function extractStudioItemFromNode(
     updatedAt: new Date().toISOString()
   }
   item.kind = deriveKind(item)
-  if (item.kind === "asset") {
+  if (item.kind === "asset" && isConfirmedVisual) {
     item.content = item.url ?? item.content
   }
-  if (item.url && looksLikeAssetUrl(item.url)) {
+  if (item.url && isMediaUrl(item.url) && isConfirmedVisual) {
     item.kind = "asset"
     item.content = item.url
+  }
+  if (item.kind === "text") {
+    const ownedText = extractOwnedText(node, id)
+    const fallbackText =
+      typeof item.content === "string" && !URL_TEXT_RE.test(item.content.trim())
+        ? item.content.trim()
+        : ""
+    item.content = ownedText || fallbackText || undefined
+    item.url = undefined
+    item.mimeType = undefined
   }
   return item
 }
@@ -738,13 +849,13 @@ function extractListItemsFromPayload(payload: unknown): StudioArtifactItem[] {
       const typeId = typeof node[2] === "number" ? node[2] : undefined
       const typeLabel = typeId !== undefined ? LIST_TYPE_LABELS[typeId] ?? String(typeId) : undefined
 
+      const prev = items.get(id)
       items.set(id, {
         id,
-        title,
-        meta: undefined,
-        type: typeLabel
+        title: prev?.title || title,
+        meta: prev?.meta,
+        type: prev?.type ?? typeLabel
       })
-      return
     }
 
     for (const child of node) visit(child)
@@ -785,6 +896,10 @@ function extractStudioItemsFromRawText(
   const payloads = extractPayloadsFromRawText(rawText, rpcId)
   const items: StudioArtifactItem[] = []
   for (const payload of payloads) {
+    if (context === "list") {
+      items.push(...extractListItemsFromPayload(payload))
+      continue
+    }
     items.push(...extractStudioItemsFromPayload(payload, context, preferredIds, preferredTitles))
   }
   return items
@@ -955,6 +1070,31 @@ function hasSignal(item: StudioArtifactItem): boolean {
   return false
 }
 
+function scoreDedupCandidate(item: StudioArtifactItem): number {
+  const contentScore = item.content ? Math.min(String(item.content).length, 500) : 0
+  const textBias = item.kind === "text" ? 40 : 0
+  const visual = VISUAL_TYPES.has(item.type ?? "")
+  const consistentKind =
+    (visual && item.kind === "asset") || (!visual && item.kind === "text")
+  const consistencyScore = consistentKind ? 80 : 0
+  return contentScore + textBias + consistencyScore
+}
+
+function dedupeByNormalizedTitle(items: StudioArtifactItem[]): StudioArtifactItem[] {
+  const byTitle = new Map<string, StudioArtifactItem>()
+  for (const item of items) {
+    const titleKey = normalizeTitleKey(item.title)
+    const key = titleKey || item.id
+    const prev = byTitle.get(key)
+    if (!prev) {
+      byTitle.set(key, item)
+      continue
+    }
+    byTitle.set(key, scoreDedupCandidate(item) >= scoreDedupCandidate(prev) ? item : prev)
+  }
+  return Array.from(byTitle.values())
+}
+
 function filterBySignal(items: StudioArtifactItem[], ids?: string[]): StudioArtifactItem[] {
   const requestedIds = new Set((ids ?? []).filter(Boolean))
   const filtered = items.filter((it) => {
@@ -1087,11 +1227,54 @@ export async function fetchStudioArtifactsByIds(
 
   const contentById = new Map(contentItems.map((item) => [item.id, item]))
   const listIds = new Set(listItems.map((item) => item.id))
+  const VISUAL_MIME_RE = /^(video|audio|image)\//i
+  const MEDIA_EXT_RE = /\.(mp4|m4a|mp3|wav|ogg|pdf|png|jpe?g|webp)(?:[?#]|$)/i
+  const MEDIA_HINT_RE = /googleusercontent\.com|=m22\b|\/video\/|\/audio\/|\/image\//i
+
+  const normalizeMediaUrl = (v: unknown): string | undefined => {
+    if (typeof v !== "string") return undefined
+    const s = v.trim()
+    if (!s) return undefined
+    const u = s.startsWith("//") ? `https:${s}` : s
+    if (!/^https?:\/\//i.test(u)) return undefined
+    if (MEDIA_EXT_RE.test(u) || MEDIA_HINT_RE.test(u)) return u
+    return undefined
+  }
+
+  const isVisualMime = (mime?: string) =>
+    !!mime && (VISUAL_MIME_RE.test(mime) || mime === "application/pdf")
 
   const stitchedItems = listItems.map((item) => {
-    const content = contentById.get(item.id)
-    if (!content) return item
-    return { ...content, ...item, title: item.title }
+    const ci = contentById.get(item.id)
+    if (!ci) return item
+
+    const mimeType = ci.mimeType ?? item.mimeType
+    const url =
+      normalizeMediaUrl(ci.url) ??
+      normalizeMediaUrl(item.url) ??
+      normalizeMediaUrl(ci.content) ??
+      normalizeMediaUrl(item.content)
+
+    const kind =
+      ci.kind ??
+      item.kind ??
+      (url || isVisualMime(mimeType) ? "asset" : "text")
+
+    const content =
+      ci.content ??
+      item.content ??
+      (kind === "asset" ? url : undefined)
+
+    return {
+      ...item,
+      ...ci,
+      title: item.title || ci.title,
+      type: ci.type ?? item.type,
+      content,
+      url,
+      mimeType,
+      kind
+    }
   })
 
   const contentOnly = contentItems.filter((item) => !listIds.has(item.id))
@@ -1105,31 +1288,22 @@ export async function fetchStudioArtifactsByIds(
     mergedItems.length
   )
   const filteredItems = filterBySignal(mergedItems, ids)
+  const dedupedByTitle = dedupeByNormalizedTitle(filteredItems)
   console.log(
     "[studioArtifacts] contentCount",
-    filteredItems.filter((item) => typeof item.content === "string" && item.content.trim().length > 0).length,
+    dedupedByTitle.filter((item) => typeof item.content === "string" && item.content.trim().length > 0).length,
     "total",
-    filteredItems.length
+    dedupedByTitle.length
   )
-  const finalItems = filteredItems
+  const finalItems = dedupedByTitle
   const contentCount = finalItems.filter(
     (item) => typeof item.content === "string" && item.content.trim().length > 0
   ).length
   const urlCount = finalItems.filter((item) => typeof item.url === "string" && item.url.trim().length > 0).length
-  console.warn("[BG_LOG][studio-final]", {
-    total: finalItems.length,
-    contentCount,
-    urlCount,
-    sample: finalItems.slice(0, 3).map((item) => ({
-      id: item.id,
-      title: item.title,
-      hasContent: Boolean(typeof item.content === "string" && item.content.trim().length > 0),
-      hasUrl: Boolean(typeof item.url === "string" && item.url.trim().length > 0),
-      type: item.type
-    }))
-  })
-  if (filteredItems.length > 0) {
-    await persistStudioCache(filteredItems)
+  void contentCount
+  void urlCount
+  if (finalItems.length > 0) {
+    await persistStudioCache(finalItems)
   }
 
   if (idSet.size === 0) return finalItems

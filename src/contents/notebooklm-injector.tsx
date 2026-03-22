@@ -263,6 +263,14 @@ function mountTargets(): void {
   for (const target of TARGETS) {
     const host = target.resolveHost()
     if (!(host instanceof HTMLElement) || !isVisible(host)) {
+      if (target.key === "studio-export") {
+        const mounted = mountedRoots.get(target.key)
+        if (mounted) {
+          mounted.root.unmount()
+          mountedRoots.delete(target.key)
+          mounted.container.remove()
+        }
+      }
       continue
     }
 
@@ -1358,7 +1366,7 @@ function scheduleRefresh(): void {
   refreshTimer = window.setTimeout(() => {
     refreshTimer = null
     refreshUi()
-  }, 100)
+  }, 40)
 }
 
 function startObservers(): void {
@@ -1376,7 +1384,9 @@ function startObservers(): void {
 
     domObserver.observe(document.body, {
       childList: true,
-      subtree: true
+      subtree: true,
+      attributes: true,
+      attributeFilter: ["class", "style", "aria-expanded", "aria-hidden", "data-state", "hidden"]
     })
   }
 

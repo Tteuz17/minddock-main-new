@@ -10,11 +10,8 @@ export const config: PlasmoCSConfig = {
 const PAGE_HOOK_FLAG = "__MINDDOCK_PAGE_HOOK_INSTALLED__"
 const alreadyInstalled = Boolean((window as unknown as Record<string, unknown>)[PAGE_HOOK_FLAG])
 
-if (alreadyInstalled) {
-  console.warn("[MindDock][PageHook] already installed")
-} else {
+if (!alreadyInstalled) {
   ;(window as unknown as Record<string, unknown>)[PAGE_HOOK_FLAG] = true
-  console.warn("[MindDock][PageHook] installed", location.href)
   installPageHook()
 }
 
@@ -33,7 +30,7 @@ function installPageHook() {
   const RETRY_INTERVAL_MS = 300
 
   function debugLog(...args: unknown[]) {
-    console.warn("[MindDock][PageHook]", ...args)
+    void args
   }
 
   // ─── LÊ at DIRETO DO WIZ_global_data ─────────────────────────────────────

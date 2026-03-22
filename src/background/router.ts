@@ -96,7 +96,7 @@ function normalizePlatformLabel(value: string): string {
   }
 
   if (normalizedValue.includes("youtube")) {
-    return "Youtube"
+    return "YOUTUBE"
   }
 
   return rawValue.toUpperCase()

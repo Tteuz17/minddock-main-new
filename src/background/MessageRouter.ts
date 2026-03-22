@@ -996,7 +996,6 @@ export function initializeMessageRouter(): void {
         }
 
         case "BG_LOG": {
-          console.warn("[BG_LOG]", message?.data ?? message)
           sendResponse?.({ ok: true })
           return true
         }

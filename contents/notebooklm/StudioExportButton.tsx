@@ -12,7 +12,7 @@ import {
   triggerDownload
 } from "~/lib/source-download"
 import { buildNotebookAccountKey, buildScopedStorageKey, resolveAuthUserFromUrl } from "~/lib/notebook-account-scope"
-import { EXCLUDED_FROM_EXPORT, VISUAL_TYPES, resolveFileExtension } from "../../src/background/studioArtifacts"
+import { EXCLUDED_FROM_EXPORT, resolveFileExtension } from "../../src/background/studioArtifacts"
 import { queryDeepAll } from "./sourceDom"
 import { useShadowPortal } from "./useShadowPortal"
 import {
@@ -21,15 +21,6 @@ import {
   EXPORT_PREVIEW_UPDATE_EVENT,
   type ExportPreviewOpenDetail
 } from "./ExportPreviewPanel"
-
-// REGRA ABSOLUTA: esses types SEMPRE vão para VISUAIS, sem exceção
-const FORCE_VISUAL_TYPES = new Set([
-  "Video Overview",
-  "Audio Overview",
-  "Infographic",
-  "Slides",
-  "Mind Map"
-])
 
 const CONTEXT_EVENT = "MINDDOCK_RPC_CONTEXT"
 
@@ -299,6 +290,11 @@ const SHADOW_CSS = `
     letter-spacing: 0.08em;
     text-transform: uppercase;
     color: #9da7b8;
+  }
+  .source-section-title--split {
+    margin-top: 14px;
+    padding-top: 10px;
+    border-top: 1px solid rgba(255,255,255,0.1);
   }
   .source-download-btn {
     border: 1px solid rgba(255,255,255,0.16);
@@ -620,15 +616,7 @@ function resolveRpcContextFromWindow() {
 }
 
 function bgLog(data: unknown) {
-  try {
-    if (!chrome?.runtime?.sendMessage) return
-    chrome.runtime.sendMessage({ type: "BG_LOG", data }, () => {
-      const err = chrome.runtime?.lastError
-      if (err?.message) {
-        console.warn("[BG_LOG][sendMessage error]", err.message)
-      }
-    })
-  } catch {}
+  void data
 }
 
 function toExcerpt(value: unknown, max = 160): string {
@@ -699,8 +687,6 @@ async function requestStudioArtifacts(
     response?.payload?.items ??
     response?.data?.items ??
     []
-
-  console.log("[studioUI] items", items.length, items[0])
 
   return Array.isArray(items) ? (items as StudioCacheItem[]) : []
 }
@@ -890,6 +876,8 @@ function normalizeStudioCacheEntry(item: StudioCacheItem): StudioEntry | null {
   const mimeType = normalizeStorageValue(item.mimeType) || undefined
   const type = normalizeStorageValue(item.type) || undefined
   const kind = item.kind === "asset" || item.kind === "text" ? item.kind : undefined
+  const mimeLooksVisual = /^(video|audio|image)\//iu.test(mimeType ?? "") || mimeType === "application/pdf"
+  const inferredAsset = Boolean((url || mimeType) && (isVisualTypeLabel(type) || mimeLooksVisual))
 
   return {
     id,
@@ -899,7 +887,7 @@ function normalizeStudioCacheEntry(item: StudioCacheItem): StudioEntry | null {
     type,
     url,
     mimeType,
-    kind: kind ?? (url || mimeType ? "asset" : "text")
+    kind: kind ?? (inferredAsset ? "asset" : "text")
   }
 }
 
@@ -940,10 +928,7 @@ async function loadStudioEntriesFromStorage(): Promise<{
 
   const normalized = rawItems.map(normalizeStudioCacheEntry).filter(Boolean) as StudioEntry[]
   const safeFiltered = applyStudioFilter(normalized)
-  const debugText = buildStudioDebugText(rawItems, normalized, safeFiltered, usedKey)
-  console.group("[MindDock][Studio][Debug]")
-  console.log(debugText)
-  console.groupEnd()
+  void buildStudioDebugText(rawItems, normalized, safeFiltered, usedKey)
 
   if (usedKey && safeFiltered.length > 0 && safeFiltered.length !== normalized.length) {
     chrome.storage.local.set(
@@ -1275,6 +1260,41 @@ function pickTitleFromLines(lines: string[]): string {
   return candidates.sort((a, b) => b.length - a.length)[0]
 }
 
+const ICON_TYPE_MAP: Record<string, string> = {
+  audio_magic_eraser: "Audio Overview",
+  subscriptions: "Video Overview",
+  flowchart: "Mind Map",
+  stacked_bar_chart: "Slides",
+  table_view: "Study Guide",
+  cards_star: "Study Guide",
+  auto_tab_group: "FAQ",
+  tablet: "Flashcards",
+  quiz: "Quiz"
+}
+
+function queryDeepSingle(
+  selector: string,
+  root: Element | Document | ShadowRoot = document
+): HTMLElement | null {
+  const direct = root.querySelector<HTMLElement>(selector)
+  if (direct) return direct
+  for (const el of Array.from(root.querySelectorAll("*"))) {
+    const shadow = (el as HTMLElement).shadowRoot
+    if (shadow) {
+      const found = queryDeepSingle(selector, shadow)
+      if (found) return found
+    }
+  }
+  return null
+}
+
+function inferTypeFromIcon(row: HTMLElement): string | undefined {
+  const icon = queryDeepSingle("mat-icon.artifact-icon, mat-icon[class*='artifact']", row)
+  if (!icon) return undefined
+  const key = icon.textContent?.trim().toLowerCase().replace(/\s+/g, "_") ?? ""
+  return ICON_TYPE_MAP[key]
+}
+
 function readStudioTitlesFromDom(): StudioEntry[] {
   const rows = Array.from(
     document.querySelectorAll(
@@ -1322,6 +1342,7 @@ function readStudioTitlesFromDom(): StudioEntry[] {
       row.closest<HTMLElement>("[role='listitem'], li") ??
       row.closest<HTMLElement>("button, [role='button'], a") ??
       row
+    const iconType = inferTypeFromIcon(row)
 
     entries.push({
       id:
@@ -1331,7 +1352,7 @@ function readStudioTitlesFromDom(): StudioEntry[] {
           : `studio-dom-${hashString(key)}`),
       title: hasTitle ? title : "Carregando resultado do Estúdio...",
       meta,
-      type: meta,
+      type: iconType ?? meta,
       content: "",
       node: clickable
     })
@@ -1772,8 +1793,59 @@ function looksLikeUrl(value: string): boolean {
   return /^https?:\/\//iu.test(value) || value.startsWith("//")
 }
 
+function resolveEntryAssetUrl(entry: Pick<StudioEntry, "url" | "content">): string | undefined {
+  const fromUrl = typeof entry.url === "string" ? entry.url.trim() : ""
+  if (isDownloadableAssetUrl(fromUrl)) {
+    return fromUrl
+  }
+  const fromContent = typeof entry.content === "string" ? entry.content.trim() : ""
+  if (isDownloadableAssetUrl(fromContent)) {
+    return fromContent
+  }
+  return undefined
+}
+
+function normalizeTypeToken(value?: string): string {
+  const base = String(value ?? "").trim().toLowerCase()
+  if (!base) return ""
+  return base.normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+}
+
+function isVisualTypeLabel(type?: string): boolean {
+  const normalized = normalizeTypeToken(type)
+  if (!normalized) return false
+  return (
+    normalized === "video overview" ||
+    normalized === "audio overview" ||
+    normalized === "slides" ||
+    normalized === "infographic" ||
+    normalized === "mind map" ||
+    normalized === "infografico" ||
+    normalized === "mapa mental"
+  )
+}
+
+function isVisualAssetEntry(entry: StudioEntry): boolean {
+  const kind = String(entry.kind ?? "").trim().toLowerCase()
+  const mime = String(entry.mimeType ?? "").trim().toLowerCase()
+  const type = String(entry.type ?? "").trim().toLowerCase()
+
+  const assetUrl =
+    resolveEntryAssetUrl(entry) ||
+    (typeof entry.url === "string" ? entry.url : "") ||
+    (typeof entry.content === "string" ? entry.content : "")
+
+  const hasUrl = /^(https?:)?\/\//i.test(assetUrl)
+  const isVisualMime = /^(video|audio|image)\//u.test(mime) || mime === "application/pdf"
+  const isVisualType = /^(video overview|audio overview|slides|infographic|mind map)$/u.test(type)
+
+  if (kind === "asset") return hasUrl || isVisualMime || isVisualType
+  if (isVisualMime || isVisualType) return hasUrl
+  return false
+}
+
 async function downloadAssetEntry(entry: StudioEntry): Promise<void> {
-  const url = entry.url || (looksLikeUrl(entry.content ?? "") ? entry.content : undefined)
+  const url = resolveEntryAssetUrl(entry)
   if (!url) return
   const ext = resolveFileExtension(entry.type ?? "", url)
   const filename = `${String(entry.title ?? "studio").replace(/[^a-z0-9]/gi, "_")}.${ext}`
@@ -1809,7 +1881,7 @@ async function downloadAssetEntries(entries: StudioEntry[]): Promise<void> {
   if (entries.length === 0) return
   const usedNames = new Set<string>()
   for (const entry of entries) {
-    const url = entry.url || (looksLikeUrl(entry.content ?? "") ? entry.content : undefined)
+    const url = resolveEntryAssetUrl(entry)
     if (!url) continue
     const base = buildMindDuckFilenameBase("Studio", entry.title)
     const extension = resolveAssetExtension(entry)
@@ -1836,7 +1908,7 @@ function buildStudioEntryBlock(
   const lines: string[] = []
   const isLoading = Boolean(options?.isLoading)
 
-  const isVisual = VISUAL_TYPES.has(entry.type ?? "")
+  const isVisual = isVisualAssetEntry(entry)
   const isExcluded = EXCLUDED_FROM_EXPORT.has(entry.type ?? "")
 
   if (isVisual || isExcluded) return ""
@@ -1987,10 +2059,20 @@ function isDownloadableAssetUrl(value: string | undefined): boolean {
     return false
   }
   const lower = value.toLowerCase()
+  if (lower.startsWith("//")) {
+    return isDownloadableAssetUrl(`https:${lower}`)
+  }
   if (/\.(png|jpe?g|gif|webp|svg|mp3|wav|ogg|m4a|aac|flac|mp4|mkv|webm|mov|avi|pdf)(\?|#|$)/u.test(lower)) {
     return true
   }
   if (lower.includes("alt=media") || lower.includes("download=")) {
+    return true
+  }
+  if (
+    /googleusercontent\.com|=m22\b|=m140\b|video%2f(mp4|webm)|audio%2f(mp4|mpeg|mp3)|application%2fpdf|\/video\/|\/audio\/|\/image\//u.test(
+      lower
+    )
+  ) {
     return true
   }
   return false
@@ -2107,7 +2189,7 @@ function isValidStudioEntry(entry: StudioEntry): boolean {
   const hasMeta = metaValue.length > 0 && !STUDIO_INVALID_META.has(metaKey) && looksLikeStudioMetaSignal(metaValue)
   const contentValue = entry.content?.trim() ?? ""
   const hasContent = contentValue.length > 0
-  const hasAsset = entry.kind === "asset" && isDownloadableAssetUrl(entry.url)
+  const hasAsset = isVisualAssetEntry(entry)
   if (!hasMeta && !hasAsset && !hasContent) {
     return false
   }
@@ -2154,7 +2236,7 @@ function describeInvalidStudioEntry(entry: StudioEntry): string {
   const hasType = Boolean(entry.type && entry.type.trim())
   const contentValue = entry.content?.trim() ?? ""
   const hasContent = contentValue.length > 0
-  const hasAsset = entry.kind === "asset" && isDownloadableAssetUrl(entry.url)
+  const hasAsset = isVisualAssetEntry(entry)
   if (!hasMeta && !hasAsset && !hasContent) {
     return "no-signal"
   }
@@ -2239,7 +2321,8 @@ function extensionFromMime(mimeType?: string): string | null {
 }
 
 function resolveAssetExtension(entry: StudioEntry): string {
-  const urlExt = extractExtensionFromUrl(entry.url ?? "")
+  const assetUrl = resolveEntryAssetUrl(entry)
+  const urlExt = extractExtensionFromUrl(assetUrl ?? "")
   if (urlExt) return urlExt
 
   const mimeExt = extensionFromMime(entry.mimeType)
@@ -2295,23 +2378,24 @@ async function buildStudioExportFiles(
   const files: Array<{ filename: string; bytes: Uint8Array; isAsset?: boolean }> = []
 
   for (const [index, entry] of entries.entries()) {
-    if (entry.kind === "asset") {
+    if (isVisualAssetEntry(entry)) {
       const base = buildMindDuckFilenameBase("Studio", entry.title)
       const extension = resolveAssetExtension(entry)
       const filename = buildUniqueStudioFilename(base, extension, usedNames)
+      const assetUrl = resolveEntryAssetUrl(entry)
 
-      if (!entry.url) {
+      if (!assetUrl) {
         const placeholder = `Arquivo binario do Studio nao encontrado para: ${entry.title}`
         files.push({ filename: `${filename}.txt`, bytes: encoder.encode(placeholder), isAsset: true })
         continue
       }
 
       try {
-        const bytes = await fetchBinaryFile(entry.url)
+        const bytes = await fetchBinaryFile(assetUrl)
         files.push({ filename, bytes, isAsset: true })
       } catch {
         const urlFilename = buildUniqueStudioFilename(base, "url", usedNames)
-        const shortcut = `[InternetShortcut]\nURL=${entry.url}\n`
+        const shortcut = `[InternetShortcut]\nURL=${assetUrl}\n`
         files.push({ filename: urlFilename, bytes: encoder.encode(shortcut), isAsset: true })
       }
       continue
@@ -2397,25 +2481,25 @@ function StudioModal({ onClose }: { onClose: () => void }) {
     return listEntries.map((entry) => {
       const cached = byId.get(entry.id)
       if (!cached) return entry
-      const cachedType = cached.type ?? ""
-      const isAssetInCache = cached.kind === "asset" || Boolean(cached.url)
-      const finalType = FORCE_VISUAL_TYPES.has(cachedType) ? cachedType : entry.type || cachedType
+      const incomingKind = cached.kind ?? entry.kind
+      const incomingType = cached.type ?? entry.type
+      const incomingIsText = incomingKind === "text" || (incomingType ? !isVisualTypeLabel(incomingType) : false)
       return {
         ...entry,
         ...cached,
         title: entry.title,
-        type: finalType,
-        kind: FORCE_VISUAL_TYPES.has(cachedType) ? "asset" : cached.kind || entry.kind,
-        url: isAssetInCache && cached.url ? cached.url : entry.url ?? cached.url,
-        mimeType: isAssetInCache && cached.mimeType ? cached.mimeType : entry.mimeType ?? cached.mimeType
+        type: incomingType,
+        kind: incomingKind,
+        content: cached.content ?? entry.content,
+        url: cached.url ?? (incomingIsText ? undefined : entry.url),
+        mimeType: cached.mimeType ?? (incomingIsText ? undefined : entry.mimeType),
       }
     })
   }, [entries, listEntries, hasIds])
 
-  const displayEntries = isLoading || !hasIds ? [] : mergedEntries
-  const FORCE_VISUAL_TYPES_SET = new Set(["Video Overview", "Audio Overview", "Infographic", "Slides", "Mind Map"])
+  const displayEntries = !hasIds ? [] : mergedEntries
   const visualEntries = useMemo(
-    () => displayEntries.filter((entry) => FORCE_VISUAL_TYPES_SET.has(entry.type ?? "")),
+    () => displayEntries.filter((entry) => isVisualAssetEntry(entry)),
     [displayEntries]
   )
   const visualIds = useMemo(() => new Set(visualEntries.map((entry) => entry.id)), [visualEntries])
@@ -2424,7 +2508,6 @@ function StudioModal({ onClose }: { onClose: () => void }) {
       displayEntries.filter(
         (entry) =>
           !visualIds.has(entry.id) &&
-          !FORCE_VISUAL_TYPES.has(entry.type ?? "") &&
           !EXCLUDED_FROM_EXPORT.has(entry.type ?? "")
       ),
     [displayEntries, visualIds]
@@ -2538,12 +2621,21 @@ function StudioModal({ onClose }: { onClose: () => void }) {
           return nextEntries.map((e) => {
             const old = prevById.get(e.id)
             if (!old) return e
-            return { ...old, ...e, content: e.content || old.content, url: e.url || old.url }
+            const incomingKind = e.kind ?? old.kind
+            const incomingType = e.type ?? old.type
+            const incomingIsText = incomingKind === "text" || (incomingType ? !isVisualTypeLabel(incomingType) : false)
+            return {
+              ...old,
+              ...e,
+              content: e.content ?? old.content,
+              url: e.url ?? (incomingIsText ? undefined : old.url),
+              mimeType: e.mimeType ?? (incomingIsText ? undefined : old.mimeType),
+              type: incomingType,
+              kind: incomingKind,
+            }
           })
         })
-        console.group("[MindDock][Studio][Debug]")
-        console.log(buildStudioDebugText(nextValue as StudioCacheItem[], normalized, nextEntries, key))
-        console.groupEnd()
+        void buildStudioDebugText(nextValue as StudioCacheItem[], normalized, nextEntries, key)
         break
       }
     }
@@ -2637,17 +2729,15 @@ function StudioModal({ onClose }: { onClose: () => void }) {
           const merged = mapped.map((entry) => {
             const existing = prevById.get(entry.id)
             if (!existing) return entry
-            const existingType = existing.type ?? ""
-            const isAssetInCache = existing.kind === "asset" || Boolean(existing.url)
-            const finalType = FORCE_VISUAL_TYPES.has(existingType) ? existingType : entry.type || existingType
             return {
               ...existing,
               ...entry,
               title: entry.title,
-              type: finalType,
-              kind: FORCE_VISUAL_TYPES.has(existingType) ? "asset" : existing.kind || entry.kind,
-              url: isAssetInCache && existing.url ? existing.url : entry.url ?? existing.url,
-              mimeType: isAssetInCache && existing.mimeType ? existing.mimeType : entry.mimeType ?? existing.mimeType
+              type: existing.type || entry.type,
+              kind: existing.kind || entry.kind,
+              content: existing.content || entry.content,
+              url: existing.url || entry.url,
+              mimeType: existing.mimeType || entry.mimeType,
             }
           })
           const hasPayload = merged.some((entry) => entry.content || entry.url)
@@ -2682,11 +2772,18 @@ function StudioModal({ onClose }: { onClose: () => void }) {
       return nextEntries.map((entry) => {
         const old = prevById.get(entry.id)
         if (!old) return entry
+        const incomingKind = entry.kind ?? old.kind
+        const incomingType = entry.type ?? old.type
+        const incomingIsText =
+          incomingKind === "text" || (incomingType ? !isVisualTypeLabel(incomingType) : false)
         return {
           ...old,
           ...entry,
-          content: entry.content || old.content,
-          url: entry.url || old.url
+          content: entry.content ?? old.content,
+          url: entry.url ?? (incomingIsText ? undefined : old.url),
+          mimeType: entry.mimeType ?? (incomingIsText ? undefined : old.mimeType),
+          type: incomingType,
+          kind: incomingKind
         }
       })
     })
@@ -2759,7 +2856,7 @@ function StudioModal({ onClose }: { onClose: () => void }) {
         fetchInFlightRef.current = false
         setIsLoading(false)
       })
-  }, [applyStudioItems, hasIds, listIds, mergedEntries])
+  }, [applyStudioItems, hasIds, listIds])
 
   useEffect(() => {
     if (!hasIds) {
@@ -2774,32 +2871,31 @@ function StudioModal({ onClose }: { onClose: () => void }) {
   useEffect(() => {
     if (firstFrameLoggedRef.current) return
     firstFrameLoggedRef.current = true
-    requestAnimationFrame(() => {
-      console.log("[studioModal][first-frame]", {
-        count: displayEntries.length,
-        titles: displayEntries.map((entry) => entry.title).slice(0, 100),
-        ids: displayEntries.map((entry) => entry.id).slice(0, 100)
-      })
-
-      const suspicious = displayEntries.filter((entry) => {
-        const title = (entry.title ?? "").trim().toLowerCase()
-        return !title || title === "studio" || (!entry.content && !entry.url)
-      })
-      console.log("[studioModal][first-frame][suspects]", suspicious)
-    })
+    requestAnimationFrame(() => {})
   }, [displayEntries])
 
   useEffect(() => {
+    const allowed = new Set<string>()
+    documentEntries.forEach((entry) => {
+      if (entry.id) {
+        allowed.add(entry.id)
+      }
+    })
+    visualEntries.forEach((entry) => {
+      if (entry.id) {
+        allowed.add(entry.id)
+      }
+    })
+
     if (!selectionInitRef.current) {
-      if (documentEntries.length === 0) {
+      if (allowed.size === 0) {
         return
       }
-      setSelectedIds(new Set(documentEntries.map((entry) => entry.id)))
+      setSelectedIds(new Set(allowed))
       selectionInitRef.current = true
       return
     }
     setSelectedIds((prev) => {
-      const allowed = new Set(documentEntries.map((entry) => entry.id))
       let changed = false
       const next = new Set<string>()
       prev.forEach((id) => {
@@ -2811,7 +2907,7 @@ function StudioModal({ onClose }: { onClose: () => void }) {
       })
       return changed ? next : prev
     })
-  }, [documentEntries])
+  }, [documentEntries, visualEntries])
 
   const normalizedSearch = sourceSearch.trim().toLowerCase()
   const filterBySearch = useCallback(
@@ -2838,16 +2934,26 @@ function StudioModal({ onClose }: { onClose: () => void }) {
     () => filterBySearch(excludedEntries),
     [excludedEntries, filterBySearch]
   )
-  const FORCE_VISUAL = new Set(["Video Overview", "Audio Overview", "Infographic", "Slides", "Mind Map"])
   const selectableEntries = useMemo(
     () =>
       filteredDocumentEntries.filter(
-        (entry) =>
-          !EXCLUDED_FROM_EXPORT.has(entry.type ?? "") &&
-          !FORCE_VISUAL.has(entry.type ?? "")
+        (entry) => !EXCLUDED_FROM_EXPORT.has(entry.type ?? "")
       ),
     [filteredDocumentEntries]
   )
+  const selectableAllEntries = useMemo(() => {
+    const seen = new Set<string>()
+    const merged: StudioEntry[] = []
+    const push = (entry: StudioEntry) => {
+      if (!entry.id) return
+      if (seen.has(entry.id)) return
+      seen.add(entry.id)
+      merged.push(entry)
+    }
+    selectableEntries.forEach(push)
+    filteredVisualEntries.forEach(push)
+    return merged
+  }, [selectableEntries, filteredVisualEntries])
 
   const selectedEntries = useMemo(
     () => displayEntries.filter((entry) => selectedIds.has(entry.id)),
@@ -2890,17 +2996,17 @@ function StudioModal({ onClose }: { onClose: () => void }) {
     [generatedAtIso]
   )
 
-  const filteredSelectedCount = selectableEntries.reduce(
+  const filteredSelectedCount = selectableAllEntries.reduce(
     (count, entry) => count + (selectedIds.has(entry.id) ? 1 : 0),
     0
   )
-  const hasFilteredEntries = selectableEntries.length > 0
+  const hasFilteredEntries = selectableAllEntries.length > 0
   const allFilteredSelected =
-    hasFilteredEntries && filteredSelectedCount === selectableEntries.length
+    hasFilteredEntries && filteredSelectedCount === selectableAllEntries.length
   const hasPartialFilteredSelection = filteredSelectedCount > 0 && !allFilteredSelected
   const hasSelection = selectedEntries.length > 0
   const hasPreviewSelection = previewSelectedEntries.length > 0
-  const hasAnyEntries = selectableEntries.length > 0
+  const hasAnyEntries = selectableAllEntries.length > 0
 
   useEffect(() => {
     const checkbox = selectAllCheckboxRef.current
@@ -2977,9 +3083,9 @@ function StudioModal({ onClose }: { onClose: () => void }) {
     setSelectedIds((prev) => {
       const next = new Set(prev)
       if (allFilteredSelected) {
-        selectableEntries.forEach((entry) => next.delete(entry.id))
+        selectableAllEntries.forEach((entry) => next.delete(entry.id))
       } else {
-        selectableEntries.forEach((entry) => next.add(entry.id))
+        selectableAllEntries.forEach((entry) => next.add(entry.id))
       }
       return next
     })
@@ -3029,7 +3135,7 @@ function StudioModal({ onClose }: { onClose: () => void }) {
     const updated: StudioEntry[] = []
 
     for (const entry of entriesToHydrate) {
-      if (entry.content || entry.kind === "asset" || !entry.node) {
+      if (entry.content || isVisualAssetEntry(entry) || !entry.node) {
         updated.push(entry)
         continue
       }
@@ -3171,7 +3277,6 @@ function StudioModal({ onClose }: { onClose: () => void }) {
         exportingButton: "Exportando..."
       }
     }
-    console.log("🚀 abrindo modal — ids:", previewItems.map((item) => item.id))
     window.dispatchEvent(new CustomEvent(EXPORT_PREVIEW_OPEN_EVENT, { detail }))
     previewOpenTimerRef.current = window.setTimeout(() => {
       previewOpenedRef.current = true
@@ -3203,13 +3308,6 @@ function StudioModal({ onClose }: { onClose: () => void }) {
     }
     onClose()
   }, [showPreviewOverlay, onClose])
-
-  console.log("DOC:", documentEntries.map((e) => `${e.title} | ${e.type}`))
-  console.log("VIS:", visualEntries.map((e) => `${e.title} | ${e.type}`))
-  console.log("DISPLAY:", displayEntries.map((e) => `${e.title} | ${e.type} | ${e.kind}`))
-  console.log("SELECTABLE:", selectableEntries.map((e) => `${e.title} | ${e.type}`))
-  console.log("FILTERED_VIS:", filteredVisualEntries.map((e) => `${e.title} | ${e.type}`))
-  console.log("FILTERED_DOC:", filteredDocumentEntries.map((e) => `${e.title} | ${e.type}`))
 
   return (
     <div className="studio-modal-stack">
@@ -3299,6 +3397,9 @@ function StudioModal({ onClose }: { onClose: () => void }) {
             {!hasAnyEntries && !isLoading && (
               <div className="source-empty">Nenhum item do Estúdio encontrado.</div>
             )}
+            {selectableEntries.length > 0 && (
+              <div className="source-section-title">Documentos</div>
+            )}
             {selectableEntries.map((entry) => {
               const subtitle =
                 toExcerpt(entry.meta || entry.content || "", 140) || "Resultado do Estudio"
@@ -3321,7 +3422,9 @@ function StudioModal({ onClose }: { onClose: () => void }) {
             {/* excluidos ocultados */}
             {filteredVisualEntries.length > 0 && (
               <>
-                <div className="source-section-title">Visuais</div>
+                <div className={`source-section-title${selectableEntries.length > 0 ? " source-section-title--split" : ""}`}>
+                  Visuais
+                </div>
                 {filteredVisualEntries.map((entry) => (
                   <label key={entry.id} className="source-item">
                     <input
@@ -3335,7 +3438,7 @@ function StudioModal({ onClose }: { onClose: () => void }) {
                       </span>
                       <span className="source-kind">
                         {entry.type ?? "Recurso visual"} ·{" "}
-                        {resolveFileExtension(entry.type ?? "", entry.url ?? "")}
+                        {resolveFileExtension(entry.type ?? "", resolveEntryAssetUrl(entry) ?? "")}
                       </span>
                     </span>
                   </label>
@@ -3473,6 +3576,3 @@ function swallowInteraction(event: {
   const native = event.nativeEvent as Event & { stopImmediatePropagation?: () => void }
   native?.stopImmediatePropagation?.()
 }
-
-
-
