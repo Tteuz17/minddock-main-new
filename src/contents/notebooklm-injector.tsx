@@ -13,7 +13,10 @@ import { AgilePromptsBar } from "../../contents/notebooklm/AgilePromptsBar"
 import { ConversationExportMenu } from "../../contents/notebooklm/ConversationExportMenu"
 import { FocusThreadsBar } from "../../contents/notebooklm/FocusThreadsBar"
 import { SourceDownloadPanel } from "../../contents/notebooklm/SourceDownloadPanel"
+import { SourcePreviewPanel } from "../../contents/notebooklm/SourcePreviewPanel"
+import { ExportPreviewPanel } from "../../contents/notebooklm/ExportPreviewPanel"
 import { SourceFilterPanel } from "../../contents/notebooklm/SourceFilterPanel"
+import { StudioExportButton } from "../../contents/notebooklm/StudioExportButton"
 import { ZettelButton } from "../../contents/notebooklm/ZettelButton"
 import "~/content/features/VoiceInput/voiceInputInjector"
 import {
@@ -24,7 +27,8 @@ import {
   getDeepRoots,
   isVisible,
   resolveSourceActionsHost,
-  resolveSourceFiltersHost
+  resolveSourceFiltersHost,
+  resolveStudioExportAnchor
 } from "../../contents/notebooklm/sourceDom"
 
 export const config: PlasmoCSConfig = {
@@ -36,7 +40,7 @@ type InsertMode = "prepend" | "after" | "before"
 type DisplayMode = "contents" | "block"
 
 interface InjectionTarget {
-  key: "source-actions" | "source-filters" | "conversation-export"
+  key: "source-actions" | "source-filters" | "conversation-export" | "studio-export"
   rootId: string
   insertMode: InsertMode
   display: DisplayMode
@@ -167,6 +171,14 @@ const TARGETS: readonly InjectionTarget[] = [
     render: () => <ConversationExportMenu />
   },
   {
+    key: "studio-export",
+    rootId: "minddock-studio-export-root",
+    insertMode: "before",
+    display: "contents",
+    resolveHost: resolveStudioExportAnchor,
+    render: () => <StudioExportButton />
+  },
+  {
     key: "source-actions",
     rootId: "minddock-source-actions-root",
     insertMode: "prepend",
@@ -187,6 +199,7 @@ const TARGETS: readonly InjectionTarget[] = [
 const mountedRoots = new Map<string, MountedRootRecord>()
 const AGILE_BAR_ROOT_ID = "minddock-agile-bar-root"
 const FOCUS_THREADS_ROOT_ID = "minddock-focus-threads-root"
+const PREVIEW_PANEL_ROOT_ID = "minddock-preview-panel-root"
 
 let domObserver: MutationObserver | null = null
 let refreshTimer: number | null = null
@@ -196,8 +209,19 @@ let zettelObserver: MutationObserver | null = null
 let sourceFilterApplyDepth = 0
 let sourceFilterApplyLockUntil = 0
 let isSourceDownloadModalOpen = false
+let isSourceCriticalOperationActive = false
+let sourceCriticalOperationLockUntil = 0
 const ENABLE_NOTEBOOK_HIGHLIGHT_CLIPPER = false
 const INJECTOR_GLOBAL_KEY = "__MINDDOCK_NOTEBOOKLM_INJECTOR_STATE__"
+
+export function setSourceCriticalOperation(active: boolean): void {
+  isSourceCriticalOperationActive = active
+  if (active) {
+    sourceCriticalOperationLockUntil = Date.now() + 3000
+  } else {
+    sourceCriticalOperationLockUntil = 0
+  }
+}
 
 function resolveGlobalState(): NotebooklmInjectorGlobalState {
   const globalRecord = window as typeof window & Record<string, unknown>
@@ -362,6 +386,14 @@ function renderSafely(targetKey: string, renderFn: () => ReactNode): ReactNode {
 }
 
 function cleanupDetachedRoots(): void {
+  if (
+    isSourceDownloadModalOpen ||
+    isSourceCriticalOperationActive ||
+    Date.now() < sourceCriticalOperationLockUntil
+  ) {
+    return
+  }
+
   for (const [key, mounted] of mountedRoots.entries()) {
     if (mounted.host.isConnected && mounted.container.isConnected) {
       continue
@@ -399,12 +431,16 @@ function shouldSkipRefreshForMutations(mutations: MutationRecord[]): boolean {
     return true
   }
 
+  if (isSourceCriticalOperationActive || Date.now() < sourceCriticalOperationLockUntil) {
+    return true
+  }
+
   if (isSourceFilterApplyLocked()) {
     return true
   }
 
   const ignoredRootSelector =
-    "#minddock-source-actions-root, #minddock-source-filters-root, [data-minddock-target], [data-minddock-source-overlay='true'], section[role='dialog'][aria-modal='true'][aria-label='Download de fontes'], [data-minddock-source-toast='true']"
+    "#minddock-source-actions-root, #minddock-source-filters-root, [data-minddock-target], [data-minddock-source-overlay='true'], section[role='dialog'][aria-modal='true'][aria-label='Download de fontes'], [data-minddock-source-toast='true'], [data-minddock-shadow-host]"
 
   const allInsideMindDockRoots = mutations.every((record) => {
     const target = record.target instanceof Element ? record.target : null
@@ -464,6 +500,49 @@ function mountAgileBar(): void {
   )
   mountedRoots.set("agile-bar", { root, host: rootElement, container: rootElement })
   updateAgileBarPosition()
+}
+
+function mountPreviewPanel(): void {
+  let rootElement = document.getElementById(PREVIEW_PANEL_ROOT_ID) as HTMLElement | null
+  if (!rootElement) {
+    rootElement = document.createElement("div")
+    rootElement.id = PREVIEW_PANEL_ROOT_ID
+    rootElement.style.position = "fixed"
+    rootElement.style.top = "0"
+    rootElement.style.left = "0"
+    rootElement.style.width = "0"
+    rootElement.style.height = "0"
+    rootElement.style.pointerEvents = "none"
+    document.body.appendChild(rootElement)
+  }
+
+  const mounted = mountedRoots.get("preview-panel")
+  if (mounted) {
+    mounted.root.render(
+      <InjectionErrorBoundary targetKey="preview-panel">
+        {renderSafely("preview-panel", () => (
+          <div>
+            <SourcePreviewPanel />
+            <ExportPreviewPanel />
+          </div>
+        ))}
+      </InjectionErrorBoundary>
+    )
+    return
+  }
+
+  const root = createRoot(rootElement)
+  root.render(
+    <InjectionErrorBoundary targetKey="preview-panel">
+      {renderSafely("preview-panel", () => (
+        <div>
+          <SourcePreviewPanel />
+          <ExportPreviewPanel />
+        </div>
+      ))}
+    </InjectionErrorBoundary>
+  )
+  mountedRoots.set("preview-panel", { root, host: rootElement, container: rootElement })
 }
 
 function resolveVisibleComposerTop(): number | null {
@@ -1256,6 +1335,7 @@ function onHighlightKeyDown(e: KeyboardEvent) {
 function refreshUi(): void {
   mountTargets()
   mountAgileBar()
+  mountPreviewPanel()
   mountFocusThreadsBar()
   updateAgileBarPosition()
   updateFocusThreadsBarPosition()

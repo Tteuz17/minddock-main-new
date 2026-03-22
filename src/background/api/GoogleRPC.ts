@@ -57,7 +57,20 @@ function delay(timeoutMs: number): Promise<void> {
 }
 
 export class GoogleRPC {
-  async execute(rpcId: string, payload: unknown[]): Promise<GoogleRPCResponse> {
+  async execute(
+    rpcId: string,
+    payload: unknown[],
+    options?: {
+      sourcePath?: string
+      fSid?: string
+      hl?: string
+      socApp?: string
+      socPlatform?: string
+      socDevice?: string
+      bl?: string
+      at?: string
+    }
+  ): Promise<GoogleRPCResponse> {
     const normalizedRpcId = String(rpcId ?? "").trim()
     if (!normalizedRpcId) {
       throw new Error("INVALID_RPC_ID")
@@ -72,7 +85,10 @@ export class GoogleRPC {
       tokens = await tokenStorage.getTokens()
     }
 
-    if (!tokens?.at || !tokens?.bl) {
+    const atToken = options?.at ?? tokens?.at
+    const blToken = options?.bl ?? tokens?.bl
+
+    if (!atToken || !blToken) {
       throw new Error("MISSING_AUTH")
     }
 
@@ -82,11 +98,20 @@ export class GoogleRPC {
 
     const requestUrl = new URL(ENDPOINT)
     requestUrl.searchParams.set("rpcids", normalizedRpcId)
-    requestUrl.searchParams.set("bl", tokens.bl)
-    requestUrl.searchParams.set("source-path", "/")
+    requestUrl.searchParams.set("bl", blToken)
+    const sourcePath = options?.sourcePath ?? "/"
+    requestUrl.searchParams.set("source-path", sourcePath)
     requestUrl.searchParams.set("rt", "c")
+    if (options?.fSid) requestUrl.searchParams.set("f.sid", options.fSid)
+    if (options?.hl) requestUrl.searchParams.set("hl", options.hl)
+    if (options?.socApp) requestUrl.searchParams.set("soc-app", options.socApp)
+    if (options?.socPlatform) requestUrl.searchParams.set("soc-platform", options.socPlatform)
+    if (options?.socDevice) requestUrl.searchParams.set("soc-device", options.socDevice)
+    if (options?.bl) {
+      requestUrl.searchParams.set("bl", options.bl)
+    }
 
-    if (tokens.authUser && String(tokens.authUser).trim()) {
+    if (tokens?.authUser && String(tokens.authUser).trim()) {
       requestUrl.searchParams.set("authuser", String(tokens.authUser).trim())
     }
 
@@ -101,7 +126,7 @@ export class GoogleRPC {
         credentials: "include",
         body: new URLSearchParams({
           "f.req": requestPayload,
-          at: tokens.at
+          at: atToken
         })
       })
     } catch (error) {

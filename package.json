@@ -1,19 +1,21 @@
 {
   "name": "minddock",
   "displayName": "MindDock — NotebookLM Supercharged",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "Transforma o Google NotebookLM num centro de conhecimento completo com importação de IA, Zettelkasten e Prompts Ágeis.",
   "private": true,
   "scripts": {
     "postinstall": "node scripts/patch-framer-motion-poplayout.cjs",
-    "predev": "node scripts/patch-framer-motion-poplayout.cjs",
-    "dev": "node --no-deprecation ./node_modules/plasmo/bin/index.mjs dev",
-    "prebuild": "node scripts/patch-framer-motion-poplayout.cjs",
-    "build": "node --no-deprecation ./node_modules/plasmo/bin/index.mjs build",
-    "prepackage": "node scripts/patch-framer-motion-poplayout.cjs",
-    "package": "node --no-deprecation ./node_modules/plasmo/bin/index.mjs package",
+    "predev": "node scripts/patch-framer-motion-poplayout.cjs && node scripts/check-required-env.cjs",
+    "dev": "node scripts/run-plasmo.cjs dev",
+    "prebuild": "node scripts/patch-framer-motion-poplayout.cjs && node scripts/check-required-env.cjs",
+    "build": "node scripts/run-plasmo.cjs build",
+    "prepackage": "node scripts/patch-framer-motion-poplayout.cjs && node scripts/check-required-env.cjs",
+    "package": "node scripts/run-plasmo.cjs package",
     "type-check": "tsc -p tsconfig.json --noEmit",
-    "verify": "npm run type-check && npm run build"
+    "test:auth-invariants": "node scripts/test-auth-invariants.cjs",
+    "test:network-lifecycle": "tsc -p tsconfig.network-tests.json && node .tmp-network-tests/tests/network/ExternalAuthLifecycleHandler.test.js",
+    "verify": "npm run test:auth-invariants && npm run type-check && npm run build"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.27.3",
@@ -45,7 +47,8 @@
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "tailwind-merge": "^3.5.0",
-    "vis-network": "^9.1.9"
+    "vis-network": "^9.1.9",
+    "youtube-transcript": "^1.3.0"
   },
   "devDependencies": {
     "@ianvs/prettier-plugin-sort-imports": "^4.3.1",
@@ -61,6 +64,7 @@
     "typescript": "^5.9.3"
   },
   "manifest": {
+    "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtQunBgNHhj5fQuW6YahCrtRhik5mbvLnViF9TV3qPZ332zh3BuPNgizvQbHwMXJs9e3t43lBBHJuQ3YlrqOaTCNU5WxgPh8tNk2UmGfcfcpyDto5fRE7H/Vtw/W0n56Ym+D6j25mWSrl5KrZzr7ctAL2dtw2pLevGGYEqP1khkmcDv4BNDEUZsOKoDctXDgU8j3JFQVkl1Ulkamgh3RvEPZ7ybJlUkrVh7sXUpUwqShBjbXw6t9dW1iQiRkX8irxg0ptES/EUZkOf9WzwFYwqkjx/EBQK8oibPohlWXpxof8G8juo4Uhl6Zf1bjsHb6egKAVKWq5QI/HUbd8fdTZjwIDAQAB",
     "icons": {
       "16": "../public/images/logo/logotipo minddock.png",
       "32": "../public/images/logo/logotipo minddock.png",
@@ -77,10 +81,14 @@
       }
     },
     "permissions": [
+      "scripting",
+      "sidePanel",
       "identity",
       "storage",
+      "tabs",
       "activeTab",
-      "offscreen"
+      "offscreen",
+      "cookies"
     ],
     "oauth2": {
       "client_id": "1094872455786-h89pq4vphut3t10sjihcktjqvlfk2bi5.apps.googleusercontent.com",

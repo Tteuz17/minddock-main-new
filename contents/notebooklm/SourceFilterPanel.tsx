@@ -7,11 +7,12 @@ import {
   Image,
   LayoutGrid,
   ListFilter,
+  Folder,
   Music,
   RefreshCw,
+  SquareCheck,
   Save,
   Search,
-  SquareCheck,
   Trash2,
   X,
   Youtube
@@ -667,11 +668,11 @@ export function SourceFilterPanel() {
                 title={uiCopy.sourceGroupsTitle}
                 onClick={toggleSavedSourceGroupsMenu}
                 active={isGroupsMenuOpen}>
-                <SquareCheck size={15} strokeWidth={1.8} />
+                <Folder size={15} strokeWidth={1.8} />
               </PanelActionButton>
               {isGroupsMenuOpen ? (
-                <div className="absolute right-0 top-[calc(100%+8px)] z-[9999] w-[310px] rounded-[16px] border border-white/[0.08] bg-[#0d1015] p-2 shadow-[0_18px_40px_rgba(0,0,0,0.45)]">
-                  <div className="mb-2 flex items-center gap-2 rounded-[11px] border border-white/[0.08] bg-[#0a0d12] px-2.5 py-2">
+                <div className="absolute right-0 top-[calc(100%+8px)] z-[9999] w-[310px] rounded-[16px] border border-white/[0.14] bg-black p-2 shadow-[0_18px_40px_rgba(0,0,0,0.56)]">
+                  <div className="mb-2 flex items-center gap-2 rounded-[11px] border border-white/[0.12] bg-[#0a0a0a] px-2.5 py-2">
                     <Search size={13} strokeWidth={1.8} className="text-[#7f8794]" />
                     <input
                       type="search"
@@ -688,7 +689,7 @@ export function SourceFilterPanel() {
                       filteredNotebookSavedGroups.map((group) => (
                         <div
                           key={group.id}
-                          className="group relative rounded-[10px] border border-transparent transition-colors hover:border-white/[0.08] hover:bg-[#131823]">
+                          className="group relative rounded-[10px] border border-transparent transition-colors hover:border-white/[0.12] hover:bg-[#131313]">
                           <button
                             type="button"
                             onClick={() => applySavedSelectionGroup(group.id)}
@@ -1732,7 +1733,7 @@ function isControlSnapshot(snapshot: string): boolean {
     return true
   }
 
-  return /search sources|filtrar fontes|filter sources|save view|salvar visualizacao|source groups|grupos de fontes|download sources|baixar fontes|export visible sources|refresh google docs sources|atualizar fontes do google docs|clear filters and reset panel/.test(
+  return /search sources|filtrar fontes|filter sources|save view|salvar visualizacao|salvar grupo|source groups|grupos de fontes|download sources|baixar fontes|export visible sources|refresh google docs sources|atualizar fontes do google docs|clear filters and reset panel/.test(
     snapshot
   )
 }
@@ -1802,7 +1803,7 @@ function isIgnoredUiRow(row: HTMLElement): boolean {
 
   const normalizedText = normalizeSnapshotValue(String(row.innerText || row.textContent || ""))
   if (
-    /adicionar fontes|add sources|search sources|filtrar fontes|save view|salvar visualizacao|source groups|grupos de fontes|export visible sources|download sources|baixar fontes|refresh google docs sources|atualizar fontes do google docs|clear filters and reset panel/.test(
+    /adicionar fontes|add sources|search sources|filtrar fontes|save view|salvar visualizacao|salvar grupo|source groups|grupos de fontes|export visible sources|download sources|baixar fontes|refresh google docs sources|atualizar fontes do google docs|clear filters and reset panel/.test(
       normalizedText
     )
   ) {

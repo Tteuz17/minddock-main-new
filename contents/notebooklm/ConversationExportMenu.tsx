@@ -5,21 +5,21 @@ import {
   Code2,
   Copy,
   Download,
-  Eye,
   File,
   FileCode2,
   FileText,
   Loader2,
   Wand2,
-  X
+  type LucideIcon
 } from "lucide-react"
 import { zipSync } from "fflate"
 import { DocsExportAction } from "~/content/features/Export/DocsExportAction"
 import { NotionExportAction } from "~/content/features/Export/NotionExportAction"
 import { base64ToBytes } from "~/lib/base64-bytes"
 import { MESSAGE_ACTIONS, type StandardResponse } from "~/lib/contracts"
-import { buildDocxBytesFromText, triggerDownload } from "~/lib/source-download"
+import { buildDocxBytesFromText, buildMindDuckFilenameBase, triggerDownload } from "~/lib/source-download"
 import { showMindDockToast } from "../common/minddock-ui"
+import { PreviewExportModal } from "./PreviewExportModal"
 import {
   captureVisibleMessages,
   isVisible,
@@ -31,7 +31,7 @@ type ExportFormat = "markdown" | "html" | "text" | "word" | "epub" | "pdf" | "js
 interface FormatOption {
   id: ExportFormat
   label: string
-  icon: typeof FileCode2
+  icon: LucideIcon
 }
 
 interface ExportTurn {
@@ -759,9 +759,6 @@ export function ConversationExportMenu() {
                 )}
                 <span>Preview and edit</span>
               </span>
-              <span className="rounded-full border border-black/55 bg-black/85 px-2 py-[1px] text-[10px] font-semibold tracking-[0.04em] text-[#facc15]">
-                PRO
-              </span>
             </button>
 
             <div className="rounded-[14px] border border-white/[0.08] bg-[#050505] p-2">
@@ -840,11 +837,13 @@ export function ConversationExportMenu() {
           text={previewText}
           renderState={previewRenderState}
           busy={isPreviewExporting}
+          formatOptions={FORMAT_OPTIONS}
           onTextChange={setPreviewText}
           onChangeFormat={setPreviewFormat}
           onClose={handleClosePreviewEditor}
           onReset={handleResetPreviewEditor}
           onExport={handleExportFromPreview}
+          formatExportTimestamp={formatExportTimestamp}
         />
       ) : null}
     </div>
@@ -895,166 +894,6 @@ function MenuToggleRow(props: MenuToggleRowProps) {
           ].join(" ")}
         />
       </button>
-    </div>
-  )
-}
-
-interface PreviewExportModalProps {
-  title: string
-  generatedAtIso: string
-  format: ExportFormat
-  text: string
-  renderState: ModalPreviewRenderState
-  busy: boolean
-  onTextChange: (value: string) => void
-  onChangeFormat: (format: ExportFormat) => void
-  onClose: () => void
-  onReset: () => void
-  onExport: () => void
-}
-
-function PreviewExportModal(props: PreviewExportModalProps) {
-  const {
-    title,
-    generatedAtIso,
-    format,
-    text,
-    renderState,
-    busy,
-    onTextChange,
-    onChangeFormat,
-    onClose,
-    onReset,
-    onExport
-  } = props
-
-  return (
-    <div
-      className="fixed inset-0 z-[2147483647] flex items-center justify-center bg-[#070b12]/80 p-4 backdrop-blur-[2px]"
-      onMouseDown={stopEventPropagation}
-      onClick={(event) => {
-        if (event.target === event.currentTarget) {
-          onClose()
-        }
-      }}>
-      <section
-        role="dialog"
-        aria-modal="true"
-        aria-label="Preview and edit export"
-        onMouseDown={stopEventPropagation}
-        className="flex h-[min(82vh,760px)] w-[min(1100px,96vw)] flex-col overflow-hidden rounded-[18px] border border-white/[0.11] bg-[#0d131d] shadow-[0_24px_56px_rgba(0,0,0,0.54)]">
-        <header className="border-b border-white/[0.08] bg-[#101824] px-4 py-3">
-          <div className="flex items-start justify-between gap-3">
-            <div className="min-w-0">
-              <h3 className="truncate text-[14px] font-semibold text-[#e9edf7]">Preview and edit</h3>
-              <p className="mt-0.5 truncate text-[12px] text-[#9ca8bf]">
-                {title} · {formatExportTimestamp(generatedAtIso)}
-              </p>
-            </div>
-            <button
-              type="button"
-              title="Close"
-              onClick={onClose}
-              className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-[8px] border border-white/[0.1] bg-[#111b29] text-[#b7c2d8] transition-colors hover:bg-[#1a2536] hover:text-white">
-              <X size={14} strokeWidth={2} />
-            </button>
-          </div>
-          <div className="mt-3 flex flex-wrap gap-1.5">
-            {FORMAT_OPTIONS.map((option) => {
-              const Icon = option.icon
-              const selected = option.id === format
-              return (
-                <button
-                  key={`preview-format-${option.id}`}
-                  type="button"
-                  onClick={() => onChangeFormat(option.id)}
-                  className={[
-                    "inline-flex h-7 items-center gap-1.5 rounded-[9px] border px-2.5 text-[12px] font-medium transition-colors",
-                    selected
-                      ? "border-[#8ab4f8]/50 bg-[#18253a] text-[#dce8ff]"
-                      : "border-white/[0.08] bg-[#101722] text-[#adb7ca] hover:bg-[#151f2e] hover:text-[#e7edf9]"
-                  ].join(" ")}>
-                  <Icon size={12} strokeWidth={2} />
-                  <span translate={option.id === "word" || option.id === "epub" ? "no" : "yes"}>{option.label}</span>
-                </button>
-              )
-            })}
-          </div>
-        </header>
-
-        <div className="grid min-h-0 flex-1 grid-cols-1 gap-0 border-t border-white/[0.04] md:grid-cols-2">
-          <div className="min-h-0 border-b border-white/[0.07] bg-[#0d141f] md:border-b-0 md:border-r">
-            <div className="flex h-full min-h-0 flex-col">
-              <div className="border-b border-white/[0.08] px-4 py-2 text-[12px] font-medium text-[#9eabc0]">Editor</div>
-              <textarea
-                value={text}
-                onChange={(event) => onTextChange(event.target.value)}
-                spellCheck={false}
-                className="h-full min-h-0 w-full resize-none bg-transparent px-4 py-3 text-[13px] leading-relaxed text-[#dce4f2] outline-none placeholder:text-[#6f7f97]"
-              />
-            </div>
-          </div>
-
-          <div className="min-h-0 bg-[#0a111a]">
-            <div className="flex h-full min-h-0 flex-col">
-              <div className="border-b border-white/[0.08] px-4 py-2 text-[12px] font-medium text-[#9eabc0]">Preview</div>
-              <div className="min-h-0 flex-1 overflow-auto px-4 py-3">
-                {renderState.error ? <p className="mb-2 text-[12px] text-[#fca5a5]">{renderState.error}</p> : null}
-                {renderState.mode === "html" ? (
-                  <div
-                    className="prose prose-invert max-w-none text-[13px] text-[#dbe4f5] [&_a]:text-[#93c5fd] [&_code]:rounded [&_code]:bg-[#162238] [&_code]:px-1 [&_code]:py-0.5 [&_h1]:text-[22px] [&_h2]:text-[18px] [&_h3]:text-[15px] [&_li]:my-1 [&_pre]:rounded-[10px] [&_pre]:bg-[#0e1828] [&_pre]:p-3 [&_pre_code]:bg-transparent [&_pre_code]:p-0 [&_ul]:pl-5"
-                    dangerouslySetInnerHTML={{ __html: renderState.html }}
-                  />
-                ) : (
-                  <pre className="whitespace-pre-wrap break-words text-[13px] leading-relaxed text-[#dbe4f5]">{renderState.text}</pre>
-                )}
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <footer className="flex items-center justify-between border-t border-white/[0.08] bg-[#0f1724] px-4 py-3">
-          <button
-            type="button"
-            onClick={onReset}
-            disabled={busy}
-            className={[
-              "inline-flex h-8 items-center rounded-[9px] border px-3 text-[12px] font-medium transition-colors",
-              busy
-                ? "cursor-not-allowed border-white/[0.08] bg-[#101722] text-[#7f8aa0] opacity-70"
-                : "border-white/[0.1] bg-[#121b29] text-[#cad5e8] hover:bg-[#182436] hover:text-white"
-            ].join(" ")}>
-            Reset
-          </button>
-          <div className="inline-flex items-center gap-2">
-            <button
-              type="button"
-              onClick={onClose}
-              disabled={busy}
-              className={[
-                "inline-flex h-8 items-center rounded-[9px] border px-3 text-[12px] font-medium transition-colors",
-                busy
-                  ? "cursor-not-allowed border-white/[0.08] bg-[#101722] text-[#7f8aa0] opacity-70"
-                  : "border-white/[0.1] bg-[#121b29] text-[#cad5e8] hover:bg-[#182436] hover:text-white"
-              ].join(" ")}>
-              Close
-            </button>
-            <button
-              type="button"
-              onClick={onExport}
-              disabled={busy}
-              className={[
-                "inline-flex h-8 min-w-[118px] items-center justify-center gap-2 rounded-[9px] border px-3 text-[12px] font-semibold transition-colors",
-                busy
-                  ? "cursor-not-allowed border-[#8ab4f8]/35 bg-[#18335c] text-[#d4e3fd] opacity-75"
-                  : "border-[#8ab4f8]/45 bg-[#1d3d69] text-[#e6f0ff] hover:bg-[#274b7d]"
-              ].join(" ")}>
-              {busy ? <Loader2 size={13} strokeWidth={2} className="animate-spin" /> : <Download size={13} strokeWidth={2} />}
-              <span>Export</span>
-            </button>
-          </div>
-        </footer>
-      </section>
     </div>
   )
 }
@@ -1401,9 +1240,11 @@ function buildEpubBytes(options: EpubBuildOptions): Uint8Array {
   ].join("\n")
 
   const css = [
-    "body{font-family:'Segoe UI',Arial,sans-serif;color:#111827;line-height:1.65;margin:0;padding:1.2rem;}",
-    "h1,h2,h3{line-height:1.3;margin:1rem 0 .6rem;}",
-    "p{margin:.55rem 0;}",
+    "body{font-family:'Segoe UI',Arial,sans-serif;color:#111827;line-height:1.65;margin:0;padding:.7rem 1rem 1rem;}",
+    "h1{font-size:1.4rem;line-height:1.25;margin:.4rem 0 .6rem;}",
+    "h2{font-size:1.05rem;line-height:1.3;margin:.6rem 0 .4rem;}",
+    "h3{font-size:.98rem;line-height:1.3;margin:.5rem 0 .35rem;}",
+    "p{margin:.5rem 0;}",
     "ul,ol{margin:.4rem 0 .7rem 1.2rem;}",
     "pre{background:#f3f4f6;border:1px solid #e5e7eb;border-radius:.45rem;padding:.75rem;overflow:auto;white-space:pre-wrap;}",
     "code{background:#f3f4f6;border-radius:.3rem;padding:.08rem .3rem;}",
@@ -1435,7 +1276,9 @@ function buildEpubBytes(options: EpubBuildOptions): Uint8Array {
 }
 
 function buildEpubChapterDocument(chapter: EpubChapter, language: string): string {
-  const chapterBody = chapter.htmlFragment.trim() || "<p>No content.</p>"
+  const rawBody = chapter.htmlFragment.trim() || "<p>No content.</p>"
+  const hasInlineTitle = /^\s*<h1\b/i.test(rawBody)
+  const chapterBody = rawBody
   return [
     "<?xml version=\"1.0\" encoding=\"utf-8\"?>",
     "<!DOCTYPE html>",
@@ -1447,7 +1290,7 @@ function buildEpubChapterDocument(chapter: EpubChapter, language: string): strin
     "</head>",
     "<body>",
     `  <section id="${escapeXml(chapter.id)}">`,
-    `    <h1>${escapeXml(chapter.title)}</h1>`,
+    hasInlineTitle ? "" : `    <h1>${escapeXml(chapter.title)}</h1>`,
     `    ${chapterBody}`,
     "  </section>",
     "</body>",
@@ -2517,15 +2360,7 @@ function formatExportTimestamp(isoDate: string): string {
 }
 
 function buildFilenameBase(title: string): string {
-  const slug = String(title ?? "")
-    .normalize("NFKD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 64)
-
-  return `minddock-chat-${slug || "notebooklm"}-${Date.now()}`
+  return buildMindDuckFilenameBase("Chat", title)
 }
 
 function resolveStableTurnKey(anchor: HTMLElement, userContent?: string, assistantContent?: string): string {
@@ -2925,7 +2760,17 @@ function insertSelectionButtonNearAnchor(
     if (selectionButton.parentElement === actionHost && selectionButton.nextSibling === anchorControl) {
       return
     }
-    actionHost.insertBefore(selectionButton, anchorControl)
+    try {
+      actionHost.insertBefore(selectionButton, anchorControl)
+    } catch {
+      // NotebookLM re-renders quickly; if the anchor moved between checks,
+      // fall back to appending instead of throwing a DOMException.
+      try {
+        actionHost.appendChild(selectionButton)
+      } catch {
+        // Ignore: host might be in flux during virtualization.
+      }
+    }
     return
   }
 

@@ -14,8 +14,11 @@ export const config: PlasmoCSConfig = {
 
 const MESSAGE_SOURCE = "MINDDOCK_HOOK"
 const MESSAGE_TYPE = "NOTEBOOK_LIST_UPDATED"
+const STUDIO_MESSAGE_TYPE = "STUDIO_RESULTS_UPDATED"
 const STORAGE_KEY_BASE = "minddock_cached_notebooks"
 const STORAGE_SYNC_KEY_BASE = "minddock_cached_notebooks_synced_at"
+const STUDIO_STORAGE_KEY_BASE = "minddock_cached_studio_items"
+const STUDIO_STORAGE_SYNC_KEY_BASE = "minddock_cached_studio_items_synced_at"
 const AUTH_USER_KEY = "nexus_auth_user"
 const ACCOUNT_EMAIL_KEY = "nexus_notebook_account_email"
 const PENDING_NOTEBOOK_RESULT_KEY = "minddock_pending_notebook_result"
@@ -32,6 +35,19 @@ export interface NotebookEntry {
   id: string
   title: string
   provisional?: boolean
+}
+
+export interface StudioCacheItem {
+  id: string
+  title: string
+  type?: string
+  meta?: string
+  content?: string
+  url?: string
+  mimeType?: string
+  sourceCount?: number
+  updatedAt?: string
+  kind?: "text" | "asset"
 }
 
 interface BridgeEnvelope {
@@ -60,6 +76,14 @@ function isBlockedNotebookTitle(value: string): boolean {
 }
 
 function isNotebookEntry(value: unknown): value is NotebookEntry {
+  if (!isObjectRecord(value)) {
+    return false
+  }
+
+  return normalizeString(value.id).length > 0 && normalizeString(value.title).length > 0
+}
+
+function isStudioCacheItem(value: unknown): value is StudioCacheItem {
   if (!isObjectRecord(value)) {
     return false
   }
@@ -128,6 +152,44 @@ function resolveNotebookEntries(payload: unknown): NotebookEntry[] | null {
   }
 
   return Array.from(notebooks.values())
+}
+
+function resolveStudioEntries(payload: unknown): StudioCacheItem[] | null {
+  if (!Array.isArray(payload)) {
+    return null
+  }
+
+  const items: StudioCacheItem[] = []
+
+  for (const candidate of payload) {
+    if (!isStudioCacheItem(candidate)) {
+      return null
+    }
+
+    const item: StudioCacheItem = {
+      id: normalizeString(candidate.id),
+      title: normalizeString(candidate.title),
+      type: normalizeString(candidate.type) || undefined,
+      meta: normalizeString(candidate.meta) || undefined,
+      content: normalizeString(candidate.content) || undefined,
+      url: normalizeString(candidate.url) || undefined,
+      mimeType: normalizeString(candidate.mimeType) || undefined,
+      sourceCount: typeof candidate.sourceCount === "number" ? candidate.sourceCount : undefined,
+      updatedAt: normalizeString(candidate.updatedAt) || undefined,
+      kind:
+        candidate.kind === "asset" || candidate.kind === "text"
+          ? candidate.kind
+          : undefined
+    }
+
+    if (!item.id || !item.title) {
+      continue
+    }
+
+    items.push(item)
+  }
+
+  return items
 }
 
 function resolvePendingCreatedNotebook(payload: unknown, requestedAtValue: unknown): NotebookEntry | null {
@@ -216,6 +278,13 @@ function logNotebookSync(notebooks: NotebookEntry[]): void {
   console.groupEnd()
 }
 
+function logStudioSync(items: StudioCacheItem[]): void {
+  console.group("âš“ MindDock Bridge Debug (Studio)")
+  console.log("Quantidade:", items.length)
+  console.table(items)
+  console.groupEnd()
+}
+
 function persistNotebookCache(
   notebooks: NotebookEntry[],
   accountHints?: {
@@ -281,27 +350,80 @@ function persistNotebookCache(
   }
 }
 
+function persistStudioCache(
+  items: StudioCacheItem[],
+  accountHints?: {
+    accountEmail?: unknown
+    authUser?: unknown
+  }
+): void {
+  try {
+    const syncedAt = new Date().toISOString()
+    const accountScope = resolveCurrentAccountScope(accountHints)
+    if (!accountScope.confirmed) {
+      console.warn("[MindDock Bridge] Cache de Studio com conta nao confirmada; usando escopo provisório.")
+    }
+
+    const scopedStorageKey = buildScopedStorageKey(STUDIO_STORAGE_KEY_BASE, accountScope.accountKey)
+    const scopedSyncKey = buildScopedStorageKey(STUDIO_STORAGE_SYNC_KEY_BASE, accountScope.accountKey)
+
+    chrome.storage.local.set(
+      {
+        [scopedStorageKey]: items,
+        [scopedSyncKey]: syncedAt,
+        ...(accountScope.accountEmail ? { [ACCOUNT_EMAIL_KEY]: accountScope.accountEmail } : {}),
+        ...(accountScope.authUser ? { [AUTH_USER_KEY]: accountScope.authUser } : {})
+      },
+      () => {
+        if (chrome.runtime.lastError) {
+          return
+        }
+
+        notifyCacheUpdated(accountScope.accountKey)
+        logStudioSync(items)
+      }
+    )
+  } catch {
+    // Silent by design: the page must not be affected by extension errors.
+  }
+}
+
 function handleBridgeMessage(event: MessageEvent<unknown>): void {
   try {
     if (!isTrustedBridgeEvent(event)) {
       return
     }
 
-    if (normalizeString(event.data.type) !== MESSAGE_TYPE) {
+    const messageType = normalizeString(event.data.type)
+    if (messageType === MESSAGE_TYPE) {
+      const payloadEnvelope =
+        isObjectRecord(event.data.payload) && !Array.isArray(event.data.payload)
+          ? (event.data.payload as { notebooks?: unknown; accountEmail?: unknown; authUser?: unknown })
+          : null
+      const notebooksPayload = payloadEnvelope ? payloadEnvelope.notebooks : event.data.payload
+      const notebooks = resolveNotebookEntries(notebooksPayload)
+      if (notebooks === null) {
+        return
+      }
+
+      persistNotebookCache(notebooks, payloadEnvelope ?? undefined)
       return
     }
 
-    const payloadEnvelope =
-      isObjectRecord(event.data.payload) && !Array.isArray(event.data.payload)
-        ? (event.data.payload as { notebooks?: unknown; accountEmail?: unknown; authUser?: unknown })
-        : null
-    const notebooksPayload = payloadEnvelope ? payloadEnvelope.notebooks : event.data.payload
-    const notebooks = resolveNotebookEntries(notebooksPayload)
-    if (notebooks === null) {
+    if (messageType === STUDIO_MESSAGE_TYPE) {
+      const payloadEnvelope =
+        isObjectRecord(event.data.payload) && !Array.isArray(event.data.payload)
+          ? (event.data.payload as { items?: unknown; accountEmail?: unknown; authUser?: unknown })
+          : null
+      const itemsPayload = payloadEnvelope ? payloadEnvelope.items : event.data.payload
+      const items = resolveStudioEntries(itemsPayload)
+      if (items === null) {
+        return
+      }
+
+      persistStudioCache(items, payloadEnvelope ?? undefined)
       return
     }
-
-    persistNotebookCache(notebooks, payloadEnvelope ?? undefined)
   } catch {
     // Silent by design: the page must not be affected by extension errors.
   }

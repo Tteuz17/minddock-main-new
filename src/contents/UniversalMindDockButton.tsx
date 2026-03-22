@@ -6,6 +6,7 @@ import { ArrowLeft, Book, BookOpen, Check, FolderOpen, Loader2, Plus, RefreshCw,
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react"
 import { createRoot, type Root } from "react-dom/client"
 
+import { SniperUI } from "~/features/youtube-sniper/components/SniperUI"
 import type { AIChatMessage, AIChatPlatform, ChromeMessageResponse } from "~/lib/types"
 import { useNotebookList } from "~/hooks/useNotebookList"
 import { InjectionManager } from "~/contents/strategies/InjectionManager"
@@ -31,6 +32,8 @@ import { showMindDockToast } from "../../contents/common/minddock-ui"
 
 export const config: PlasmoCSConfig = {
   matches: [
+    "https://youtube.com/watch*",
+    "https://*.youtube.com/watch*",
     "https://chat.openai.com/*",
     "https://chatgpt.com/*",
     "https://claude.ai/*",
@@ -207,6 +210,35 @@ const LINKEDIN_ACTION_LABEL_TOKENS = [
   "enviar",
   "send"
 ] as const
+const YOUTUBE_SNIPER_BUTTON_ATTRIBUTE = "data-minddock-youtube-sniper-button"
+const YOUTUBE_SNIPER_BUTTON_ID = "minddock-youtube-sniper-button"
+const YOUTUBE_SNIPER_OVERLAY_HOST_ID = "minddock-youtube-sniper-overlay-host"
+const YOUTUBE_SNIPER_OVERLAY_MOUNT_ID = "minddock-youtube-sniper-overlay-root"
+const YOUTUBE_ACTION_BAR_SELECTORS = [
+  "ytd-watch-metadata #top-level-buttons-computed",
+  "ytd-watch-metadata #top-level-buttons",
+  "#actions #top-level-buttons-computed",
+  "#actions #top-level-buttons",
+  "ytd-video-primary-info-renderer #top-level-buttons-computed",
+  "ytd-video-primary-info-renderer #top-level-buttons"
+] as const
+const YOUTUBE_SHARE_BUTTON_SELECTORS = [
+  "ytd-button-renderer button[aria-label*='Share']",
+  "ytd-button-renderer a[aria-label*='Share']",
+  "ytd-button-renderer button[aria-label*='Compartilhar']",
+  "ytd-button-renderer a[aria-label*='Compartilhar']",
+  "button[aria-label*='Share']",
+  "a[aria-label*='Share']",
+  "button[aria-label*='Compartilhar']",
+  "a[aria-label*='Compartilhar']"
+] as const
+const YOUTUBE_DISLIKE_BUTTON_SELECTORS = [
+  "#dislike-button button",
+  "#dislike-button",
+  "button[aria-label*='dislike']",
+  "button[aria-label*='Não gostei']",
+  "button[aria-label*='Nao gostei']"
+] as const
 
 const HOST_ID = "minddock-universal-button-host"
 const MOUNT_ID = "minddock-universal-button-root"
@@ -226,9 +258,12 @@ const BLOCKED_NOTEBOOK_TITLE_KEYS = new Set([
 
 let mountedRoot: Root | null = null
 let mountedHost: HTMLElement | null = null
+let sniperOverlayRoot: Root | null = null
+let sniperOverlayHost: HTMLElement | null = null
 let bootstrapPromise: Promise<void> | null = null
 let injectionManager: InjectionManager | null = null
 let rebootstrapTimer: number | null = null
+let sniperDefaultNotebookId = ""
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -1339,6 +1374,251 @@ function queryFirstVisibleDescendant(root: ParentNode, selectors: readonly strin
   }
 
   return null
+}
+
+function isYouTubeWatchUrl(rawUrl: string): boolean {
+  try {
+    const parsed = new URL(rawUrl)
+    const host = parsed.hostname.toLowerCase()
+    if (!host.endsWith("youtube.com")) {
+      return false
+    }
+    return parsed.pathname.toLowerCase().startsWith("/watch")
+  } catch {
+    const host = window.location.hostname.toLowerCase()
+    if (!host.endsWith("youtube.com")) {
+      return false
+    }
+    return window.location.pathname.toLowerCase().startsWith("/watch")
+  }
+}
+
+function resolveYouTubeActionBar(): HTMLElement | null {
+  return queryFirstVisibleElement(YOUTUBE_ACTION_BAR_SELECTORS)
+}
+
+function resolveYouTubeButtonWrapper(button: HTMLElement | null): HTMLElement | null {
+  if (!button) {
+    return null
+  }
+  return (
+    (button.closest("ytd-button-renderer") as HTMLElement | null) ||
+    (button.closest("ytd-toggle-button-renderer") as HTMLElement | null) ||
+    button
+  )
+}
+
+function resolveYouTubeShareButtonWrapper(actionBar: ParentNode): HTMLElement | null {
+  const shareButton = queryFirstVisibleDescendant(actionBar, YOUTUBE_SHARE_BUTTON_SELECTORS)
+  return resolveYouTubeButtonWrapper(shareButton)
+}
+
+function resolveYouTubeDislikeButtonWrapper(actionBar: ParentNode): HTMLElement | null {
+  const dislikeButton = queryFirstVisibleDescendant(actionBar, YOUTUBE_DISLIKE_BUTTON_SELECTORS)
+  return resolveYouTubeButtonWrapper(dislikeButton)
+}
+
+function updateYouTubeButtonLabel(root: HTMLElement, label: string): void {
+  const labelNodes = root.querySelectorAll(
+    "#text, .yt-spec-button-shape-next__button-text-content, .yt-core-attributed-string"
+  )
+  if (labelNodes.length === 0) {
+    return
+  }
+  labelNodes.forEach((node) => {
+    node.textContent = label
+  })
+}
+
+function updateYouTubeButtonIcon(root: HTMLElement): void {
+  const iconCandidate =
+    root.querySelector("yt-icon") ??
+    root.querySelector(".yt-icon-container") ??
+    root.querySelector("svg") ??
+    root.querySelector("img")
+
+  if (!iconCandidate) {
+    return
+  }
+
+  const logo = document.createElement("img")
+  logo.src = MINDDOCK_BUTTON_LOGO_SRC
+  logo.alt = "MindDock"
+  logo.style.width = "18px"
+  logo.style.height = "18px"
+  logo.style.objectFit = "contain"
+  logo.style.display = "block"
+
+  if (iconCandidate instanceof SVGElement) {
+    iconCandidate.replaceWith(logo)
+    return
+  }
+
+  if (iconCandidate instanceof HTMLElement) {
+    iconCandidate.innerHTML = ""
+    iconCandidate.appendChild(logo)
+    return
+  }
+
+  iconCandidate.replaceWith(logo as unknown as Node)
+}
+
+function ensureYouTubeButtonGap(
+  sniperButton: HTMLElement,
+  actionBar: HTMLElement,
+  shareWrapper: HTMLElement | null
+): void {
+  const actionStyles = window.getComputedStyle(actionBar)
+  const gapValue = actionStyles.columnGap || actionStyles.gap || "0"
+  const parsedGap = Number.parseFloat(gapValue)
+
+  const shareStyles = shareWrapper ? window.getComputedStyle(shareWrapper) : null
+  const shareMarginLeft = Number.parseFloat(
+    shareStyles?.marginLeft || shareStyles?.marginInlineStart || "0"
+  )
+
+  const existingMarginRight = Number.parseFloat(
+    window.getComputedStyle(sniperButton).marginRight || "0"
+  )
+
+  if (parsedGap > 0 || shareMarginLeft > 0 || existingMarginRight > 0) {
+    return
+  }
+
+  sniperButton.style.marginRight = "8px"
+}
+
+function ensureSniperOverlayMount(): HTMLElement {
+  if (sniperOverlayHost?.isConnected) {
+    const existingMount = sniperOverlayHost.shadowRoot?.querySelector<HTMLElement>(
+      `#${YOUTUBE_SNIPER_OVERLAY_MOUNT_ID}`
+    )
+    if (existingMount) {
+      return existingMount
+    }
+  }
+
+  const host = document.createElement("div")
+  host.id = YOUTUBE_SNIPER_OVERLAY_HOST_ID
+  host.style.position = "fixed"
+  host.style.inset = "0"
+  host.style.zIndex = "2147483647"
+  host.style.pointerEvents = "auto"
+
+  const shadowRoot = host.attachShadow({ mode: "open" })
+  const style = document.createElement("style")
+  style.textContent = shadowCssText
+  shadowRoot.appendChild(style)
+  const mount = document.createElement("div")
+  mount.id = YOUTUBE_SNIPER_OVERLAY_MOUNT_ID
+  shadowRoot.appendChild(mount)
+
+  const parent = document.body ?? document.documentElement
+  parent.appendChild(host)
+
+  sniperOverlayHost = host
+  return mount
+}
+
+function closeSniperOverlay(): void {
+  if (sniperOverlayRoot) {
+    sniperOverlayRoot.unmount()
+    sniperOverlayRoot = null
+  }
+  if (sniperOverlayHost) {
+    sniperOverlayHost.remove()
+    sniperOverlayHost = null
+  }
+}
+
+function openSniperOverlay(): void {
+  const mount = ensureSniperOverlayMount()
+  if (!sniperOverlayRoot) {
+    sniperOverlayRoot = createRoot(mount)
+  }
+
+  sniperOverlayRoot.render(
+    <SniperOverlay onClose={closeSniperOverlay} defaultNotebookId={sniperDefaultNotebookId} />
+  )
+}
+
+function buildYouTubeSniperButton(template: HTMLElement): HTMLElement {
+  const clone = template.cloneNode(true) as HTMLElement
+  clone.id = YOUTUBE_SNIPER_BUTTON_ID
+  clone.setAttribute(YOUTUBE_SNIPER_BUTTON_ATTRIBUTE, "true")
+  clone.removeAttribute("data-command")
+  clone.removeAttribute("data-tooltip-target-id")
+  clone.setAttribute("aria-label", "NotebookLM")
+  clone.setAttribute("title", "NotebookLM")
+
+  const button = clone.querySelector("button, a") as HTMLElement | null
+  const clickTarget = button ?? clone
+  if (button) {
+    button.setAttribute("aria-label", "NotebookLM")
+    button.setAttribute("title", "NotebookLM")
+    button.removeAttribute("aria-pressed")
+    if (button instanceof HTMLButtonElement) {
+      button.type = "button"
+      button.disabled = false
+    }
+    if (button instanceof HTMLAnchorElement) {
+      button.removeAttribute("href")
+      button.removeAttribute("target")
+    }
+  }
+
+  updateYouTubeButtonLabel(clone, "NotebookLM")
+  updateYouTubeButtonIcon(clone)
+
+  clickTarget.addEventListener(
+    "click",
+    (event) => {
+      event.preventDefault()
+      event.stopImmediatePropagation()
+      openSniperOverlay()
+    },
+    true
+  )
+
+  return clone
+}
+
+function injectYouTubeSniperButton(): void {
+  const actionBar = resolveYouTubeActionBar()
+  if (!actionBar) {
+    return
+  }
+
+  if (actionBar.querySelector(`[${YOUTUBE_SNIPER_BUTTON_ATTRIBUTE}]`)) {
+    return
+  }
+
+  const shareWrapper = resolveYouTubeShareButtonWrapper(actionBar)
+  const templateWrapper = shareWrapper ?? resolveYouTubeDislikeButtonWrapper(actionBar)
+  if (!templateWrapper) {
+    return
+  }
+
+  const sniperButton = buildYouTubeSniperButton(templateWrapper)
+  ensureYouTubeButtonGap(sniperButton, actionBar, shareWrapper)
+
+  if (shareWrapper?.parentElement) {
+    shareWrapper.parentElement.insertBefore(sniperButton, shareWrapper)
+    return
+  }
+
+  if (templateWrapper.parentElement) {
+    templateWrapper.parentElement.insertBefore(sniperButton, templateWrapper.nextSibling)
+    return
+  }
+
+  actionBar.appendChild(sniperButton)
+}
+
+function removeYouTubeSniperButton(): void {
+  document.querySelectorAll(`[${YOUTUBE_SNIPER_BUTTON_ATTRIBUTE}]`).forEach((element) => {
+    element.remove()
+  })
 }
 
 function isLinkedInSuggestionsHeadingText(value: string): boolean {
@@ -5802,6 +6082,32 @@ function MenuPanel(props: MenuPanelProps): JSX.Element {
   )
 }
 
+function SniperOverlay({
+  onClose,
+  defaultNotebookId
+}: {
+  onClose: () => void
+  defaultNotebookId: string
+}): JSX.Element {
+  return (
+    <div style={{ position: "fixed", inset: 0, zIndex: 2147483647 }}>
+      <div
+        onClick={onClose}
+        style={{
+          position: "absolute",
+          inset: 0,
+          background: "rgba(0, 0, 0, 0.35)"
+        }}
+      />
+      <div
+        onClick={(event) => event.stopPropagation()}
+        style={{ position: "relative", zIndex: 1 }}>
+        <SniperUI onClose={onClose} defaultNotebookId={defaultNotebookId} />
+      </div>
+    </div>
+  )
+}
+
 function UniversalMindDockButton(): JSX.Element {
   const currentUrl = useUrlWatcher()
   const activeStrategy = useMemo(() => resolveContentStrategy(currentUrl), [currentUrl])
@@ -5815,6 +6121,14 @@ function UniversalMindDockButton(): JSX.Element {
   }, [currentUrl])
   const isInlineTriggerRuntime = isLinkedInRuntime || isRedditRuntime
   const shouldShowForCurrentRoute = useMemo(() => shouldShowMindDockOnXRoute(currentUrl), [currentUrl])
+  const isYouTubeWatch = useMemo(() => isYouTubeWatchUrl(currentUrl), [currentUrl])
+  const isYouTubeHost = useMemo(() => {
+    try {
+      return new URL(currentUrl).hostname.toLowerCase().includes("youtube.com")
+    } catch {
+      return window.location.hostname.toLowerCase().includes("youtube.com")
+    }
+  }, [currentUrl])
 
   const {
     activeNotebookId: repositoryActiveNotebookId,
@@ -5878,16 +6192,60 @@ function UniversalMindDockButton(): JSX.Element {
   }, [isBusy])
 
   useEffect(() => {
+    sniperDefaultNotebookId = effectiveActiveNotebookId
+  }, [effectiveActiveNotebookId])
+
+  useEffect(() => {
     setSelectedLinkedInPostUrn(null)
     setSelectedLinkedInPostRoot(null)
     setSelectedRedditPostRoot(null)
   }, [currentUrl])
 
   useEffect(() => {
+    if (!isYouTubeWatch) {
+      removeYouTubeSniperButton()
+      closeSniperOverlay()
+      return
+    }
+
+    let cancelled = false
+    const ensureInjected = (): void => {
+      if (cancelled) {
+        return
+      }
+      injectYouTubeSniperButton()
+    }
+
+    ensureInjected()
+
+    const observer = new MutationObserver(() => {
+      ensureInjected()
+    })
+
+    if (document.body) {
+      observer.observe(document.body, { childList: true, subtree: true })
+    }
+
+    const intervalId = window.setInterval(ensureInjected, 1000)
+
+    return () => {
+      cancelled = true
+      observer.disconnect()
+      window.clearInterval(intervalId)
+    }
+  }, [currentUrl, isYouTubeWatch])
+
+  useEffect(() => {
     if (!shouldShowForCurrentRoute) {
       setIsMenuOpen(false)
     }
   }, [shouldShowForCurrentRoute])
+
+  useEffect(() => {
+    if (isYouTubeHost) {
+      setIsMenuOpen(false)
+    }
+  }, [isYouTubeHost])
 
   useEffect(() => {
     if (isInlineTriggerRuntime) {
@@ -6425,8 +6783,12 @@ function UniversalMindDockButton(): JSX.Element {
   ])
 
   const isIdleTrigger = captureState === "idle"
-  const shouldRenderFloatingButton = !isInlineTriggerRuntime && shouldShowForCurrentRoute
-  const shouldRenderMenuPanel = (shouldRenderFloatingButton || isInlineTriggerRuntime) && shouldShowForCurrentRoute
+  const shouldRenderFloatingButton =
+    !isInlineTriggerRuntime && shouldShowForCurrentRoute && !isYouTubeHost
+  const shouldRenderMenuPanel =
+    (shouldRenderFloatingButton || isInlineTriggerRuntime) &&
+    shouldShowForCurrentRoute &&
+    !isYouTubeHost
 
   return (
     <div className="fixed z-[2147483646]" ref={containerRef} style={floatingPlacement.style}>
@@ -6541,6 +6903,9 @@ function cleanupUniversalMindDockButton(): void {
     mountedHost.remove()
     mountedHost = null
   }
+
+  removeYouTubeSniperButton()
+  closeSniperOverlay()
 
   injectionManager = null
 }

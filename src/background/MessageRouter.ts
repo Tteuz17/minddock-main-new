@@ -6,6 +6,7 @@ import {
   type NotebookCreateResult
 } from "./services/NotebookService"
 import { tokenStorage } from "./storage/TokenStorage"
+import { fetchStudioArtifactsByIds } from "./studioArtifacts"
 import type { ChromeMessage, ChromeMessageResponse } from "~/lib/types"
 import {
   probeAvailableAccounts,
@@ -957,6 +958,49 @@ export function initializeMessageRouter(): void {
           return true
         }
 
+        case STUDIO_FETCH_MESSAGE: {
+          try {
+            const { ids, notebookId, forceRefresh, rpcContext } = normalizeStudioArtifactRequest(message)
+            console.warn("[MindDock][BG] fetch studio ids:", ids, "force:", forceRefresh)
+            Promise.resolve(fetchStudioArtifactsByIds(ids, notebookId, { forceRefresh, rpcContext }))
+              .then((items) => {
+                sendResponse({
+                  success: true,
+                  artifacts: items,
+                  items,
+                  payload: { items },
+                  data: { items }
+                })
+              })
+              .catch((error) => {
+                sendResponse({
+                  success: false,
+                  error: resolveErrorMessage(error),
+                  artifacts: [],
+                  items: [],
+                  payload: { items: [] },
+                  data: { items: [] }
+                })
+              })
+          } catch (error) {
+            sendResponse({
+              success: false,
+              error: resolveErrorMessage(error),
+              artifacts: [],
+              items: [],
+              payload: { items: [] },
+              data: { items: [] }
+            })
+          }
+          return true
+        }
+
+        case "BG_LOG": {
+          console.warn("[BG_LOG]", message?.data ?? message)
+          sendResponse?.({ ok: true })
+          return true
+        }
+
         default: {
           const legacyCommand = String(message?.command ?? "").trim()
           if (legacyCommand) {
@@ -976,4 +1020,31 @@ export function initializeMessageRouter(): void {
   )
 
   messageRouterInitialized = true
+}
+
+const STUDIO_FETCH_MESSAGE = "MINDDOCK_FETCH_STUDIO_ARTIFACTS"
+
+function normalizeStudioArtifactRequest(message: IncomingMessage): {
+  ids: string[]
+  notebookId?: string
+  forceRefresh?: boolean
+  rpcContext?: Record<string, unknown>
+} {
+  const payload = message?.payload && typeof message.payload === "object" ? message.payload : undefined
+  const data = message?.data && typeof message.data === "object" ? message.data : undefined
+  const source = (payload ?? data ?? {}) as Record<string, unknown>
+
+  const ids = Array.isArray(source.ids) ? source.ids : []
+  const notebookId = typeof source.notebookId === "string" ? source.notebookId : undefined
+  const forceRefresh = Boolean(source.forceRefresh)
+  const rpcContext =
+    source.rpcContext && typeof source.rpcContext === "object"
+      ? (source.rpcContext as Record<string, unknown>)
+      : undefined
+  return {
+    ids: ids.filter((id: unknown) => typeof id === "string"),
+    notebookId,
+    forceRefresh,
+    rpcContext
+  }
 }

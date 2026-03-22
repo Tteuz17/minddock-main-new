@@ -62,6 +62,7 @@ class AuthManager {
       return profile
     }
 
+    // Sem sessao Supabase: limpa estado local e notifica logout.
     await removeFromSecureStorage(FIXED_STORAGE_KEYS.SUPABASE_SESSION)
     await removeFromStorage(STORAGE_KEYS.USER_PROFILE)
     this.notifyListeners(null)
@@ -188,13 +189,12 @@ class AuthManager {
   }
 
   async getCurrentUser(): Promise<UserProfile | null> {
-    const cached = await getFromStorage<UserProfile>(STORAGE_KEYS.USER_PROFILE)
-    if (cached) {
-      return cached
-    }
-
+    const cachedProfile = await getFromStorage<UserProfile>(STORAGE_KEYS.USER_PROFILE)
     const devBypassState = await this.getDevAuthBypassState()
     if (devBypassState) {
+      if (this.isDevBypassProfile(cachedProfile)) {
+        return cachedProfile
+      }
       const profile = this.buildDevBypassProfile(devBypassState.tier)
       await setInStorage(STORAGE_KEYS.USER_PROFILE, profile)
       return profile
@@ -209,7 +209,13 @@ class AuthManager {
 
     const sessionUser = sessionData.session?.user
     if (!sessionUser) {
+      await removeFromSecureStorage(FIXED_STORAGE_KEYS.SUPABASE_SESSION)
+      await removeFromStorage(STORAGE_KEYS.USER_PROFILE)
       return null
+    }
+
+    if (cachedProfile?.id === sessionUser.id) {
+      return cachedProfile
     }
 
     return this.fetchProfile(sessionUser)

@@ -1,24 +1,31 @@
 const NOTION_CLIENT_ID = "321d872b-594c-81e6-b469-00375ccd1eac"
-const NOTION_CLIENT_SECRET = process.env.PLASMO_PUBLIC_NOTION_CLIENT_SECRET
-const NOTION_OAUTH_TOKEN_ENDPOINT = "https://api.notion.com/v1/oauth/token"
+const NOTION_OAUTH_EXCHANGE_ENDPOINT = process.env.PLASMO_PUBLIC_NOTION_OAUTH_EXCHANGE_ENDPOINT
+const SUPABASE_URL = process.env.PLASMO_PUBLIC_SUPABASE_URL
 const NOTION_TOKEN_STORAGE_KEY = "minddock_notion_access_token"
 const LEGACY_NOTION_TOKEN_STORAGE_KEY = "workspaceNotionToken"
 const TARGET_PARENT_PAGE_STORAGE_KEY = "targetNotionPageId"
 
 interface NotionTokenExchangeResponse {
   access_token?: string
+  accessToken?: string
 }
 
 interface NotionLoginResult {
   success: boolean
 }
 
-function assertNotionClientSecret(): string {
-  const normalizedSecret = String(NOTION_CLIENT_SECRET ?? "").trim()
-  if (!normalizedSecret) {
-    throw new Error("Notion client secret is missing.")
+function resolveExchangeEndpoint(): string {
+  const endpoint = String(NOTION_OAUTH_EXCHANGE_ENDPOINT ?? "").trim()
+  if (!endpoint) {
+    const supabaseUrl = String(SUPABASE_URL ?? "").trim().replace(/\/+$/u, "")
+    if (!supabaseUrl) {
+      throw new Error(
+        "Notion OAuth indisponivel: configure PLASMO_PUBLIC_NOTION_OAUTH_EXCHANGE_ENDPOINT ou PLASMO_PUBLIC_SUPABASE_URL."
+      )
+    }
+    return `${supabaseUrl}/functions/v1/notion-oauth-exchange`
   }
-  return normalizedSecret
+  return endpoint
 }
 
 function parseCodeFromRedirectUrl(redirectUrl: string): string {
@@ -52,21 +59,16 @@ export async function exchangeAuthCodeForToken(authCode: string): Promise<string
     throw new Error("Notion authorization code is empty.")
   }
 
-  const notionClientSecret = assertNotionClientSecret()
-  const oauthExchangePayload = {
-    grant_type: "authorization_code",
-    code: normalizedCode,
-    redirect_uri: chrome.identity.getRedirectURL()
-  }
-
-  const basicCredential = btoa(`${NOTION_CLIENT_ID}:${notionClientSecret}`)
-  const oauthResponse = await fetch(NOTION_OAUTH_TOKEN_ENDPOINT, {
+  const oauthResponse = await fetch(resolveExchangeEndpoint(), {
     method: "POST",
     headers: {
-      Authorization: `Basic ${basicCredential}`,
       "Content-Type": "application/json"
     },
-    body: JSON.stringify(oauthExchangePayload)
+    body: JSON.stringify({
+      provider: "notion",
+      code: normalizedCode,
+      redirectUri: chrome.identity.getRedirectURL()
+    })
   })
 
   if (!oauthResponse.ok) {
@@ -75,7 +77,7 @@ export async function exchangeAuthCodeForToken(authCode: string): Promise<string
   }
 
   const exchangeResult = (await oauthResponse.json()) as NotionTokenExchangeResponse
-  const notionAccessToken = String(exchangeResult?.access_token ?? "").trim()
+  const notionAccessToken = String(exchangeResult?.access_token ?? exchangeResult?.accessToken ?? "").trim()
   if (!notionAccessToken) {
     throw new Error("Notion OAuth response did not include access_token.")
   }
