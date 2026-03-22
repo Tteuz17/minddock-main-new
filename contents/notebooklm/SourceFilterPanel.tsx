@@ -10,6 +10,7 @@ import {
   Folder,
   Music,
   RefreshCw,
+  SquareCheck,
   Save,
   Search,
   Trash2,

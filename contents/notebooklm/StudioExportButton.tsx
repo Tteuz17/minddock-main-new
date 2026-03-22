@@ -6,18 +6,30 @@ import { base64ToBytes } from "~/lib/base64-bytes"
 import {
   buildDocxBytesFromText,
   buildMindDuckFilenameBase,
+  buildMindDockZipBase,
   buildZip,
   sanitizeFilename,
   triggerDownload
 } from "~/lib/source-download"
 import { buildNotebookAccountKey, buildScopedStorageKey, resolveAuthUserFromUrl } from "~/lib/notebook-account-scope"
+import { EXCLUDED_FROM_EXPORT, VISUAL_TYPES, resolveFileExtension } from "../../src/background/studioArtifacts"
 import { queryDeepAll } from "./sourceDom"
 import { useShadowPortal } from "./useShadowPortal"
 import {
   EXPORT_PREVIEW_CLOSE_EVENT,
   EXPORT_PREVIEW_OPEN_EVENT,
+  EXPORT_PREVIEW_UPDATE_EVENT,
   type ExportPreviewOpenDetail
 } from "./ExportPreviewPanel"
+
+// REGRA ABSOLUTA: esses types SEMPRE vão para VISUAIS, sem exceção
+const FORCE_VISUAL_TYPES = new Set([
+  "Video Overview",
+  "Audio Overview",
+  "Infographic",
+  "Slides",
+  "Mind Map"
+])
 
 const CONTEXT_EVENT = "MINDDOCK_RPC_CONTEXT"
 
@@ -278,6 +290,26 @@ const SHADOW_CSS = `
   }
   .source-item:hover { border-color: rgba(255,255,255,0.16); background: #131313; }
   .source-item input { margin-top: 2px; }
+  .source-item--visual { grid-template-columns: 1fr auto; cursor: default; }
+  .source-item--disabled { opacity: 0.6; cursor: default; }
+  .source-item--disabled:hover { border-color: transparent; background: transparent; }
+  .source-section-title {
+    margin: 10px 6px 6px;
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: #9da7b8;
+  }
+  .source-download-btn {
+    border: 1px solid rgba(255,255,255,0.16);
+    background: #0b0b0b;
+    color: #e5e7eb;
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .source-download-btn:hover { border-color: rgba(255,255,255,0.3); }
   .source-title {
     display: block;
     font-size: 14px;
@@ -483,6 +515,15 @@ function resolveNotebookIdFromUrl(): string | null {
   return match ? match[0] : null
 }
 
+function resolveNotebookIdFromRpcContext(
+  rpcContext?: { sourcePath?: unknown }
+): string | null {
+  const sourcePath = typeof rpcContext?.sourcePath === "string" ? rpcContext.sourcePath : ""
+  if (!sourcePath) return null
+  const match = sourcePath.match(UUID_RE)
+  return match ? match[0] : null
+}
+
 function collectUuidCandidatesFromElement(el: Element): { id: string; score: number }[] {
   const candidates: { id: string; score: number }[] = []
   const attrs = el.getAttributeNames?.() ?? []
@@ -578,35 +619,90 @@ function resolveRpcContextFromWindow() {
   }
 }
 
+function bgLog(data: unknown) {
+  try {
+    if (!chrome?.runtime?.sendMessage) return
+    chrome.runtime.sendMessage({ type: "BG_LOG", data }, () => {
+      const err = chrome.runtime?.lastError
+      if (err?.message) {
+        console.warn("[BG_LOG][sendMessage error]", err.message)
+      }
+    })
+  } catch {}
+}
+
+function toExcerpt(value: unknown, max = 160): string {
+  const clean = String(value || "")
+    .replace(/```[\s\S]*?```/g, "")
+    .replace(/^#{1,6}\s+/gm, "")
+    .replace(/\s+/g, " ")
+    .trim()
+  return clean.length > max ? `${clean.slice(0, max).trim()}…` : clean
+}
+
 async function requestStudioArtifacts(
   ids: string[],
-  options?: { forceRefresh?: boolean }
-): Promise<StudioEntry[]> {
+  options?: { forceRefresh?: boolean; expectedCount?: number; currentCount?: number }
+): Promise<StudioCacheItem[]> {
+  bgLog({
+    tag: "studio-request",
+    idsCount: Array.isArray(ids) ? ids.length : 0,
+    hasRuntime: Boolean(chrome?.runtime?.sendMessage)
+  })
   if (!chrome?.runtime?.sendMessage) {
+    return []
+  }
+  if (!Array.isArray(ids) || ids.length === 0) {
     return []
   }
 
   const notebookId = resolveNotebookIdFromUrl() ?? undefined
   const forceRefresh = Boolean(options?.forceRefresh)
+  const expectedCount = typeof options?.expectedCount === "number" ? options.expectedCount : 0
+  const currentCount = typeof options?.currentCount === "number" ? options.currentCount : 0
+  const needRefresh = expectedCount > 0 && currentCount < expectedCount
   const rpcContext = resolveRpcContextFromWindow()
+  const contextNotebookId = resolveNotebookIdFromRpcContext(rpcContext)
+  const effectiveNotebookId = notebookId ?? contextNotebookId ?? undefined
+
+  bgLog({
+    tag: "studio-open",
+    ids,
+    notebookId: effectiveNotebookId,
+    forceRefresh: forceRefresh || needRefresh
+  })
 
   const response = await new Promise<any>((resolve) => {
     chrome.runtime.sendMessage(
       {
         type: STUDIO_FETCH_MESSAGE,
-        payload: { ids, notebookId, forceRefresh, rpcContext }
+        payload: {
+          ids,
+          notebookId: effectiveNotebookId,
+          forceRefresh: forceRefresh || needRefresh,
+          rpcContext
+        },
+        data: {
+          ids,
+          notebookId: effectiveNotebookId,
+          forceRefresh: forceRefresh || needRefresh,
+          rpcContext
+        }
       },
       (resp) => resolve(resp ?? {})
     )
   })
 
   const items =
+    response?.artifacts ??
+    response?.items ??
     response?.payload?.items ??
     response?.data?.items ??
-    response?.items ??
     []
 
-  return Array.isArray(items) ? items : []
+  console.log("[studioUI] items", items.length, items[0])
+
+  return Array.isArray(items) ? (items as StudioCacheItem[]) : []
 }
 
 const STUDIO_FORMAT_OPTIONS: Array<{ id: StudioFormat; label: string; sub: string; noTranslate?: boolean }> = [
@@ -843,16 +939,16 @@ async function loadStudioEntriesFromStorage(): Promise<{
   }
 
   const normalized = rawItems.map(normalizeStudioCacheEntry).filter(Boolean) as StudioEntry[]
-  const entries = normalized.filter(isValidStudioEntry)
-  const debugText = buildStudioDebugText(rawItems, normalized, entries, usedKey)
+  const safeFiltered = applyStudioFilter(normalized)
+  const debugText = buildStudioDebugText(rawItems, normalized, safeFiltered, usedKey)
   console.group("[MindDock][Studio][Debug]")
   console.log(debugText)
   console.groupEnd()
 
-  if (usedKey && entries.length > 0 && entries.length !== normalized.length) {
+  if (usedKey && safeFiltered.length > 0 && safeFiltered.length !== normalized.length) {
     chrome.storage.local.set(
       {
-        [usedKey]: entries
+        [usedKey]: safeFiltered
       },
       () => {
         void chrome.runtime.lastError
@@ -860,7 +956,7 @@ async function loadStudioEntriesFromStorage(): Promise<{
     )
   }
 
-  return { entries, scopedKeys }
+  return { entries: safeFiltered, scopedKeys }
 }
 
 function isNoiseLine(line: string): boolean {
@@ -1278,10 +1374,11 @@ function resolveStudioContentEntries(): StudioEntry[] {
   const seen = new Set<string>()
 
   const pushEntry = (entry: StudioEntry) => {
-    if (!entry.title || entry.title.length < 4 || entry.content.length < 40) {
+    const content = entry.content ?? ""
+    if (!entry.title || entry.title.length < 4 || content.length < 40) {
       return
     }
-    const key = `${entry.title.toLowerCase()}::${entry.content.slice(0, 80).toLowerCase()}`
+    const key = `${entry.title.toLowerCase()}::${content.slice(0, 80).toLowerCase()}`
     if (seen.has(key)) {
       return
     }
@@ -1509,6 +1606,146 @@ function resolveStudioViewerContent(): string {
   return bestText
 }
 
+function looksLikeFlashcardsEntry(entry: StudioEntry): boolean {
+  const haystack = normalizeMatchText(`${entry.title} ${entry.meta ?? ""} ${entry.type ?? ""}`)
+  return haystack.includes("flashcard") || haystack.includes("cartao") || haystack.includes("cards")
+}
+
+function scrapeOpenNoteContent(): { title: string; content: string } | null {
+  try {
+    const titleInput = document.querySelector<HTMLInputElement>("input.artifact-title")
+    const title = titleInput?.value?.trim() || "Nota do Studio"
+    const container = document.querySelector<HTMLElement>(".artifact-content")
+    if (!container) return null
+
+    const paragraphs = Array.from(
+      container.querySelectorAll<HTMLElement>("div[class^='paragraph']")
+    )
+    if (paragraphs.length === 0) return null
+
+    const lines: string[] = []
+
+    for (const paragraph of paragraphs) {
+      let blockPrefix = ""
+      if (paragraph.classList.contains("heading1")) blockPrefix = "# "
+      else if (paragraph.classList.contains("heading2")) blockPrefix = "## "
+      else if (paragraph.classList.contains("heading3")) blockPrefix = "### "
+      else if (paragraph.classList.contains("heading4")) blockPrefix = "#### "
+
+      const segments: Array<{ type: "text" | "bold" | "italic" | "code"; content: string }> = []
+      paragraph.childNodes.forEach((node) => {
+        if (node.nodeType === Node.TEXT_NODE) {
+          const value = String(node.textContent ?? "")
+          if (value) segments.push({ type: "text", content: value })
+          return
+        }
+        if (node.nodeType !== Node.ELEMENT_NODE) return
+        const el = node as HTMLElement
+        const text = String(el.textContent ?? "")
+        if (!text) return
+        if (el.tagName === "B" || el.tagName === "STRONG") {
+          segments.push({ type: "bold", content: text })
+          return
+        }
+        if (el.tagName === "I" || el.tagName === "EM") {
+          segments.push({ type: "italic", content: text })
+          return
+        }
+        if (el.tagName === "CODE") {
+          segments.push({ type: "code", content: text })
+          return
+        }
+        segments.push({ type: "text", content: text })
+      })
+
+      const merged: typeof segments = []
+      for (const seg of segments) {
+        const last = merged[merged.length - 1]
+        if (last && last.type === "text" && seg.type === "text") {
+          last.content += seg.content
+        } else {
+          merged.push({ ...seg })
+        }
+      }
+
+      const line =
+        blockPrefix +
+        merged
+          .map((seg) => {
+            if (!seg.content) return ""
+            if (seg.type === "bold") return `**${seg.content}**`
+            if (seg.type === "italic") return `*${seg.content}*`
+            if (seg.type === "code") return `\`${seg.content}\``
+            return seg.content
+          })
+          .join("")
+          .trim()
+
+      if (line) lines.push(line)
+    }
+
+    const content = lines.join("\n\n").trim()
+    if (!content) return null
+    return { title, content }
+  } catch {
+    return null
+  }
+}
+
+async function scrapeFlashcardsFromDom(): Promise<string | null> {
+  const iframe =
+    document.querySelector<HTMLIFrameElement>("iframe[src^='blob:']") ??
+    document.querySelector<HTMLIFrameElement>("[data-testid*='flashcard'] iframe")
+  if (!iframe?.src) {
+    return null
+  }
+
+  try {
+    const rawHtml = await (await fetch(iframe.src)).text()
+    const doc = new DOMParser().parseFromString(rawHtml, "text/html")
+    const appRoot = doc.querySelector("app-root")
+    if (!appRoot) return null
+    const dataAttr = appRoot.getAttribute("data-app-data")
+    if (!dataAttr) return null
+
+    const decoder = document.createElement("textarea")
+    decoder.innerHTML = dataAttr
+    const decoded = decoder.value
+    const parsed = JSON.parse(decoded)
+
+    const cards: Array<{ front: string; back: string }> = []
+    const walk = (node: unknown) => {
+      if (!node || typeof node !== "object") return
+      if (Array.isArray(node)) {
+        node.forEach(walk)
+        return
+      }
+      const record = node as Record<string, unknown>
+      const front = record.f
+      const back = record.b
+      if (front && back) {
+        cards.push({ front: String(front), back: String(back) })
+      }
+      Object.values(record).forEach(walk)
+    }
+
+    walk(parsed)
+    if (cards.length === 0) return null
+
+    const lines: string[] = ["# Flashcards"]
+    cards.forEach((card, index) => {
+      lines.push(`## ${index + 1}`)
+      lines.push(`**Frente:** ${card.front}`)
+      lines.push(`**Verso:** ${card.back}`)
+      lines.push("")
+    })
+
+    return lines.join("\n").trim()
+  } catch {
+    return null
+  }
+}
+
 async function waitForStudioContentUpdate(previous: string, timeoutMs = 2000): Promise<string> {
   const start = Date.now()
   let last = ""
@@ -1531,26 +1768,100 @@ function formatExportTimestamp(isoDate: string): string {
   return date.toLocaleString("pt-BR")
 }
 
-function buildStudioEntryBlock(entry: StudioEntry, index: number, format: StudioFormat): string {
+function looksLikeUrl(value: string): boolean {
+  return /^https?:\/\//iu.test(value) || value.startsWith("//")
+}
+
+async function downloadAssetEntry(entry: StudioEntry): Promise<void> {
+  const url = entry.url || (looksLikeUrl(entry.content ?? "") ? entry.content : undefined)
+  if (!url) return
+  const ext = resolveFileExtension(entry.type ?? "", url)
+  const filename = `${String(entry.title ?? "studio").replace(/[^a-z0-9]/gi, "_")}.${ext}`
+  try {
+    const res = await fetch(url, { credentials: "include" })
+    if (res.ok) {
+      const blob = await res.blob()
+      const a = document.createElement("a")
+      a.href = URL.createObjectURL(blob)
+      a.download = filename
+      document.body.appendChild(a)
+      a.click()
+      setTimeout(() => {
+        document.body.removeChild(a)
+        URL.revokeObjectURL(a.href)
+      }, 1000)
+      return
+    }
+  } catch {}
+  if (typeof chrome !== "undefined" && chrome.downloads) {
+    chrome.downloads.download({ url, filename, saveAs: false })
+  } else {
+    const a = document.createElement("a")
+    a.href = url
+    a.download = filename
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+  }
+}
+
+async function downloadAssetEntries(entries: StudioEntry[]): Promise<void> {
+  if (entries.length === 0) return
+  const usedNames = new Set<string>()
+  for (const entry of entries) {
+    const url = entry.url || (looksLikeUrl(entry.content ?? "") ? entry.content : undefined)
+    if (!url) continue
+    const base = buildMindDuckFilenameBase("Studio", entry.title)
+    const extension = resolveAssetExtension(entry)
+    const filename = buildUniqueStudioFilename(base, extension, usedNames)
+    if (typeof chrome !== "undefined" && chrome.downloads) {
+      chrome.downloads.download({ url, filename, saveAs: false })
+      continue
+    }
+    const a = document.createElement("a")
+    a.href = url
+    a.download = filename
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+  }
+}
+
+function buildStudioEntryBlock(
+  entry: StudioEntry,
+  index: number,
+  format: StudioFormat,
+  options?: { isLoading?: boolean }
+): string {
   const lines: string[] = []
+  const isLoading = Boolean(options?.isLoading)
+
+  const isVisual = VISUAL_TYPES.has(entry.type ?? "")
+  const isExcluded = EXCLUDED_FROM_EXPORT.has(entry.type ?? "")
+
+  if (isVisual || isExcluded) return ""
+
   if (format === "markdown") {
     lines.push(`## ${index + 1}. ${entry.title}`)
-    if (entry.meta) {
-      lines.push(`_${entry.meta}_`)
-    }
+    if (entry.meta) lines.push(`_${entry.meta}_`)
   } else {
     lines.push(`${index + 1}. ${entry.title}`)
-    if (entry.meta) {
-      lines.push(entry.meta)
-    }
+    if (entry.meta) lines.push(entry.meta)
   }
-  if (entry.content) {
+
+  const contentText = typeof entry.content === "string" ? entry.content.trim() : ""
+
+  if (contentText && !looksLikeUrl(contentText)) {
     lines.push("")
-    lines.push(entry.content)
-  } else if (entry.kind === "asset") {
+    lines.push(contentText)
+  } else if (isLoading) {
     lines.push("")
-    lines.push("Arquivo binario do Studio. Sera exportado como arquivo separado.")
+    lines.push("(carregando conteúdo...)")
+  } else {
+    lines.push("")
+    lines.push("(sem conteúdo carregado)")
   }
+
   return lines.join("\n").trim()
 }
 
@@ -1794,12 +2105,19 @@ function isValidStudioEntry(entry: StudioEntry): boolean {
   }
 
   const hasMeta = metaValue.length > 0 && !STUDIO_INVALID_META.has(metaKey) && looksLikeStudioMetaSignal(metaValue)
-  const hasStructuredContent = Boolean(entry.content && looksLikeStructuredStudioContent(entry.content))
+  const contentValue = entry.content?.trim() ?? ""
+  const hasContent = contentValue.length > 0
   const hasAsset = entry.kind === "asset" && isDownloadableAssetUrl(entry.url)
-  if (!hasMeta && !hasAsset && !hasStructuredContent) {
+  if (!hasMeta && !hasAsset && !hasContent) {
     return false
   }
   return true
+}
+
+function applyStudioFilter(normalized: StudioEntry[], ids?: string[]): StudioEntry[] {
+  const bypassFilter = (ids?.length ?? 0) > 0
+  const filtered = bypassFilter ? normalized : normalized.filter(isValidStudioEntry)
+  return filtered.length > 0 ? filtered : normalized
 }
 
 function isLikelyChatEntry(entry: StudioEntry): boolean {
@@ -1834,9 +2152,10 @@ function describeInvalidStudioEntry(entry: StudioEntry): string {
   const metaKey = metaValue.toLowerCase()
   const hasMeta = metaValue.length > 0 && !STUDIO_INVALID_META.has(metaKey) && looksLikeStudioMetaSignal(metaValue)
   const hasType = Boolean(entry.type && entry.type.trim())
-  const hasStructuredContent = Boolean(entry.content && looksLikeStructuredStudioContent(entry.content))
+  const contentValue = entry.content?.trim() ?? ""
+  const hasContent = contentValue.length > 0
   const hasAsset = entry.kind === "asset" && isDownloadableAssetUrl(entry.url)
-  if (!hasMeta && !hasAsset && !hasStructuredContent) {
+  if (!hasMeta && !hasAsset && !hasContent) {
     return "no-signal"
   }
   if (!hasMeta && hasType) {
@@ -1920,12 +2239,20 @@ function extensionFromMime(mimeType?: string): string | null {
 }
 
 function resolveAssetExtension(entry: StudioEntry): string {
-  return (
-    extractExtensionFromUrl(entry.url ?? "") ||
-    extensionFromMime(entry.mimeType) ||
-    (entry.type && /audio|video/i.test(entry.type) ? "mp4" : null) ||
-    "bin"
-  )
+  const urlExt = extractExtensionFromUrl(entry.url ?? "")
+  if (urlExt) return urlExt
+
+  const mimeExt = extensionFromMime(entry.mimeType)
+  if (mimeExt) return mimeExt
+
+  const type = String(entry.type ?? "").toLowerCase()
+  if (type.includes("slides")) return "pdf"
+  if (type.includes("infographic")) return "png"
+  if (type.includes("mind map")) return "png"
+  if (type.includes("audio")) return "mp4"
+  if (type.includes("video")) return "mp4"
+
+  return "bin"
 }
 
 function buildUniqueStudioFilename(base: string, extension: string, usedNames: Set<string>): string {
@@ -1983,8 +2310,9 @@ async function buildStudioExportFiles(
         const bytes = await fetchBinaryFile(entry.url)
         files.push({ filename, bytes, isAsset: true })
       } catch {
-        const placeholder = `Falha ao exportar arquivo do Studio para: ${entry.title}`
-        files.push({ filename: `${filename}.txt`, bytes: encoder.encode(placeholder), isAsset: true })
+        const urlFilename = buildUniqueStudioFilename(base, "url", usedNames)
+        const shortcut = `[InternetShortcut]\nURL=${entry.url}\n`
+        files.push({ filename: urlFilename, bytes: encoder.encode(shortcut), isAsset: true })
       }
       continue
     }
@@ -2023,6 +2351,7 @@ function StudioModal({ onClose }: { onClose: () => void }) {
   const stopProp = (e: React.MouseEvent) => e.stopPropagation()
   const [format, setFormat] = useState<StudioFormat>("markdown")
   const [entries, setEntries] = useState<StudioEntry[]>([])
+  const [listEntries, setListEntries] = useState<StudioEntry[]>([])
   const [sourceSearch, setSourceSearch] = useState("")
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [showPreviewOverlay, setShowPreviewOverlay] = useState(false)
@@ -2032,14 +2361,82 @@ function StudioModal({ onClose }: { onClose: () => void }) {
   const [isHydrating, setIsHydrating] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [isRefreshing, setIsRefreshing] = useState(false)
+  const [isLoading, setIsLoading] = useState(true)
   const selectAllCheckboxRef = useRef<HTMLInputElement | null>(null)
   const selectionInitRef = useRef(false)
   const dirtyIdsRef = useRef<Set<string>>(new Set())
-  const exportHandlerRef = useRef<(() => void) | null>(null)
+  const exportHandlerRef = useRef<((format?: StudioFormat) => void) | null>(null)
+  const previewOpenedRef = useRef(false)
+  const previewOpenTimerRef = useRef<number | null>(null)
   const scopedKeysRef = useRef<string[]>([])
   const lastStudioListAtRef = useRef(0)
   const previewRequestIdRef = useRef(0)
+  const contentBootstrapRef = useRef(false)
+  const probeBootstrapRef = useRef(false)
+  const firstFrameLoggedRef = useRef(false)
+  const fetchInFlightRef = useRef(false)
+  const finalProbeRef = useRef(false)
 
+  const listIds = useMemo(() => {
+    const unique = new Set<string>()
+    listEntries.forEach((entry) => {
+      if (entry.id) {
+        unique.add(entry.id)
+      }
+    })
+    return Array.from(unique)
+  }, [listEntries])
+
+  const hasIds = listIds.length > 0
+
+  const mergedEntries = useMemo(() => {
+    if (!hasIds) {
+      return []
+    }
+    const byId = new Map(entries.map((entry) => [entry.id, entry]))
+    return listEntries.map((entry) => {
+      const cached = byId.get(entry.id)
+      if (!cached) return entry
+      const cachedType = cached.type ?? ""
+      const isAssetInCache = cached.kind === "asset" || Boolean(cached.url)
+      const finalType = FORCE_VISUAL_TYPES.has(cachedType) ? cachedType : entry.type || cachedType
+      return {
+        ...entry,
+        ...cached,
+        title: entry.title,
+        type: finalType,
+        kind: FORCE_VISUAL_TYPES.has(cachedType) ? "asset" : cached.kind || entry.kind,
+        url: isAssetInCache && cached.url ? cached.url : entry.url ?? cached.url,
+        mimeType: isAssetInCache && cached.mimeType ? cached.mimeType : entry.mimeType ?? cached.mimeType
+      }
+    })
+  }, [entries, listEntries, hasIds])
+
+  const displayEntries = isLoading || !hasIds ? [] : mergedEntries
+  const FORCE_VISUAL_TYPES_SET = new Set(["Video Overview", "Audio Overview", "Infographic", "Slides", "Mind Map"])
+  const visualEntries = useMemo(
+    () => displayEntries.filter((entry) => FORCE_VISUAL_TYPES_SET.has(entry.type ?? "")),
+    [displayEntries]
+  )
+  const visualIds = useMemo(() => new Set(visualEntries.map((entry) => entry.id)), [visualEntries])
+  const documentEntries = useMemo(
+    () =>
+      displayEntries.filter(
+        (entry) =>
+          !visualIds.has(entry.id) &&
+          !FORCE_VISUAL_TYPES.has(entry.type ?? "") &&
+          !EXCLUDED_FROM_EXPORT.has(entry.type ?? "")
+      ),
+    [displayEntries, visualIds]
+  )
+  const excludedEntries = useMemo(
+    () =>
+      displayEntries.filter(
+        (entry) => EXCLUDED_FROM_EXPORT.has(entry.type ?? "") && !visualIds.has(entry.id)
+      ),
+    [displayEntries, visualIds]
+  )
+  const previewEntries = documentEntries
 
   useEffect(() => {
     try {
@@ -2101,6 +2498,12 @@ function StudioModal({ onClose }: { onClose: () => void }) {
         }
       })
 
+    return () => {
+      active = false
+    }
+  }, [])
+
+  useEffect(() => {
     const handleStorageChange = (
       changes: Record<string, chrome.storage.StorageChange>,
       area: string
@@ -2124,16 +2527,20 @@ function StudioModal({ onClose }: { onClose: () => void }) {
         const normalized = (nextValue as StudioCacheItem[])
           .map(normalizeStudioCacheEntry)
           .filter(Boolean) as StudioEntry[]
-        const nextEntries = normalized.filter(isValidStudioEntry)
+        const nextEntries = applyStudioFilter(normalized)
         const hasFreshStudioList = Date.now() - lastStudioListAtRef.current < 30000
         if (hasFreshStudioList && nextEntries.length === 0) {
           return
         }
-        if (nextEntries.length > 0) {
-          setEntries(nextEntries)
-        } else {
-          setEntries([])
-        }
+        setEntries((prev) => {
+          if (nextEntries.length === 0) return prev
+          const prevById = new Map(prev.map((e) => [e.id, e]))
+          return nextEntries.map((e) => {
+            const old = prevById.get(e.id)
+            if (!old) return e
+            return { ...old, ...e, content: e.content || old.content, url: e.url || old.url }
+          })
+        })
         console.group("[MindDock][Studio][Debug]")
         console.log(buildStudioDebugText(nextValue as StudioCacheItem[], normalized, nextEntries, key))
         console.groupEnd()
@@ -2146,15 +2553,15 @@ function StudioModal({ onClose }: { onClose: () => void }) {
     }
 
     return () => {
-      active = false
       if (chrome?.storage?.onChanged) {
         chrome.storage.onChanged.removeListener(handleStorageChange)
       }
     }
-  }, [])
+  }, [showPreviewOverlay])
 
   useEffect(() => {
     const notebookId = resolveNotebookIdFromUrl()
+    setIsLoading(true)
     window.postMessage(
       { source: "minddock", type: "MINDDOCK_FETCH_STUDIO_LIST", payload: { notebookId } },
       "*"
@@ -2176,13 +2583,24 @@ function StudioModal({ onClose }: { onClose: () => void }) {
 
       if (data.type === "MINDDOCK_STUDIO_LIST_EMPTY") {
         setIsRefreshing(false)
-        // Nao limpar a lista: manter o que ja esta renderizado.
+        contentBootstrapRef.current = false
+        probeBootstrapRef.current = false
+        setListEntries([])
+        setEntries([])
+        setIsLoading(true)
+        bgLog({ tag: "studio-list-empty" })
         return
       }
 
       const items = data.payload?.items
       if (!Array.isArray(items) || items.length === 0) {
         setIsRefreshing(false)
+        contentBootstrapRef.current = false
+        probeBootstrapRef.current = false
+        setListEntries([])
+        setEntries([])
+        setIsLoading(true)
+        bgLog({ tag: "studio-list-empty", reason: "no-items" })
         return
       }
 
@@ -2203,31 +2621,185 @@ function StudioModal({ onClose }: { onClose: () => void }) {
             meta: typeLabel ? `Resultado do Estúdio · ${typeLabel}` : "Resultado do Estúdio",
             type: typeLabel ?? typeKey,
             content: "",
+            url: undefined,
+            mimeType: undefined,
+            node: undefined,
             kind: "text" as const
           }
         })
       if (mapped.length > 0) {
         lastStudioListAtRef.current = Date.now()
-        setEntries(mapped)
+        contentBootstrapRef.current = false
+        probeBootstrapRef.current = false
+        setListEntries(mapped)
+        setEntries((prev) => {
+          const prevById = new Map(prev.map((e) => [e.id, e]))
+          const merged = mapped.map((entry) => {
+            const existing = prevById.get(entry.id)
+            if (!existing) return entry
+            const existingType = existing.type ?? ""
+            const isAssetInCache = existing.kind === "asset" || Boolean(existing.url)
+            const finalType = FORCE_VISUAL_TYPES.has(existingType) ? existingType : entry.type || existingType
+            return {
+              ...existing,
+              ...entry,
+              title: entry.title,
+              type: finalType,
+              kind: FORCE_VISUAL_TYPES.has(existingType) ? "asset" : existing.kind || entry.kind,
+              url: isAssetInCache && existing.url ? existing.url : entry.url ?? existing.url,
+              mimeType: isAssetInCache && existing.mimeType ? existing.mimeType : entry.mimeType ?? existing.mimeType
+            }
+          })
+          const hasPayload = merged.some((entry) => entry.content || entry.url)
+          setIsLoading(!hasPayload)
+          return merged
+        })
+        bgLog({
+          tag: "studio-list-updated",
+          count: mapped.length,
+          firstId: mapped[0]?.id,
+          firstTitle: mapped[0]?.title
+        })
       }
       setIsRefreshing(false)
     }
 
     window.addEventListener("message", onMessage)
     return () => window.removeEventListener("message", onMessage)
-  }, [setEntries])
+  }, [entries])
+
+  const applyStudioItems = useCallback((rawItems: StudioCacheItem[], ids?: string[]) => {
+    const normalized = rawItems
+      .map(normalizeStudioCacheEntry)
+      .filter(Boolean) as StudioEntry[]
+    const nextEntries = applyStudioFilter(normalized, ids)
+    if (nextEntries.length === 0) {
+      return
+    }
+    lastStudioListAtRef.current = Date.now()
+    setEntries((prev) => {
+      const prevById = new Map(prev.map((entry) => [entry.id, entry]))
+      return nextEntries.map((entry) => {
+        const old = prevById.get(entry.id)
+        if (!old) return entry
+        return {
+          ...old,
+          ...entry,
+          content: entry.content || old.content,
+          url: entry.url || old.url
+        }
+      })
+    })
+  }, [])
+
+  useEffect(() => {
+    if (!hasIds) {
+      contentBootstrapRef.current = false
+      setEntries([])
+      setIsLoading(true)
+    }
+  }, [hasIds])
+
+  useEffect(() => {
+    if (contentBootstrapRef.current) {
+      bgLog({ tag: "studio-bootstrap-skip", reason: "already-bootstrapped" })
+      return
+    }
+    if (!hasIds) {
+      bgLog({ tag: "studio-bootstrap-skip", reason: "no-ids" })
+      return
+    }
+    if (mergedEntries.length === 0) {
+      bgLog({ tag: "studio-bootstrap-skip", reason: "no-merged-entries" })
+      return
+    }
+    const hasPayload = mergedEntries.some((entry) => entry.content || entry.url)
+    if (hasPayload) {
+      if (!probeBootstrapRef.current) {
+        probeBootstrapRef.current = true
+        fetchInFlightRef.current = true
+        setIsLoading(true)
+        const expectedCount = listIds.length
+        const currentCount = mergedEntries.filter((entry) => entry.content || entry.url).length
+        bgLog({ tag: "studio-final-probe", expectedCount, currentCount })
+        requestStudioArtifacts(listIds, { forceRefresh: true, expectedCount, currentCount })
+          .then((items) => {
+            if (items.length > 0) {
+              applyStudioItems(items, listIds)
+            }
+          })
+          .catch(() => {
+            // ignore probe failures
+          })
+          .finally(() => {
+            fetchInFlightRef.current = false
+            setIsLoading(false)
+          })
+        return
+      }
+      bgLog({ tag: "studio-bootstrap-skip", reason: "already-has-payload" })
+      return
+    }
+    contentBootstrapRef.current = true
+    fetchInFlightRef.current = true
+    setIsLoading(true)
+    const expectedCount = listIds.length
+    const currentCount = mergedEntries.filter((entry) => entry.content || entry.url).length
+    bgLog({ tag: "studio-bootstrap-fetch", expectedCount, currentCount })
+    requestStudioArtifacts(listIds, { expectedCount, currentCount })
+      .then((items) => {
+        if (items.length > 0) {
+          applyStudioItems(items, listIds)
+        }
+      })
+      .catch(() => {
+        // ignore bootstrap failures
+      })
+      .finally(() => {
+        fetchInFlightRef.current = false
+        setIsLoading(false)
+      })
+  }, [applyStudioItems, hasIds, listIds, mergedEntries])
+
+  useEffect(() => {
+    if (!hasIds) {
+      return
+    }
+    const hasPayload = mergedEntries.some((entry) => entry.content || entry.url)
+    if (hasPayload && !fetchInFlightRef.current && !isRefreshing) {
+      setIsLoading(false)
+    }
+  }, [hasIds, mergedEntries, isRefreshing])
+
+  useEffect(() => {
+    if (firstFrameLoggedRef.current) return
+    firstFrameLoggedRef.current = true
+    requestAnimationFrame(() => {
+      console.log("[studioModal][first-frame]", {
+        count: displayEntries.length,
+        titles: displayEntries.map((entry) => entry.title).slice(0, 100),
+        ids: displayEntries.map((entry) => entry.id).slice(0, 100)
+      })
+
+      const suspicious = displayEntries.filter((entry) => {
+        const title = (entry.title ?? "").trim().toLowerCase()
+        return !title || title === "studio" || (!entry.content && !entry.url)
+      })
+      console.log("[studioModal][first-frame][suspects]", suspicious)
+    })
+  }, [displayEntries])
 
   useEffect(() => {
     if (!selectionInitRef.current) {
-      if (entries.length === 0) {
+      if (documentEntries.length === 0) {
         return
       }
-      setSelectedIds(new Set(entries.map((entry) => entry.id)))
+      setSelectedIds(new Set(documentEntries.map((entry) => entry.id)))
       selectionInitRef.current = true
       return
     }
     setSelectedIds((prev) => {
-      const allowed = new Set(entries.map((entry) => entry.id))
+      const allowed = new Set(documentEntries.map((entry) => entry.id))
       let changed = false
       const next = new Set<string>()
       prev.forEach((id) => {
@@ -2239,22 +2811,51 @@ function StudioModal({ onClose }: { onClose: () => void }) {
       })
       return changed ? next : prev
     })
-  }, [entries])
+  }, [documentEntries])
 
   const normalizedSearch = sourceSearch.trim().toLowerCase()
-  const filteredEntries = useMemo(() => {
-    if (!normalizedSearch) {
-      return entries
-    }
-    return entries.filter((entry) => {
-      const haystack = `${entry.title} ${entry.meta ?? ""}`.toLowerCase()
-      return haystack.includes(normalizedSearch)
-    })
-  }, [entries, normalizedSearch])
+  const filterBySearch = useCallback(
+    (entries: StudioEntry[]) => {
+      if (!normalizedSearch) {
+        return entries
+      }
+      return entries.filter((entry) => {
+        const haystack = `${entry.title} ${entry.meta ?? ""}`.toLowerCase()
+        return haystack.includes(normalizedSearch)
+      })
+    },
+    [normalizedSearch]
+  )
+  const filteredDocumentEntries = useMemo(
+    () => filterBySearch(documentEntries),
+    [documentEntries, filterBySearch]
+  )
+  const filteredVisualEntries = useMemo(
+    () => filterBySearch(visualEntries),
+    [visualEntries, filterBySearch]
+  )
+  const filteredExcludedEntries = useMemo(
+    () => filterBySearch(excludedEntries),
+    [excludedEntries, filterBySearch]
+  )
+  const FORCE_VISUAL = new Set(["Video Overview", "Audio Overview", "Infographic", "Slides", "Mind Map"])
+  const selectableEntries = useMemo(
+    () =>
+      filteredDocumentEntries.filter(
+        (entry) =>
+          !EXCLUDED_FROM_EXPORT.has(entry.type ?? "") &&
+          !FORCE_VISUAL.has(entry.type ?? "")
+      ),
+    [filteredDocumentEntries]
+  )
 
   const selectedEntries = useMemo(
-    () => entries.filter((entry) => selectedIds.has(entry.id)),
-    [entries, selectedIds]
+    () => displayEntries.filter((entry) => selectedIds.has(entry.id)),
+    [displayEntries, selectedIds]
+  )
+  const previewSelectedEntries = useMemo(
+    () => previewEntries.filter((entry) => selectedIds.has(entry.id)),
+    [previewEntries, selectedIds]
   )
 
   const handlePreviewFormatChange = useCallback((nextFormat: StudioFormat) => {
@@ -2271,9 +2872,9 @@ function StudioModal({ onClose }: { onClose: () => void }) {
   }, [])
 
   const previewItems = useMemo(() => (
-    selectedEntries.map((entry, index) => {
+    previewSelectedEntries.map((entry, index) => {
       const hasDraft = Object.prototype.hasOwnProperty.call(draftMap, entry.id)
-      const fallback = buildStudioEntryBlock(entry, index, format)
+      const fallback = buildStudioEntryBlock(entry, index, format, { isLoading })
       const content = hasDraft ? (draftMap[entry.id] ?? "") : fallback
       return {
         id: entry.id,
@@ -2282,21 +2883,24 @@ function StudioModal({ onClose }: { onClose: () => void }) {
         content
       }
     })
-  ), [selectedEntries, draftMap, format])
+  ), [previewSelectedEntries, draftMap, format, isLoading])
 
   const exportedAtLabel = useMemo(
     () => formatExportTimestamp(generatedAtIso),
     [generatedAtIso]
   )
 
-  const filteredSelectedCount = filteredEntries.reduce(
+  const filteredSelectedCount = selectableEntries.reduce(
     (count, entry) => count + (selectedIds.has(entry.id) ? 1 : 0),
     0
   )
-  const hasFilteredEntries = filteredEntries.length > 0
-  const allFilteredSelected = hasFilteredEntries && filteredSelectedCount === filteredEntries.length
+  const hasFilteredEntries = selectableEntries.length > 0
+  const allFilteredSelected =
+    hasFilteredEntries && filteredSelectedCount === selectableEntries.length
   const hasPartialFilteredSelection = filteredSelectedCount > 0 && !allFilteredSelected
   const hasSelection = selectedEntries.length > 0
+  const hasPreviewSelection = previewSelectedEntries.length > 0
+  const hasAnyEntries = selectableEntries.length > 0
 
   useEffect(() => {
     const checkbox = selectAllCheckboxRef.current
@@ -2317,7 +2921,7 @@ function StudioModal({ onClose }: { onClose: () => void }) {
     if (!showPreviewOverlay) {
       return
     }
-    if (selectedEntries.length === 0) {
+    if (previewSelectedEntries.length === 0) {
       return
     }
 
@@ -2327,7 +2931,7 @@ function StudioModal({ onClose }: { onClose: () => void }) {
 
     const run = async () => {
       setIsHydrating(true)
-      const hydratedEntries = await hydrateEntriesWithViewerContent(selectedEntries)
+      const hydratedEntries = await hydrateEntriesWithViewerContent(previewSelectedEntries)
       if (!active || previewRequestIdRef.current !== requestId) {
         return
       }
@@ -2340,7 +2944,7 @@ function StudioModal({ onClose }: { onClose: () => void }) {
 
       const initialDrafts: Record<string, string> = {}
       hydratedEntries.forEach((entry, index) => {
-        initialDrafts[entry.id] = buildStudioEntryBlock(entry, index, format)
+        initialDrafts[entry.id] = buildStudioEntryBlock(entry, index, format, { isLoading })
       })
       dirtyIdsRef.current = new Set()
       setDraftMap(initialDrafts)
@@ -2352,7 +2956,7 @@ function StudioModal({ onClose }: { onClose: () => void }) {
     return () => {
       active = false
     }
-  }, [showPreviewOverlay, selectedEntries, format])
+  }, [showPreviewOverlay, previewSelectedEntries, format])
 
   const handleToggleEntry = (entryId: string) => {
     setSelectedIds((prev) => {
@@ -2373,9 +2977,9 @@ function StudioModal({ onClose }: { onClose: () => void }) {
     setSelectedIds((prev) => {
       const next = new Set(prev)
       if (allFilteredSelected) {
-        filteredEntries.forEach((entry) => next.delete(entry.id))
+        selectableEntries.forEach((entry) => next.delete(entry.id))
       } else {
-        filteredEntries.forEach((entry) => next.add(entry.id))
+        selectableEntries.forEach((entry) => next.add(entry.id))
       }
       return next
     })
@@ -2390,7 +2994,35 @@ function StudioModal({ onClose }: { onClose: () => void }) {
       { source: "minddock", type: "MINDDOCK_FETCH_STUDIO_LIST", payload: { notebookId } },
       "*"
     )
-  }, [isRefreshing])
+    const ids = listIds
+    const hasIds = ids.length > 0
+    if (!hasIds) {
+      setEntries([])
+      setIsLoading(true)
+      setIsRefreshing(false)
+      return
+    }
+    const expectedCount = ids.length
+    const currentCount = mergedEntries.filter((entry) => entry.content || entry.url).length
+    fetchInFlightRef.current = true
+    setIsLoading(true)
+    requestStudioArtifacts(ids, { forceRefresh: true, expectedCount, currentCount })
+      .then((items) => {
+        if (items.length > 0) {
+          applyStudioItems(items, ids)
+        }
+      })
+      .catch((refreshError) => {
+        const message =
+          refreshError instanceof Error ? refreshError.message : "Falha ao atualizar o Estudio."
+        setError(message)
+      })
+      .finally(() => {
+        fetchInFlightRef.current = false
+        setIsRefreshing(false)
+        setIsLoading(false)
+      })
+  }, [applyStudioItems, isRefreshing, listIds, mergedEntries])
 
   const hydrateEntriesWithViewerContent = async (entriesToHydrate: StudioEntry[]): Promise<StudioEntry[]> => {
     let lastContent = resolveStudioViewerContent()
@@ -2404,12 +3036,33 @@ function StudioModal({ onClose }: { onClose: () => void }) {
       try {
         entry.node.click()
         const nextContent = await waitForStudioContentUpdate(lastContent, 2200)
-        if (nextContent) {
-          updated.push({ ...entry, content: nextContent })
-          lastContent = nextContent
-        } else {
-          updated.push(entry)
+        let resolvedEntry: StudioEntry = entry
+
+        if (looksLikeFlashcardsEntry(entry)) {
+          const flashcards = await scrapeFlashcardsFromDom()
+          if (flashcards) {
+            resolvedEntry = { ...resolvedEntry, content: flashcards }
+          }
         }
+
+        if (!resolvedEntry.content) {
+          const note = scrapeOpenNoteContent()
+          if (note?.content) {
+            const nextTitle =
+              note.title && note.title !== "Nota do Studio" ? note.title : resolvedEntry.title
+            resolvedEntry = { ...resolvedEntry, title: nextTitle, content: note.content }
+          } else if (nextContent) {
+            resolvedEntry = { ...resolvedEntry, content: nextContent }
+          }
+        }
+
+        if (resolvedEntry.content) {
+          lastContent = resolvedEntry.content
+        } else if (nextContent) {
+          lastContent = nextContent
+        }
+
+        updated.push(resolvedEntry)
       } catch {
         updated.push(entry)
       }
@@ -2454,10 +3107,7 @@ function StudioModal({ onClose }: { onClose: () => void }) {
 
       const hasAsset = files.some((file) => file.isAsset)
       const shouldZip = files.length > 1 || hasAsset
-      const filenameBase = buildMindDuckFilenameBase(
-        "Studio",
-        selectedEntries[0]?.title ?? "Studio"
-      )
+      const filenameBase = buildMindDockZipBase("Estudio")
 
       if (shouldZip) {
         const zipBytes = await buildZip(files.map((file) => ({ filename: file.filename, bytes: file.bytes })))
@@ -2480,9 +3130,9 @@ function StudioModal({ onClose }: { onClose: () => void }) {
     }
   }
 
-  const handleExport = async () => {
+  const handleExport = async (overrideFormat?: StudioFormat) => {
     try {
-      await executeExport(format, draftMap)
+      await executeExport(overrideFormat ?? format, draftMap)
     } catch {
       // error handled in executeExport
     }
@@ -2494,8 +3144,14 @@ function StudioModal({ onClose }: { onClose: () => void }) {
 
   useEffect(() => {
     if (!showPreviewOverlay) {
+      previewOpenedRef.current = false
+      if (previewOpenTimerRef.current !== null) {
+        window.clearTimeout(previewOpenTimerRef.current)
+        previewOpenTimerRef.current = null
+      }
       return
     }
+    previewOpenedRef.current = false
     const detail: ExportPreviewOpenDetail = {
       items: previewItems,
       format,
@@ -2506,8 +3162,8 @@ function StudioModal({ onClose }: { onClose: () => void }) {
       isExporting: isExporting || isHydrating,
       labels: {
         previewLabTitle: "LABORATORIO DE PRE-VISUALIZACAO",
-        title: "Estudio",
-        subtitle: `Exportado em: ${exportedAtLabel}`,
+        title: "Pré-visualização do Estúdio",
+        subtitle: "Revise e edite cada resultado antes de exportar.",
         previewTextareaPlaceholder: "Edite o conteudo antes de exportar.",
         noPreview: "Nenhum conteudo para pre-visualizar.",
         backButton: "Voltar",
@@ -2515,17 +3171,30 @@ function StudioModal({ onClose }: { onClose: () => void }) {
         exportingButton: "Exportando..."
       }
     }
+    console.log("🚀 abrindo modal — ids:", previewItems.map((item) => item.id))
     window.dispatchEvent(new CustomEvent(EXPORT_PREVIEW_OPEN_EVENT, { detail }))
+    previewOpenTimerRef.current = window.setTimeout(() => {
+      previewOpenedRef.current = true
+    }, 0)
   }, [
     showPreviewOverlay,
     previewItems,
     format,
     exportedAtLabel,
     handlePreviewFormatChange,
-    handlePreviewContentChange,
-    isExporting,
-    isHydrating
+    handlePreviewContentChange
   ])
+
+  useEffect(() => {
+    if (!showPreviewOverlay || !previewOpenedRef.current) {
+      return
+    }
+    window.dispatchEvent(
+      new CustomEvent(EXPORT_PREVIEW_UPDATE_EVENT, {
+        detail: { isExporting: isExporting || isHydrating }
+      })
+    )
+  }, [showPreviewOverlay, isExporting, isHydrating])
 
   const handleCloseModal = useCallback(() => {
     if (showPreviewOverlay) {
@@ -2534,6 +3203,13 @@ function StudioModal({ onClose }: { onClose: () => void }) {
     }
     onClose()
   }, [showPreviewOverlay, onClose])
+
+  console.log("DOC:", documentEntries.map((e) => `${e.title} | ${e.type}`))
+  console.log("VIS:", visualEntries.map((e) => `${e.title} | ${e.type}`))
+  console.log("DISPLAY:", displayEntries.map((e) => `${e.title} | ${e.type} | ${e.kind}`))
+  console.log("SELECTABLE:", selectableEntries.map((e) => `${e.title} | ${e.type}`))
+  console.log("FILTERED_VIS:", filteredVisualEntries.map((e) => `${e.title} | ${e.type}`))
+  console.log("FILTERED_DOC:", filteredDocumentEntries.map((e) => `${e.title} | ${e.type}`))
 
   return (
     <div className="studio-modal-stack">
@@ -2620,22 +3296,52 @@ function StudioModal({ onClose }: { onClose: () => void }) {
 
           <div className="source-list">
             {error ? <div className="source-error">{error}</div> : null}
-            {!hasFilteredEntries && <div className="source-empty">Nenhum item do Estúdio encontrado.</div>}
-            {filteredEntries.map((entry) => (
-              <label key={entry.id} className="source-item">
-                <input
-                  type="checkbox"
-                  checked={selectedIds.has(entry.id)}
-                  onChange={() => handleToggleEntry(entry.id)}
-                />
-                <span>
-                  <span className="source-title" title={entry.title}>
-                    {entry.title}
+            {!hasAnyEntries && !isLoading && (
+              <div className="source-empty">Nenhum item do Estúdio encontrado.</div>
+            )}
+            {selectableEntries.map((entry) => {
+              const subtitle =
+                toExcerpt(entry.meta || entry.content || "", 140) || "Resultado do Estudio"
+              return (
+                <label key={entry.id} className="source-item">
+                  <input
+                    type="checkbox"
+                    checked={selectedIds.has(entry.id)}
+                    onChange={() => handleToggleEntry(entry.id)}
+                  />
+                  <span>
+                    <span className="source-title" title={entry.title}>
+                      {entry.title}
+                    </span>
+                    <span className="source-kind">{subtitle}</span>
                   </span>
-                  <span className="source-kind">{entry.meta ?? "Resultado do Estúdio"}</span>
-                </span>
-              </label>
-            ))}
+                </label>
+              )
+            })}
+            {/* excluidos ocultados */}
+            {filteredVisualEntries.length > 0 && (
+              <>
+                <div className="source-section-title">Visuais</div>
+                {filteredVisualEntries.map((entry) => (
+                  <label key={entry.id} className="source-item">
+                    <input
+                      type="checkbox"
+                      checked={selectedIds.has(entry.id)}
+                      onChange={() => handleToggleEntry(entry.id)}
+                    />
+                    <span>
+                      <span className="source-title" title={entry.title}>
+                        {entry.title}
+                      </span>
+                      <span className="source-kind">
+                        {entry.type ?? "Recurso visual"} ·{" "}
+                        {resolveFileExtension(entry.type ?? "", entry.url ?? "")}
+                      </span>
+                    </span>
+                  </label>
+                ))}
+              </>
+            )}
           </div>
 
           <footer className="footer">
@@ -2643,14 +3349,14 @@ function StudioModal({ onClose }: { onClose: () => void }) {
               type="button"
               className="btn-ghost"
               onClick={handlePreviewClick}
-              disabled={!hasSelection || isExporting || isHydrating || showPreviewOverlay}>
+              disabled={!hasPreviewSelection || isExporting || isHydrating || showPreviewOverlay}>
               <Eye width={16} height={16} />
               {isHydrating ? "Carregando..." : "Prévia"}
             </button>
             <button
               type="button"
               className="btn-primary"
-              onClick={handleExport}
+              onClick={() => handleExport()}
               disabled={isExporting || isHydrating || !hasSelection}>
               {isExporting || isHydrating ? (
                 <Loader2 size={16} strokeWidth={2} className="spin" />
@@ -2670,6 +3376,11 @@ function StudioModal({ onClose }: { onClose: () => void }) {
 export function StudioExportButton() {
   const [isOpen, setIsOpen] = useState(false)
   const { shadowRoot, injectCSS } = useShadowPortal("studio-export-modal", isOpen, 2147483646)
+
+  useEffect(() => {
+    if (!isOpen) return
+    bgLog({ tag: "studio-modal-open" })
+  }, [isOpen])
   const cssInjectedRef = useRef(false)
   const mountRef = useRef<HTMLDivElement | null>(null)
   const rootRef = useRef<Root | null>(null)
@@ -2762,4 +3473,6 @@ function swallowInteraction(event: {
   const native = event.nativeEvent as Event & { stopImmediatePropagation?: () => void }
   native?.stopImmediatePropagation?.()
 }
+
+
 

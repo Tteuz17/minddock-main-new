@@ -158,6 +158,9 @@ function installPageHook() {
 
     next.updatedAt = Date.now()
     ;(window as unknown as Record<string, unknown>)[CONTEXT_KEY] = next
+    try {
+      window.postMessage({ source: "minddock", type: "MINDDOCK_RPC_CONTEXT", payload: next }, "*")
+    } catch {}
     flushStudioListFetch("ctx-updated")
   }
 

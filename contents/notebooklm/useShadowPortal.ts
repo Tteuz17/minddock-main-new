@@ -21,7 +21,7 @@ export function useShadowPortal(
     const host = document.createElement("div")
     host.setAttribute("data-minddock-shadow-host", hostAttr)
     host.style.cssText =
-      `position:fixed;top:0;left:0;width:0;height:0;z-index:${zIndex};pointer-events:none;`
+      `position:fixed;top:0;left:0;width:100%;height:100%;z-index:${zIndex};pointer-events:none;will-change:transform;isolation:isolate;`
     document.body.appendChild(host)
     hostRef.current = host
 

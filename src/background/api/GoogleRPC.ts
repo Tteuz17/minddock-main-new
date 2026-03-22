@@ -111,7 +111,7 @@ export class GoogleRPC {
       requestUrl.searchParams.set("bl", options.bl)
     }
 
-    if (tokens.authUser && String(tokens.authUser).trim()) {
+    if (tokens?.authUser && String(tokens.authUser).trim()) {
       requestUrl.searchParams.set("authuser", String(tokens.authUser).trim())
     }
 

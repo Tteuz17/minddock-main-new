@@ -1,37 +1,46 @@
 /**
  * ExportPreviewPanel
  *
- * Clone estrutural do SourcePreviewPanel, com miolo substituido pelo ExportModalViewer.
- * Comunicacao via eventos customizados (open/close) para evitar acoplamento com o DOM do host.
+ * Modal de pre-visualizacao do Estudio.
+ * Migrado de Shadow DOM + useShadowPortal para portal normal + CSS escopado
+ * para corrigir o bug de insertBefore do React reconciler dentro de Shadow roots.
  */
 
-import React, { useCallback, useEffect, useRef, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import * as ReactDOM from "react-dom"
-import { useShadowPortal } from "./useShadowPortal"
+import { useMindDockPortal } from "./useMindDockPortal"
 
-// ---------------------------------------------------------------------------
-// Eventos publicos
-// ---------------------------------------------------------------------------
-
+// --- Constantes de evento ---------------------------------------------------
 export const EXPORT_PREVIEW_OPEN_EVENT = "minddock:export-preview:open"
 export const EXPORT_PREVIEW_CLOSE_EVENT = "minddock:export-preview:close"
+export const EXPORT_PREVIEW_UPDATE_EVENT = "minddock:export-preview:update"
 
+let previewRenderLogged = false
+
+// --- Tipos ------------------------------------------------------------------
 export type ExportPreviewFormat = "markdown" | "text" | "pdf" | "docx"
 
-export interface ExportPreviewCardItem {
+export interface ExportPreviewItem {
   id: string
   title: string
   subtitle: string
   content: string
 }
 
+export interface ExportFormatOption {
+  id: ExportPreviewFormat
+  label: string
+  sub: string
+  noTranslate?: boolean
+}
+
 export interface ExportPreviewOpenDetail {
-  items: ExportPreviewCardItem[]
+  items: ExportPreviewItem[]
   format: ExportPreviewFormat
-  formatOptions: Array<{ id: ExportPreviewFormat; label: string; sub: string; noTranslate?: boolean }>
-  onChangeFormat?: (format: ExportPreviewFormat) => void
-  onChangeItem?: (id: string, nextContent: string) => void
-  onRequestExport?: () => void
+  formatOptions: ExportFormatOption[]
+  onChangeFormat?: (id: ExportPreviewFormat) => void
+  onChangeItem?: (id: string, content: string) => void
+  onRequestExport?: (format?: ExportPreviewFormat) => void
   isExporting?: boolean
   labels: {
     previewLabTitle: string
@@ -45,17 +54,189 @@ export interface ExportPreviewOpenDetail {
   }
 }
 
-type PreviewCardItemProps = {
+// --- CSS escopado (sem Shadow DOM) ------------------------------------------
+const EXPORT_CSS = `
+.minddock-export, .minddock-export *, .minddock-export *::before, .minddock-export *::after {
+  box-sizing: border-box; margin: 0; padding: 0;
+}
+.minddock-export { font-family: 'Inter', 'Segoe UI', system-ui, sans-serif; }
+
+.minddock-export.overlay {
+  position: fixed; inset: 0; z-index: 2147483647;
+  display: flex; align-items: center; justify-content: center;
+  padding: 16px;
+  background: rgba(0,0,0,0.92);
+  overscroll-behavior: contain;
+  pointer-events: auto;
+  animation: minddock-fadeIn 180ms ease;
+}
+@keyframes minddock-fadeIn { from { opacity:0 } to { opacity:1 } }
+
+.minddock-export .panel {
+  position: relative;
+  display: flex; flex-direction: column;
+  width: 100%; max-width: 960px; max-height: 88vh;
+  overflow: hidden;
+  border-radius: 14px;
+  border: 1px solid rgba(255,255,255,0.14);
+  background: #000; color: #e2e6ee;
+  box-shadow: 0 18px 48px rgba(0,0,0,0.56);
+  animation: minddock-slideUp 200ms cubic-bezier(0.16,1,0.3,1);
+  overscroll-behavior: contain;
+}
+@keyframes minddock-slideUp {
+  from { opacity:0; margin-top:10px }
+  to   { opacity:1; margin-top:0 }
+}
+.minddock-export .panel::before {
+  content:''; position:absolute; inset-x:0; top:0;
+  height:1px; background:rgba(255,255,255,0.16);
+  border-radius:14px 14px 0 0; pointer-events:none;
+}
+
+/* Header */
+.minddock-export .header {
+  display:flex; align-items:flex-start; justify-content:space-between; gap:16px;
+  padding:16px 20px;
+  border-bottom:1px solid rgba(255,255,255,0.12);
+  background:#060606; flex-shrink:0;
+}
+.minddock-export .badge {
+  display:inline-flex; align-items:center; gap:6px;
+  border-radius:6px; border:1px solid rgba(255,255,255,0.16);
+  background:#0b0b0b; padding:3px 8px;
+  font-size:10px; font-weight:700; text-transform:uppercase;
+  letter-spacing:0.08em; color:#b7c0cf;
+}
+.minddock-export .badge-dot { width:7px; height:7px; border-radius:50%; background:#facc15; flex-shrink:0; }
+.minddock-export .h-title { font-size:28px; font-weight:600; color:#fff; margin-top:8px; line-height:1; }
+.minddock-export .h-sub   { font-size:13px; color:#9da7b8; margin-top:6px; line-height:1.6; }
+.minddock-export .close-btn {
+  flex-shrink:0; display:inline-flex; align-items:center; justify-content:center;
+  width:40px; height:40px; border-radius:8px;
+  border:1px solid rgba(255,255,255,0.2); background:#0a0a0a; color:#a9b2c1;
+  cursor:pointer; font-size:16px;
+  transition:border-color 150ms,background 150ms,color 150ms;
+}
+.minddock-export .close-btn:hover { border-color:rgba(250,204,21,0.55); background:#151209; color:#facc15; }
+
+/* Format bar */
+.minddock-export .format-bar {
+  display:grid; grid-template-columns:repeat(4,1fr); gap:8px;
+  margin:12px 20px 0;
+  border-radius:10px; border:1px solid rgba(255,255,255,0.16);
+  background:#0c0c0c; padding:10px;
+  flex-shrink:0;
+}
+@media (max-width:600px) { .minddock-export .format-bar { grid-template-columns:repeat(2,1fr); } }
+.minddock-export .fmt-btn {
+  display:flex; flex-direction:column; justify-content:center; gap:2px;
+  min-height:50px; border-radius:8px;
+  border:1px solid rgba(255,255,255,0.16); background:#111; color:#c8d1de;
+  padding:8px 10px; cursor:pointer;
+  transition:border-color 150ms,background 150ms,color 150ms;
+}
+.minddock-export .fmt-btn:hover { border-color:rgba(250,204,21,0.35); background:#161616; }
+.minddock-export .fmt-btn.active { border-color:#facc15; background:#facc15; color:#131002; }
+.minddock-export .fmt-label { font-size:14px; font-weight:600; line-height:1; }
+.minddock-export .fmt-sub   { font-size:11px; opacity:0.85; line-height:1.2; }
+
+/* Draft grid */
+.minddock-export .draft-area {
+  flex:1; min-height:0; overflow-y:auto;
+  display:grid; grid-template-columns:repeat(2,1fr);
+  gap:16px; padding:12px 20px;
+}
+.minddock-export .draft-area,
+.minddock-export .draft-card textarea {
+  scrollbar-color: #1f2937 #050505;
+  scrollbar-width: thin;
+}
+.minddock-export .draft-area::-webkit-scrollbar,
+.minddock-export .draft-card textarea::-webkit-scrollbar { width: 10px; }
+.minddock-export .draft-area::-webkit-scrollbar-track,
+.minddock-export .draft-card textarea::-webkit-scrollbar-track { background: #050505; }
+.minddock-export .draft-area::-webkit-scrollbar-thumb,
+.minddock-export .draft-card textarea::-webkit-scrollbar-thumb {
+  background: #1f2937;
+  border-radius: 999px;
+  border: 2px solid #050505;
+}
+@media (max-width:680px) { .minddock-export .draft-area { grid-template-columns:1fr; } }
+
+.minddock-export .draft-card {
+  display:flex; flex-direction:column;
+  height:320px; overflow:hidden;
+  border-radius:10px; border:1px solid rgba(255,255,255,0.16); background:#111;
+}
+.minddock-export .card-header {
+  padding:10px 12px; border-bottom:1px solid rgba(255,255,255,0.12); flex-shrink:0;
+}
+.minddock-export .card-title { font-size:14px; font-weight:600; color:#fff; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.minddock-export .card-sub   { font-size:12px; color:#9ca3af; margin-top:2px; }
+.minddock-export .draft-card textarea {
+  flex:1; resize:none; background:transparent; border:none; outline:none;
+  padding:12px; font-size:13px; line-height:1.65; color:#e5e7eb; overflow-y:auto;
+  font-family:'JetBrains Mono','Consolas',monospace;
+}
+.minddock-export .draft-card textarea::placeholder { color:#6b7280; }
+
+.minddock-export .empty {
+  flex:1; display:flex; align-items:center; justify-content:center;
+  font-size:14px; color:#9ca3af; padding:32px 20px;
+}
+
+/* Footer */
+.minddock-export .footer {
+  display:grid; grid-template-columns:240px 1fr; gap:12px;
+  padding:12px 20px 20px;
+  border-top:1px solid rgba(255,255,255,0.08);
+  background:#060606; flex-shrink:0;
+}
+.minddock-export .btn-back {
+  display:inline-flex; align-items:center; justify-content:center; gap:6px;
+  min-height:54px; border-radius:10px;
+  border:1px solid rgba(255,255,255,0.2); background:#111; color:#d9dfeb;
+  font-size:16px; font-weight:600; cursor:pointer;
+  transition:border-color 150ms,background 150ms;
+}
+.minddock-export .btn-back:hover:not(:disabled) { border-color:rgba(250,204,21,0.45); background:#171717; }
+.minddock-export .btn-back:disabled { cursor:not-allowed; opacity:0.45; }
+.minddock-export .btn-download {
+  display:inline-flex; align-items:center; justify-content:center; gap:8px;
+  min-height:54px; border-radius:10px;
+  border:1px solid #eab308; background:#facc15; color:#1b1400;
+  font-size:16px; font-weight:600; cursor:pointer;
+  box-shadow:6px 6px 0 rgba(250,204,21,0.18);
+  transition:background 150ms;
+}
+.minddock-export .btn-download:hover:not(:disabled) { background:#fbbf24; }
+.minddock-export .btn-download:disabled { cursor:not-allowed; opacity:0.45; }
+.minddock-export .spin { animation:minddock-spin 0.8s linear infinite; display:inline-block; }
+@keyframes minddock-spin { to { transform:rotate(360deg); } }
+`
+
+// --- Injeta o CSS no <head> uma unica vez -----------------------------------
+function injectExportCSS() {
+  if (document.getElementById("minddock-export-styles")) return
+  const style = document.createElement("style")
+  style.id = "minddock-export-styles"
+  style.textContent = EXPORT_CSS
+  document.head.appendChild(style)
+}
+
+// --- PreviewCardItem ---------------------------------------------------------
+interface PreviewCardItemProps {
   id: string
   title: string
   subtitle: string
   content: string
   activeFormatLabel: string
   placeholder: string
-  onChangeItem?: (id: string, nextContent: string) => void
+  onChangeItem?: (id: string, content: string) => void
 }
 
-const PreviewCardItem = React.memo(function PreviewCardItem({
+function PreviewCardItem({
   id,
   title,
   subtitle,
@@ -64,211 +245,42 @@ const PreviewCardItem = React.memo(function PreviewCardItem({
   placeholder,
   onChangeItem
 }: PreviewCardItemProps) {
-  const handleChange = useCallback(
-    (event: React.ChangeEvent<HTMLTextAreaElement>) => {
-      onChangeItem?.(id, event.target.value)
-    },
-    [id, onChangeItem]
-  )
-
+  if (!previewRenderLogged) {
+    previewRenderLogged = true
+    console.log("[studioModal] render", {
+      id,
+      title,
+      hasContent: !!content,
+      contentPreview: typeof content === "string" ? content.slice(0, 80) : content
+    })
+  }
   return (
     <div className="draft-card">
       <div className="card-header">
-        <div className="card-title" title={title}>
-          <span>{title}</span>
-        </div>
+        <div className="card-title">{title}</div>
         <div className="card-sub">
           <span>{subtitle}</span>
-          <span> | </span>
-          <span>{activeFormatLabel}</span>
+          {activeFormatLabel ? <span> | {activeFormatLabel}</span> : null}
         </div>
       </div>
       <textarea
-        value={content}
-        onChange={handleChange}
         placeholder={placeholder}
+        value={content}
+        onChange={(e) => onChangeItem?.(id, e.target.value)}
       />
     </div>
   )
-})
+}
 
-const SHADOW_CSS = `
-  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-  :host { all: initial; font-family: 'Inter', 'Segoe UI', system-ui, sans-serif; }
-
-  .overlay {
-    position: fixed; inset: 0; z-index: 2147483647;
-    display: flex; align-items: center; justify-content: center;
-    padding: 16px;
-    background: rgba(0,0,0,0.88);
-    backdrop-filter: blur(1px);
-    overscroll-behavior: contain;
-    pointer-events: auto;
-    animation: fadeIn 180ms ease;
-  }
-  @keyframes fadeIn { from { opacity:0 } to { opacity:1 } }
-
-  .panel {
-    position: relative;
-    display: flex; flex-direction: column;
-    width: 100%; max-width: 960px; max-height: 88vh;
-    overflow: hidden;
-    border-radius: 14px;
-    border: 1px solid rgba(255,255,255,0.14);
-    background: #000; color: #e2e6ee;
-    box-shadow: 0 18px 48px rgba(0,0,0,0.56);
-    animation: slideUp 200ms cubic-bezier(0.16,1,0.3,1);
-    overscroll-behavior: contain;
-  }
-  @keyframes slideUp {
-    from { opacity:0; transform:scale(0.96) translateY(10px) }
-    to   { opacity:1; transform:scale(1)    translateY(0)     }
-  }
-  .panel::before {
-    content:''; position:absolute; inset-x:0; top:0;
-    height:1px; background:rgba(255,255,255,0.16);
-    border-radius:14px 14px 0 0; pointer-events:none;
-  }
-
-  /* Header */
-  .header {
-    display:flex; align-items:flex-start; justify-content:space-between; gap:16px;
-    padding:16px 20px;
-    border-bottom:1px solid rgba(255,255,255,0.12);
-    background:#060606; flex-shrink:0;
-  }
-  .badge {
-    display:inline-flex; align-items:center; gap:6px;
-    border-radius:6px; border:1px solid rgba(255,255,255,0.16);
-    background:#0b0b0b; padding:3px 8px;
-    font-size:10px; font-weight:700; text-transform:uppercase;
-    letter-spacing:0.08em; color:#b7c0cf;
-  }
-  .badge-dot { width:7px; height:7px; border-radius:50%; background:#facc15; flex-shrink:0; }
-  .h-title { font-size:28px; font-weight:600; color:#fff; margin-top:8px; line-height:1; }
-  .h-sub   { font-size:13px; color:#9da7b8; margin-top:6px; line-height:1.6; }
-  .close-btn {
-    flex-shrink:0; display:inline-flex; align-items:center; justify-content:center;
-    width:40px; height:40px; border-radius:8px;
-    border:1px solid rgba(255,255,255,0.2); background:#0a0a0a; color:#a9b2c1;
-    cursor:pointer; font-size:16px;
-    transition:border-color 150ms,background 150ms,color 150ms;
-  }
-  .close-btn:hover { border-color:rgba(250,204,21,0.55); background:#151209; color:#facc15; }
-
-  /* Format bar */
-  .format-bar {
-    display:grid; grid-template-columns:repeat(4,1fr); gap:8px;
-    margin:12px 20px 0;
-    border-radius:10px; border:1px solid rgba(255,255,255,0.16);
-    background:#0c0c0c; padding:10px;
-    flex-shrink:0;
-  }
-  @media (max-width:600px) { .format-bar { grid-template-columns:repeat(2,1fr); } }
-  .fmt-btn {
-    display:flex; flex-direction:column; justify-content:center; gap:2px;
-    min-height:50px; border-radius:8px;
-    border:1px solid rgba(255,255,255,0.16); background:#111; color:#c8d1de;
-    padding:8px 10px; cursor:pointer;
-    transition:border-color 150ms,background 150ms,color 150ms;
-  }
-  .fmt-btn:hover { border-color:rgba(250,204,21,0.35); background:#161616; }
-  .fmt-btn.active { border-color:#facc15; background:#facc15; color:#131002; }
-  .fmt-label { font-size:14px; font-weight:600; line-height:1; }
-  .fmt-sub   { font-size:11px; opacity:0.85; line-height:1.2; }
-
-  /* Draft grid */
-  .draft-area {
-    flex:1; min-height:0; overflow-y:auto;
-    display:grid; grid-template-columns:repeat(2,1fr);
-    gap:16px; padding:12px 20px;
-    overscroll-behavior: contain;
-    scrollbar-gutter: stable;
-  }
-  .draft-area,
-  .draft-card textarea {
-    scrollbar-color: #1f2937 #050505;
-    scrollbar-width: thin;
-  }
-  .draft-area::-webkit-scrollbar,
-  .draft-card textarea::-webkit-scrollbar { width: 10px; }
-  .draft-area::-webkit-scrollbar-track,
-  .draft-card textarea::-webkit-scrollbar-track { background: #050505; }
-  .draft-area::-webkit-scrollbar-thumb,
-  .draft-card textarea::-webkit-scrollbar-thumb {
-    background: #1f2937;
-    border-radius: 999px;
-    border: 2px solid #050505;
-  }
-  @media (max-width:680px) { .draft-area { grid-template-columns:1fr; } }
-
-  .draft-card {
-    display:flex; flex-direction:column;
-    height:320px; overflow:hidden;
-    border-radius:10px; border:1px solid rgba(255,255,255,0.16); background:#111;
-  }
-  .card-header {
-    padding:10px 12px; border-bottom:1px solid rgba(255,255,255,0.12); flex-shrink:0;
-  }
-  .card-title { font-size:14px; font-weight:600; color:#fff; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .card-sub   { font-size:12px; color:#9ca3af; margin-top:2px; }
-  .draft-card textarea {
-    flex:1; resize:none; background:transparent; border:none; outline:none;
-    padding:12px; font-size:13px; line-height:1.65; color:#e5e7eb; overflow-y:auto;
-    font-family:'JetBrains Mono','Consolas',monospace;
-    overscroll-behavior: contain;
-  }
-  .draft-card textarea::placeholder { color:#6b7280; }
-
-  .empty {
-    flex:1; display:flex; align-items:center; justify-content:center;
-    font-size:14px; color:#9ca3af; padding:32px 20px;
-  }
-
-  /* Footer */
-  .footer {
-    display:grid; grid-template-columns:240px 1fr; gap:12px;
-    padding:12px 20px 20px;
-    border-top:1px solid rgba(255,255,255,0.08);
-    background:#060606; flex-shrink:0;
-  }
-  .btn-back {
-    display:inline-flex; align-items:center; justify-content:center; gap:6px;
-    min-height:54px; border-radius:10px;
-    border:1px solid rgba(255,255,255,0.2); background:#111; color:#d9dfeb;
-    font-size:16px; font-weight:600; cursor:pointer;
-    transition:border-color 150ms,background 150ms;
-  }
-  .btn-back:hover:not(:disabled) { border-color:rgba(250,204,21,0.45); background:#171717; }
-  .btn-back:disabled { cursor:not-allowed; opacity:0.45; }
-
-  .btn-download {
-    display:inline-flex; align-items:center; justify-content:center; gap:8px;
-    min-height:54px; border-radius:10px;
-    border:1px solid #eab308; background:#facc15; color:#1b1400;
-    font-size:16px; font-weight:600; cursor:pointer;
-    box-shadow:6px 6px 0 rgba(250,204,21,0.18);
-    transition:background 150ms;
-  }
-  .btn-download:hover:not(:disabled) { background:#fbbf24; }
-  .btn-download:disabled { cursor:not-allowed; opacity:0.45; }
-
-  .spin { animation:spin 0.8s linear infinite; display:inline-block; }
-  @keyframes spin { to { transform:rotate(360deg); } }
-`
-
+// --- Componente principal ----------------------------------------------------
 export function ExportPreviewPanel() {
   const [detail, setDetail] = useState<ExportPreviewOpenDetail | null>(null)
-  const { shadowRoot, injectCSS } = useShadowPortal("export-preview-panel", detail !== null, 2147483647)
-  const cssInjectedRef = useRef(false)
+  const container = useMindDockPortal("export-preview-panel", 2147483647)
   const panelRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
-    if (shadowRoot && !cssInjectedRef.current) {
-      injectCSS(SHADOW_CSS)
-      cssInjectedRef.current = true
-    }
-  }, [shadowRoot, injectCSS])
+    injectExportCSS()
+  }, [])
 
   useEffect(() => {
     const onOpen = (event: Event) => {
@@ -285,6 +297,15 @@ export function ExportPreviewPanel() {
   }, [])
 
   useEffect(() => {
+    const onUpdate = (event: Event) => {
+      const custom = event as CustomEvent<{ isExporting: boolean }>
+      setDetail((prev) => (prev ? { ...prev, isExporting: custom.detail.isExporting } : prev))
+    }
+    window.addEventListener(EXPORT_PREVIEW_UPDATE_EVENT, onUpdate)
+    return () => window.removeEventListener(EXPORT_PREVIEW_UPDATE_EVENT, onUpdate)
+  }, [])
+
+  useEffect(() => {
     if (!detail) return
     const handler = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
@@ -296,64 +317,40 @@ export function ExportPreviewPanel() {
     return () => window.removeEventListener("keydown", handler, true)
   }, [detail])
 
-
-  const stopProp = useCallback((e: React.MouseEvent) => e.stopPropagation(), [])
-
-  const handleWheelCapture = useCallback((event: React.WheelEvent) => {
-    const panel = panelRef.current
-    if (!panel) {
-      event.preventDefault()
-      event.stopPropagation()
-      return
-    }
-    const target = event.target as HTMLElement | null
-    if (!target || !panel.contains(target)) {
-      event.preventDefault()
-      event.stopPropagation()
-      return
-    }
-
-    const deltaY = event.deltaY
-    if (deltaY === 0) {
-      return
-    }
-
-    let el: HTMLElement | null = target
-    while (el && el !== panel) {
-      const style = window.getComputedStyle(el)
-      const overflowY = style.overflowY
-      const isScrollable =
-        (overflowY === "auto" || overflowY === "scroll" || overflowY === "overlay") &&
-        el.scrollHeight > el.clientHeight + 1
-      if (isScrollable) {
-        const canScrollDown = el.scrollTop + el.clientHeight < el.scrollHeight - 1
-        const canScrollUp = el.scrollTop > 0
-        if ((deltaY > 0 && canScrollDown) || (deltaY < 0 && canScrollUp)) {
-          return
-        }
-      }
-      el = el.parentElement
-    }
-
-    event.preventDefault()
-    event.stopPropagation()
-  }, [])
-
-  if (!shadowRoot || !detail) return null
-
   const handleClose = () => {
-    setDetail(null)
     window.dispatchEvent(new CustomEvent(EXPORT_PREVIEW_CLOSE_EVENT))
   }
 
+  const stopProp = (e: React.MouseEvent) => e.stopPropagation()
+
+  const handleFormatClick = (nextFormat: ExportPreviewFormat) => {
+    if (!detail) {
+      return
+    }
+    detail.onChangeFormat?.(nextFormat)
+    setDetail((prev) => (prev ? { ...prev, format: nextFormat } : prev))
+  }
+
+  const handleExportClick = () => {
+    if (!detail) {
+      return
+    }
+    if (detail.onRequestExport) {
+      detail.onRequestExport(detail.format)
+      return
+    }
+    handleClose()
+  }
+
   const activeFormatLabel =
-    detail.formatOptions.find((opt) => opt.id === detail.format)?.label ?? detail.format
+    detail?.formatOptions.find((o) => o.id === detail.format)?.label ?? ""
+
+  if (!detail || !container) return null
 
   return ReactDOM.createPortal(
     <div
-      className="overlay"
-      onClick={(e) => { if (e.target === e.currentTarget) handleClose() }}
-      onWheelCapture={handleWheelCapture}>
+      className="minddock-export overlay"
+      onClick={(e) => { if (e.target === e.currentTarget) handleClose() }}>
       <div
         role="dialog"
         aria-modal="true"
@@ -362,6 +359,7 @@ export function ExportPreviewPanel() {
         ref={panelRef}
         onClick={stopProp}
         onMouseDown={stopProp}>
+
         <header className="header">
           <div>
             <span className="badge">
@@ -384,7 +382,7 @@ export function ExportPreviewPanel() {
                 key={opt.id}
                 type="button"
                 className={`fmt-btn${isActive ? " active" : ""}`}
-                onClick={() => detail.onChangeFormat?.(opt.id)}>
+                onClick={() => handleFormatClick(opt.id)}>
                 <span className="fmt-label" translate={opt.noTranslate ? "no" : undefined}>
                   {opt.label}
                 </span>
@@ -427,7 +425,7 @@ export function ExportPreviewPanel() {
             type="button"
             className="btn-download"
             disabled={detail.isExporting || detail.items.length === 0}
-            onClick={detail.onRequestExport ?? handleClose}>
+            onClick={handleExportClick}>
             {detail.isExporting ? <span className="spin">↻</span> : (
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
@@ -440,6 +438,6 @@ export function ExportPreviewPanel() {
         </footer>
       </div>
     </div>,
-    shadowRoot
+    container
   )
 }

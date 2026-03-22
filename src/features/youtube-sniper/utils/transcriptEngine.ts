@@ -1,6 +1,6 @@
 import { MESSAGE_ACTIONS } from "~/lib/contracts";
 
-const TAG = '[YT-SNIPER][ENGINE]';
+const IS_DEV = process.env.NODE_ENV === "development";
 
 // Dados capturados pela bridge
 let sniperData: { videoId: string; baseUrl: string } | null = null;
@@ -14,7 +14,6 @@ window.addEventListener('message', (event) => {
   if (!videoId || !baseUrl) return;
 
   sniperData = { videoId, baseUrl };
-  console.log(`${TAG} dados recebidos. videoId=${videoId}`);
 });
 
 // Solicita os dados sob demanda se ainda não chegaram
@@ -25,15 +24,12 @@ function requestSniperData(): Promise<{ videoId: string; baseUrl: string }> {
       return;
     }
 
-    console.log(`${TAG} dados não disponíveis — solicitando à bridge`);
-
     let tentativas = 0;
     const MAX_TENTATIVAS = 5; // tenta 5 vezes
     const INTERVALO = 2000; // a cada 2s
 
     function tentar() {
       tentativas++;
-      console.log(`${TAG} tentativa ${tentativas} de ${MAX_TENTATIVAS}`);
 
       window.postMessage(
         {
@@ -83,8 +79,6 @@ export async function extractTranscriptSlice(
   const safeStart = Math.min(startSec, endSec);
   const safeEnd = Math.max(startSec, endSec);
 
-  console.log(`${TAG} extraindo ${safeStart}s → ${safeEnd}s`);
-
   // Pega só o videoId — baseUrl não é mais necessário
   const videoId = await getVideoId();
 
@@ -103,11 +97,17 @@ export async function extractTranscriptSlice(
         clearTimeout(timeout);
 
         if (chrome.runtime.lastError) {
+          if (IS_DEV) {
+            console.error('[YT-SNIPER][ENGINE] runtime error:', chrome.runtime.lastError.message);
+          }
           reject(new Error(chrome.runtime.lastError.message));
           return;
         }
 
         if (!response?.success) {
+          if (IS_DEV) {
+            console.error('[YT-SNIPER][ENGINE] response error:', response?.error ?? 'Falha ao buscar legenda.');
+          }
           reject(new Error(response?.error ?? 'Falha ao buscar legenda.'));
           return;
         }
@@ -119,7 +119,6 @@ export async function extractTranscriptSlice(
           return;
         }
 
-        console.log(`${TAG} texto extraído: ${text.length} chars`);
         resolve(text);
       }
     );
@@ -147,5 +146,5 @@ function getVideoId(): Promise<string> {
 // Limpa os dados ao trocar de vídeo
 window.addEventListener('yt-navigate-finish', () => {
   sniperData = null;
-  console.log(`${TAG} dados limpos por navegação`);
+  // sem logs aqui
 });

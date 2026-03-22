@@ -5,9 +5,9 @@
  * interferencia do DOM do NotebookLM.
  */
 
-import { useCallback, useEffect, useRef, type ComponentType } from "react"
+import { useCallback, useEffect, useRef } from "react"
 import * as ReactDOM from "react-dom"
-import { Download, Loader2, X } from "lucide-react"
+import { Download, Loader2, X, type LucideIcon } from "lucide-react"
 import { useShadowPortal } from "./useShadowPortal"
 
 // ---------------------------------------------------------------------------
@@ -26,7 +26,7 @@ export interface ModalPreviewRenderState {
 export interface FormatOption {
   id: ExportFormat
   label: string
-  icon: ComponentType<{ size?: number; strokeWidth?: number; className?: string }>
+  icon: LucideIcon
 }
 
 export interface PreviewExportModalProps {

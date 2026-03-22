@@ -32,6 +32,8 @@ import {
   resolveConversationPrimaryKey
 } from "~/lib/conversation-resync-identity"
 
+const IS_DEV = process.env.NODE_ENV === "development"
+
 type MessageSender = chrome.runtime.MessageSender
 type CaptureSourceKind = "chat" | "doc"
 
@@ -2918,8 +2920,6 @@ class MessageRouter {
     const startSec = Number(data.startSec)
     const endSec = Number(data.endSec)
 
-    console.log("[SNIPER][BG] handler chamado. payload:", JSON.stringify(data))
-
     if (!videoId) return this.fail("videoId ausente")
 
     const safeStart = Math.min(startSec, endSec)
@@ -2928,7 +2928,6 @@ class MessageRouter {
     try {
       const tabs = await chrome.tabs.query({ active: true, currentWindow: true })
       const tabId = tabs.find((t) => t.url?.includes("youtube.com/watch"))?.id
-      console.log("[SNIPER][BG] tabId:", tabId)
       if (!tabId) return this.fail("Aba do YouTube nao encontrada")
 
       try {
@@ -2936,8 +2935,6 @@ class MessageRouter {
           target: { tabId },
           world: "MAIN",
           func: async (safeStart: number, safeEnd: number) => {
-            console.log("[SNIPER][FUNC] start:", safeStart, "end:", safeEnd)
-
             const PANEL_MODERN  = 'ytd-engagement-panel-section-list-renderer[target-id="PAmodern_transcript_view"]'
             const PANEL_LEGACY  = 'ytd-engagement-panel-section-list-renderer[target-id="engagement-panel-searchable-transcript"]'
             const SEGMENT_NEW   = "TRANSCRIPT-SEGMENT-VIEW-MODEL"
@@ -3078,8 +3075,6 @@ class MessageRouter {
                 if (all.length > 0) { openBtn = all[0]; break }
               }
             }
-            console.log("[SNIPER][FUNC] botao encontrado:", !!openBtn, openBtn?.getAttribute("aria-label"))
-
             if (!openBtn) {
               removeHideStyle()
               return { totalSegments: 0, filteredSegments: 0, text: "__ERROR__:Bot\u00e3o de transcri\u00e7\u00e3o n\u00e3o encontrado. O v\u00eddeo possui legendas?" }
@@ -3090,7 +3085,6 @@ class MessageRouter {
 
             // 4. Aguarda segmentos em qualquer painel
             const found = await waitForSegmentsAnyPanel(8000)
-            console.log("[SNIPER][FUNC] formato:", found?.isNewFormat ? "novo" : "legado", "| segmentos:", found?.segments.length ?? 0)
 
             if (!found || found.segments.length === 0) {
               removeHideStyle()
@@ -3111,8 +3105,6 @@ class MessageRouter {
               const text    = (txtEl.textContent ?? "").trim()
               if (seconds >= safeStart && seconds <= safeEnd && text) lines.push(text)
             }
-            console.log("[SNIPER][FUNC] segmentos no intervalo:", lines.length)
-
             // 6. Fechar painel
             let closeBtn: HTMLElement | null = null
             for (const label of CLOSE_LABELS) {
@@ -3141,8 +3133,6 @@ class MessageRouter {
           args: [safeStart, safeEnd]
         })
 
-        console.log("[SNIPER][BG] resultado:", JSON.stringify(result?.result))
-
         const payloadResult = result?.result as
           | { text?: string; totalSegments?: number; filteredSegments?: number }
           | undefined
@@ -3156,11 +3146,15 @@ class MessageRouter {
 
         return this.ok({ text: text.trim(), eventsCount: payloadResult.totalSegments ?? 0 })
       } catch (err: any) {
-        console.error("[SNIPER][BG] executeScript falhou:", err?.message ?? err)
+        if (IS_DEV) {
+          console.error("[SNIPER][BG] executeScript falhou:", err?.message ?? err)
+        }
         return this.fail("executeScript falhou: " + (err?.message ?? "erro desconhecido"))
       }
     } catch (err: any) {
-      console.error("[SNIPER][BG] erro:", err?.message ?? err)
+      if (IS_DEV) {
+        console.error("[SNIPER][BG] erro:", err?.message ?? err)
+      }
       return this.fail(err?.message ?? "erro desconhecido")
     }
   }

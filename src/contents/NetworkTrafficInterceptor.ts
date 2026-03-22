@@ -1178,7 +1178,7 @@ function extractStudioArtifacts(payload: unknown): StudioItem[] {
   return items
 }
 
-const STUDIO_RPC_ALLOWLIST = new Set(["cFji9"])
+const STUDIO_RPC_ALLOWLIST = new Set(["cFji9", "Fxmvse", "u1B5j"])
 
 function looksLikeJsonTreeString(value: string): boolean {
   const trimmed = value.trim()
