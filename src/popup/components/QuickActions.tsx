@@ -1,4 +1,4 @@
-import {
+﻿import {
   Download,
   Upload,
   Scissors,
@@ -20,32 +20,32 @@ export function QuickActions() {
   const actions: Action[] = [
     {
       icon: <MessageSquare size={16} strokeWidth={1.5} />,
-      label: "Importar conversa",
-      description: "Vá para um site suportado e clique no botão universal MindDock",
+      label: "Import conversation",
+      description: "Go to a supported site and click the universal MindDock button",
       onClick: () => chrome.tabs.create({ url: URLS.CHATGPT })
     },
     {
       icon: <Scissors size={16} strokeWidth={1.5} />,
       label: "Highlight & Snipe",
-      description: "Selecione texto em qualquer site e envie para o NotebookLM",
+      description: "Select text on any site and send it to NotebookLM",
       onClick: () => chrome.tabs.create({ url: URLS.NOTEBOOKLM })
     },
     {
       icon: <Upload size={16} strokeWidth={1.5} />,
       label: "Sync Google Docs",
-      description: "Abra um Google Doc e clique em 'Sync com NotebookLM'",
+      description: "Open a Google Doc and click 'Sync with NotebookLM'",
       onClick: () => chrome.tabs.create({ url: URLS.GOOGLE_DOCS })
     },
     {
       icon: <Download size={16} strokeWidth={1.5} />,
-      label: "Download de fontes",
-      description: "Selecione um notebook e baixe suas fontes em MD, TXT ou PDF",
+      label: "Download sources",
+      description: "Select a notebook and download its sources in MD, TXT, or PDF",
       onClick: () => chrome.tabs.create({ url: URLS.NOTEBOOKLM })
     },
     {
       icon: <RefreshCw size={16} strokeWidth={1.5} />,
-      label: "Atualizar cache",
-      description: "Força atualização da lista de notebooks",
+      label: "Refresh cache",
+      description: "Force refresh the notebooks list",
       onClick: async () => {
         await chrome.storage.local.remove(["minddock_notebooks_cache"])
         window.location.reload()
@@ -53,8 +53,8 @@ export function QuickActions() {
     },
     {
       icon: <ExternalLink size={16} strokeWidth={1.5} />,
-      label: "Abrir NotebookLM",
-      description: "Abre o Google NotebookLM em nova aba",
+      label: "Open NotebookLM",
+      description: "Open Google NotebookLM in a new tab",
       onClick: () => chrome.tabs.create({ url: URLS.NOTEBOOKLM })
     }
   ]
@@ -87,3 +87,4 @@ export function QuickActions() {
     </div>
   )
 }
+

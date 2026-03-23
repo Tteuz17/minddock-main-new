@@ -1,7 +1,7 @@
 import { clsx, type ClassValue } from "clsx"
 import { twMerge } from "tailwind-merge"
-import type { PlanLimits, SubscriptionTier } from "./types"
-import { PLANS } from "./constants"
+import type { PlanLimits, SubscriptionCycle, SubscriptionTier } from "./types"
+import { resolvePlanLimits } from "./constants"
 
 // ─── Tailwind class merge ────────────────────────────────────────────────────
 
@@ -11,15 +11,19 @@ export function cn(...inputs: ClassValue[]) {
 
 // ─── Plan helpers ────────────────────────────────────────────────────────────
 
-export function getPlanLimits(tier: SubscriptionTier): PlanLimits {
-  return PLANS[tier].limits
+export function getPlanLimits(
+  tier: SubscriptionTier,
+  cycle: SubscriptionCycle = "none"
+): PlanLimits {
+  return resolvePlanLimits(tier, cycle)
 }
 
 export function canUseFeature(
   tier: SubscriptionTier,
-  feature: keyof PlanLimits
+  feature: keyof PlanLimits,
+  cycle: SubscriptionCycle = "none"
 ): boolean {
-  const limits = getPlanLimits(tier)
+  const limits = getPlanLimits(tier, cycle)
   const val = limits[feature]
   if (typeof val === "boolean") return val
   if (val === "unlimited") return true

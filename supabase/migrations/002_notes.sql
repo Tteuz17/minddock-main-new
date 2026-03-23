@@ -37,6 +37,17 @@ CREATE POLICY "Users can CRUD own notes"
 
 -- Função para incrementar uso de prompts (usada em prompts.ts)
 CREATE OR REPLACE FUNCTION increment_prompt_use_count(prompt_id UUID)
-RETURNS VOID AS $$
-  UPDATE prompts SET use_count = use_count + 1 WHERE id = prompt_id;
-$$ LANGUAGE sql SECURITY DEFINER;
+RETURNS VOID
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  IF to_regclass('public.prompts') IS NULL THEN
+    RETURN;
+  END IF;
+
+  EXECUTE 'UPDATE public.prompts SET use_count = use_count + 1 WHERE id = $1'
+    USING prompt_id;
+END;
+$$;

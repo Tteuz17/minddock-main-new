@@ -1,16 +1,18 @@
-/**
- * MindDock — Stripe Webhook Edge Function
- * Validates the Stripe webhook signature before trusting any payload.
- * Without this, any attacker could POST fake events and upgrade their own account for free.
+﻿/**
+ * MindDock - Stripe Webhook Edge Function
  *
- * Deploy:  supabase functions deploy stripe-webhook
- * Secrets: supabase secrets set STRIPE_WEBHOOK_SECRET=whsec_...
- *          supabase secrets set STRIPE_SECRET_KEY=sk_live_...
+ * Deploy:
+ *   supabase functions deploy stripe-webhook --project-ref <project-ref> --no-verify-jwt
  *
- * In the Stripe Dashboard, set the webhook endpoint to:
- *   https://<project-ref>.supabase.co/functions/v1/stripe-webhook
- * and subscribe to: customer.subscription.created, customer.subscription.updated,
- *                   customer.subscription.deleted, invoice.payment_failed
+ * Required secrets:
+ *   STRIPE_WEBHOOK_SECRET
+ *   STRIPE_SECRET_KEY
+ *   STRIPE_PRICE_PRO_MONTHLY
+ *   STRIPE_PRICE_PRO_YEARLY
+ *   STRIPE_PRICE_THINKER_MONTHLY
+ *   STRIPE_PRICE_THINKER_YEARLY
+ *   STRIPE_PRICE_THINKER_PRO_MONTHLY
+ *   STRIPE_PRICE_THINKER_PRO_YEARLY
  */
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2"
@@ -22,37 +24,104 @@ const CORS_HEADERS = {
   "Access-Control-Allow-Headers": "content-type, stripe-signature"
 }
 
-// Maps Stripe price IDs to MindDock tier names.
-// ⚠️  REQUIRED: Replace the placeholder values below with the real Price IDs from the
-//     Stripe Dashboard → Products → each plan → copy the price_xxx ID.
-//     Without this, ALL paid subscriptions will resolve to "free" tier.
-const PRICE_TO_TIER: Record<string, string> = {
+type SubscriptionTier = "free" | "pro" | "thinker" | "thinker_pro"
+type SubscriptionCycle = "none" | "monthly" | "yearly"
+
+type ProfileUpdateResult = {
+  updated: boolean
+  userId: string | null
+}
+
+const PRICE_TO_TIER: Record<string, SubscriptionTier> = {
   [Deno.env.get("STRIPE_PRICE_PRO_MONTHLY") ?? "MISSING_pro_monthly"]: "pro",
   [Deno.env.get("STRIPE_PRICE_PRO_YEARLY") ?? "MISSING_pro_yearly"]: "pro",
   [Deno.env.get("STRIPE_PRICE_THINKER_MONTHLY") ?? "MISSING_thinker_monthly"]: "thinker",
   [Deno.env.get("STRIPE_PRICE_THINKER_YEARLY") ?? "MISSING_thinker_yearly"]: "thinker",
   [Deno.env.get("STRIPE_PRICE_THINKER_PRO_MONTHLY") ?? "MISSING_thinker_pro_monthly"]: "thinker_pro",
-  [Deno.env.get("STRIPE_PRICE_THINKER_PRO_YEARLY") ?? "MISSING_thinker_pro_yearly"]: "thinker_pro",
+  [Deno.env.get("STRIPE_PRICE_THINKER_PRO_YEARLY") ?? "MISSING_thinker_pro_yearly"]: "thinker_pro"
 }
 
-function resolveTier(priceId: string | null | undefined): string {
-  if (!priceId) return "free"
+function resolveCycle(interval: string | null | undefined): SubscriptionCycle {
+  if (interval === "year") return "yearly"
+  if (interval === "month") return "monthly"
+  return "none"
+}
+
+function resolveTier(priceId: string | null | undefined): SubscriptionTier | null {
+  if (!priceId) return null
   const tier = PRICE_TO_TIER[priceId]
-  if (!tier || tier.startsWith("MISSING_")) {
-    console.error(`[stripe-webhook] Unknown price ID: ${priceId} — defaulting to free. Add STRIPE_PRICE_* secrets.`)
-    return "free"
+  if (!tier || String(tier).startsWith("MISSING_")) {
+    return null
   }
   return tier
 }
 
-// Startup validation — logs a warning if price env vars are missing
-const missingPriceSecrets = [
-  "STRIPE_PRICE_PRO_MONTHLY", "STRIPE_PRICE_PRO_YEARLY",
-  "STRIPE_PRICE_THINKER_MONTHLY", "STRIPE_PRICE_THINKER_YEARLY",
-  "STRIPE_PRICE_THINKER_PRO_MONTHLY", "STRIPE_PRICE_THINKER_PRO_YEARLY",
-].filter(k => !Deno.env.get(k))
-if (missingPriceSecrets.length > 0) {
-  console.warn(`[stripe-webhook] ⚠️ Missing price secrets: ${missingPriceSecrets.join(", ")}. Paid subscriptions will not activate.`)
+function buildEffectiveCycle(tier: SubscriptionTier, status: string, cycle: SubscriptionCycle): SubscriptionCycle {
+  if (status === "active" && tier !== "free") {
+    return cycle === "yearly" ? "yearly" : "monthly"
+  }
+  return "none"
+}
+
+async function applySubscriptionToProfile(
+  supabase: ReturnType<typeof createClient>,
+  params: {
+    customerId: string | null
+    userId: string | null
+    tier: SubscriptionTier
+    status: string
+    cycle: SubscriptionCycle
+  }
+): Promise<ProfileUpdateResult> {
+  const { customerId, userId, tier, status, cycle } = params
+
+  const payload = {
+    subscription_tier: tier,
+    subscription_status: status,
+    subscription_cycle: buildEffectiveCycle(tier, status, cycle),
+    updated_at: new Date().toISOString()
+  }
+
+  if (customerId) {
+    const { data: updatedByCustomer, error: updateByCustomerError } = await supabase
+      .from("profiles")
+      .update(payload)
+      .eq("stripe_customer_id", customerId)
+      .select("id")
+
+    if (updateByCustomerError) {
+      throw new Error(`PROFILE_UPDATE_BY_CUSTOMER_FAILED: ${updateByCustomerError.message}`)
+    }
+
+    if (Array.isArray(updatedByCustomer) && updatedByCustomer.length > 0) {
+      return {
+        updated: true,
+        userId: String(updatedByCustomer[0]?.id ?? userId ?? "").trim() || null
+      }
+    }
+  }
+
+  if (userId) {
+    const payloadWithCustomer = customerId
+      ? { ...payload, stripe_customer_id: customerId }
+      : payload
+
+    const { data: updatedById, error: updateByIdError } = await supabase
+      .from("profiles")
+      .update(payloadWithCustomer)
+      .eq("id", userId)
+      .select("id")
+
+    if (updateByIdError) {
+      throw new Error(`PROFILE_UPDATE_BY_ID_FAILED: ${updateByIdError.message}`)
+    }
+
+    if (Array.isArray(updatedById) && updatedById.length > 0) {
+      return { updated: true, userId }
+    }
+  }
+
+  return { updated: false, userId: userId ?? null }
 }
 
 Deno.serve(async (req: Request) => {
@@ -72,14 +141,12 @@ Deno.serve(async (req: Request) => {
     return new Response("Webhook not configured", { status: 503 })
   }
 
-  // ── 1. Validate Stripe signature BEFORE reading the body ─────────────────
   const signature = req.headers.get("stripe-signature")
   if (!signature) {
     return new Response("Missing stripe-signature header", { status: 400 })
   }
 
   const rawBody = await req.text()
-
   const stripe = new Stripe(stripeSecretKey, { apiVersion: "2024-04-10" })
 
   let event: Stripe.Event
@@ -90,7 +157,6 @@ Deno.serve(async (req: Request) => {
     return new Response("Invalid webhook signature", { status: 401 })
   }
 
-  // ── 2. Handle the verified event ─────────────────────────────────────────
   const supabaseUrl = Deno.env.get("SUPABASE_URL")!
   const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
   const supabase = createClient(supabaseUrl, supabaseServiceKey)
@@ -100,24 +166,48 @@ Deno.serve(async (req: Request) => {
       case "customer.subscription.created":
       case "customer.subscription.updated": {
         const sub = event.data.object as Stripe.Subscription
+        const customerId = typeof sub.customer === "string" ? sub.customer : null
+        const metadataUserId = String(sub.metadata?.supabase_user_id ?? "").trim() || null
         const priceId = sub.items.data[0]?.price?.id ?? null
+        const recurringInterval = sub.items.data[0]?.price?.recurring?.interval ?? null
         const tier = resolveTier(priceId)
-        const status = sub.status === "active" ? "active" : sub.status === "past_due" ? "past_due" : "inactive"
+        const status =
+          sub.status === "active"
+            ? "active"
+            : sub.status === "past_due"
+              ? "past_due"
+              : "inactive"
+        const cycle = resolveCycle(recurringInterval)
 
-        const { error } = await supabase.rpc("update_user_subscription", {
-          p_stripe_customer_id: sub.customer as string,
-          p_tier: tier,
-          p_status: status
-        })
-
-        if (error) {
-          console.error("[stripe-webhook] Failed to update subscription:", error)
-          return new Response("DB update failed", { status: 500 })
+        if (!tier) {
+          console.error("[stripe-webhook] Unknown Stripe price id", {
+            priceId,
+            eventType: event.type,
+            customerId
+          })
+          return new Response("Unknown Stripe price ID for subscription.", { status: 500 })
         }
 
-        // Log event for audit trail
+        const updateResult = await applySubscriptionToProfile(supabase, {
+          customerId,
+          userId: metadataUserId,
+          tier,
+          status,
+          cycle
+        })
+
+        if (!updateResult.updated) {
+          console.error("[stripe-webhook] No profile matched for subscription update", {
+            customerId,
+            metadataUserId,
+            eventType: event.type
+          })
+          return new Response("Profile not linked to Stripe customer.", { status: 500 })
+        }
+
         await supabase.from("subscription_events").insert({
-          stripe_customer_id: sub.customer as string,
+          user_id: updateResult.userId,
+          stripe_customer_id: customerId,
           stripe_subscription_id: sub.id,
           stripe_price_id: priceId,
           event_type: event.type,
@@ -132,15 +222,20 @@ Deno.serve(async (req: Request) => {
 
       case "customer.subscription.deleted": {
         const sub = event.data.object as Stripe.Subscription
+        const customerId = typeof sub.customer === "string" ? sub.customer : null
+        const metadataUserId = String(sub.metadata?.supabase_user_id ?? "").trim() || null
 
-        await supabase.rpc("update_user_subscription", {
-          p_stripe_customer_id: sub.customer as string,
-          p_tier: "free",
-          p_status: "canceled"
+        const updateResult = await applySubscriptionToProfile(supabase, {
+          customerId,
+          userId: metadataUserId,
+          tier: "free",
+          status: "canceled",
+          cycle: "none"
         })
 
         await supabase.from("subscription_events").insert({
-          stripe_customer_id: sub.customer as string,
+          user_id: updateResult.userId,
+          stripe_customer_id: customerId,
           stripe_subscription_id: sub.id,
           event_type: event.type,
           tier: "free",
@@ -152,15 +247,21 @@ Deno.serve(async (req: Request) => {
 
       case "invoice.payment_failed": {
         const invoice = event.data.object as Stripe.Invoice
-        const customerId = typeof invoice.customer === "string" ? invoice.customer : invoice.customer?.id
+        const customerId =
+          typeof invoice.customer === "string"
+            ? invoice.customer
+            : invoice.customer?.id ?? null
 
-        await supabase.rpc("update_user_subscription", {
-          p_stripe_customer_id: customerId ?? "",
-          p_tier: "free",
-          p_status: "past_due"
+        const updateResult = await applySubscriptionToProfile(supabase, {
+          customerId,
+          userId: null,
+          tier: "free",
+          status: "past_due",
+          cycle: "none"
         })
 
         await supabase.from("subscription_events").insert({
+          user_id: updateResult.userId,
           stripe_customer_id: customerId,
           event_type: event.type,
           tier: "free",
@@ -171,7 +272,6 @@ Deno.serve(async (req: Request) => {
       }
 
       default:
-        // Unhandled event type — acknowledge receipt without processing
         console.log(`[stripe-webhook] Unhandled event type: ${event.type}`)
     }
   } catch (err) {

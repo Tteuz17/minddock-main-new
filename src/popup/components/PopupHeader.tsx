@@ -30,7 +30,7 @@ export function PopupHeader({ onOpenSidePanel }: PopupHeaderProps) {
                 <PanelRight size={14} strokeWidth={1.5} />
               </Button>
             </TooltipTrigger>
-            <TooltipContent>Zettelkasten</TooltipContent>
+            <TooltipContent>Notes Hub</TooltipContent>
           </Tooltip>
 
           <Tooltip>

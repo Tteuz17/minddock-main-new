@@ -1,12 +1,14 @@
 import Image from "next/image"
+import dynamic from "next/dynamic"
 import { InfiniteRibbon } from "@/components/ui/infinite-ribbon"
-import FeaturesScrollSection from "@/components/ui/FeaturesScrollSection"
-import PricingSection from "@/components/ui/PricingSection"
-import FAQSection from "@/components/ui/FAQSection"
-import CTASection from "@/components/ui/CTASection"
 import LandingFooter from "@/components/ui/LandingFooter"
 import heroBackground from "../../public/lp/backgroundhero.png"
 import minddockLogo from "../../public/lp/logo/logo minddock sem fundo.png"
+
+const FeaturesScrollSection = dynamic(() => import("@/components/ui/FeaturesScrollSection"))
+const PricingSection = dynamic(() => import("@/components/ui/PricingSection"))
+const FAQSection = dynamic(() => import("@/components/ui/FAQSection"))
+const CTASection = dynamic(() => import("@/components/ui/CTASection"))
 
 const agilePromptVideoSrc = "/api/lp/agile-prompts"
 const docksVideoSrc = "/api/lp/docks"
@@ -51,6 +53,38 @@ const overviewMiniCards = [
         <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 12.75V12A2.25 2.25 0 014.5 9.75h15A2.25 2.25 0 0121.75 12v.75m-8.69-6.44l-2.12-2.12a1.5 1.5 0 00-1.061-.44H4.5A2.25 2.25 0 002.25 6v12a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9a2.25 2.25 0 00-2.25-2.25h-5.379a1.5 1.5 0 01-1.06-.44z" />
       </svg>
     )
+  },
+  {
+    eyebrow: "Brain merge",
+    title: "Turn many notes into one clear direction.",
+    body: "Bring ideas together in one place so you see the big picture faster and make better decisions with less effort.",
+    icon: (
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" width={16} height={16}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 7.5h5v4h-5v-4zm10 0h5v4h-5v-4zm-5 6h5v4h-5v-4zM7 11.5v2m10-2v2m-5 0v-2" />
+      </svg>
+    )
+  },
+  {
+    eyebrow: "Video sniper",
+    title: "Save only the part of the video that matters.",
+    body: "Capture the exact moment you need and keep your research focused, without rewatching long videos again and again.",
+    icon: (
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" width={16} height={16}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M4 6.75A2.25 2.25 0 0 1 6.25 4.5h11.5A2.25 2.25 0 0 1 20 6.75v10.5a2.25 2.25 0 0 1-2.25 2.25H6.25A2.25 2.25 0 0 1 4 17.25V6.75z" />
+        <path strokeLinecap="round" strokeLinejoin="round" d="M10 9l5 3-5 3V9z" />
+      </svg>
+    )
+  },
+  {
+    eyebrow: "Highlight mode",
+    title: "Turn key passages into reusable insight cards.",
+    body: "Highlight what matters while you read and keep your strongest points organized for faster reviews, writing, and decisions.",
+    icon: (
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" width={16} height={16}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M14.25 3.75l6 6m-3-3l-9.75 9.75-3.75.75.75-3.75L14.25 3.75z" />
+        <path strokeLinecap="round" strokeLinejoin="round" d="M6.75 19.5h10.5" />
+      </svg>
+    )
   }
 ]
 
@@ -60,12 +94,18 @@ export default function HomePage() {
       <div className="site-background" aria-hidden="true" />
 
       <section
-        className="relative min-h-[70vh] overflow-hidden lg:min-h-[76vh]"
-        style={{
-          backgroundImage: `url(${heroBackground.src})`,
-          backgroundSize: "cover",
-          backgroundPosition: "center"
-        }}>
+        className="relative min-h-[70vh] overflow-hidden lg:min-h-[76vh]">
+        <Image
+          src={heroBackground}
+          alt=""
+          aria-hidden="true"
+          fill
+          priority
+          placeholder="blur"
+          quality={76}
+          sizes="100vw"
+          className="pointer-events-none select-none object-cover object-center"
+        />
         <div
           aria-hidden="true"
           className="pointer-events-none absolute inset-0"
@@ -83,6 +123,7 @@ export default function HomePage() {
                 alt="MindDock"
                 className="h-10 w-auto object-contain"
                 priority
+                sizes="140px"
               />
             </div>
 
@@ -162,7 +203,7 @@ export default function HomePage() {
           </div>
 
           <div className="grid gap-6">
-            <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+            <div className="grid grid-cols-2 gap-4 lg:grid-cols-3">
               {overviewMiniCards.map((card) => (
                 <article key={card.title} className="panel-flat space-y-3">
                   <div className="text-white/40">{card.icon}</div>
@@ -189,7 +230,7 @@ export default function HomePage() {
                   </div>
                   <div className="flex-1 overflow-hidden rounded-[1.25rem]">
                     <video
-                      autoPlay muted loop playsInline preload="auto"
+                      autoPlay muted loop playsInline preload="metadata"
                       className="h-full min-h-48 w-full object-cover object-center">
                       <source src={docksVideoSrc} type="video/mp4" />
                     </video>
@@ -201,7 +242,7 @@ export default function HomePage() {
                 <div className="flex h-full flex-col-reverse gap-5 sm:flex-col">
                   <div className="overflow-hidden rounded-[1.25rem]">
                     <video
-                      autoPlay muted loop playsInline preload="auto"
+                      autoPlay muted loop playsInline preload="metadata"
                       className="h-48 w-full object-cover object-[center_82%] sm:h-52">
                       <source src={agilePromptVideoSrc} type="video/mp4" />
                     </video>
@@ -403,7 +444,7 @@ export default function HomePage() {
               {
                 eyebrow: "Learning",
                 title: "Knowledge that grows with you",
-                body: "Linked notes, idea graph, and native Zettelkasten. Each session builds on the last — NotebookLM becomes your second memory.",
+                body: "Capture insights, organize your research, and build on every session. NotebookLM becomes your permanent second memory.",
                 stat: "∞",
                 statLabel: "note connections",
                 icon: (

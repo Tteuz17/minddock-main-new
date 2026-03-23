@@ -4,58 +4,71 @@
  * Keeps only a short-lived in-memory cache bound to the current auth token.
  */
 
-import { STORAGE_KEYS, PLANS } from "~/lib/constants"
+import { STORAGE_KEYS, PLANS, resolvePlanLimits } from "~/lib/constants"
 import { FIXED_STORAGE_KEYS } from "~/lib/contracts"
 import { getFromStorage } from "~/lib/utils"
 import { authManager } from "./auth-manager"
-import type { SubscriptionTier, PlanLimits } from "~/lib/types"
+import type { SubscriptionCycle, SubscriptionTier, PlanLimits } from "~/lib/types"
 
 const SERVER_CACHE_TTL_MS = 5 * 60 * 1000 // 5 min
 const ACTIVE_SUBSCRIPTION_STATUSES = new Set(["active", "trialing"])
 
 interface SubscriptionCache {
   tier: SubscriptionTier
+  cycle: SubscriptionCycle
   status: string
   ts: number
   token: string
+}
+
+interface ResolvedSubscription {
+  tier: SubscriptionTier
+  cycle: SubscriptionCycle
 }
 
 class SubscriptionManager {
   private memoryCache: SubscriptionCache | null = null
 
   async getTier(): Promise<SubscriptionTier> {
-    const bypassTier = await this.getBypassTier()
-    if (bypassTier) {
-      return bypassTier
+    const resolved = await this.getResolvedSubscription()
+    return resolved.tier
+  }
+
+  async getCycle(): Promise<SubscriptionCycle> {
+    const resolved = await this.getResolvedSubscription()
+    return resolved.cycle
+  }
+
+  private async getResolvedSubscription(): Promise<ResolvedSubscription> {
+    const bypass = await this.getBypassSubscription()
+    if (bypass) {
+      return bypass
     }
 
     const token = await authManager.getAccessToken()
     if (!token) {
       this.memoryCache = null
-      return "free"
+      return { tier: "free", cycle: "none" }
     }
 
-    // Reuse only a server-verified cache bound to this exact token.
     const cached = this.memoryCache
     if (cached && cached.token === token && Date.now() - cached.ts < SERVER_CACHE_TTL_MS) {
-      return cached.tier
+      return { tier: cached.tier, cycle: cached.cycle }
     }
 
-    // Always prioritize server verification.
     const fresh = await this.fetchTierFromServer(token)
     if (fresh) {
       return fresh
     }
 
-    // Fail closed when server check is unavailable.
     if (cached && cached.token === token && Date.now() - cached.ts < SERVER_CACHE_TTL_MS) {
-      return cached.tier
+      return { tier: cached.tier, cycle: cached.cycle }
     }
 
-    return "free"
+    return { tier: "free", cycle: "none" }
   }
 
-  private async fetchTierFromServer(token: string): Promise<SubscriptionTier | null> {
+  private async fetchTierFromServer(token: string): Promise<ResolvedSubscription | null> {
     try {
       const supabaseUrl =
         (await getFromStorage<string>(FIXED_STORAGE_KEYS.PROJECT_URL)) ??
@@ -70,7 +83,7 @@ class SubscriptionManager {
       }
 
       const res = await fetch(
-        `${supabaseUrl}/rest/v1/profiles?select=subscription_tier,subscription_status&limit=1`,
+        `${supabaseUrl}/rest/v1/profiles?select=subscription_tier,subscription_status,subscription_cycle&limit=1`,
         {
           headers: {
             apikey: anonKey,
@@ -88,6 +101,7 @@ class SubscriptionManager {
       const rows = (await res.json()) as Array<{
         subscription_tier?: string
         subscription_status?: string
+        subscription_cycle?: string
       }>
 
       const row = rows?.[0]
@@ -99,16 +113,22 @@ class SubscriptionManager {
       const status = String(row.subscription_status ?? "inactive")
         .trim()
         .toLowerCase()
+      const cycle = this.normalizeCycle(row.subscription_cycle)
       const effectiveTier = ACTIVE_SUBSCRIPTION_STATUSES.has(status) ? tier : "free"
+      const effectiveCycle = effectiveTier === "free" ? "none" : cycle
 
       this.memoryCache = {
         tier: effectiveTier,
+        cycle: effectiveCycle,
         status,
         token,
         ts: Date.now()
       }
 
-      return effectiveTier
+      return {
+        tier: effectiveTier,
+        cycle: effectiveCycle
+      }
     } catch {
       return null
     }
@@ -124,22 +144,33 @@ class SubscriptionManager {
     return "free"
   }
 
-  private async getBypassTier(): Promise<SubscriptionTier | null> {
+  private normalizeCycle(rawCycle: unknown): SubscriptionCycle {
+    const candidate = String(rawCycle ?? "")
+      .trim()
+      .toLowerCase()
+    if (candidate === "monthly" || candidate === "yearly") {
+      return candidate
+    }
+    return "none"
+  }
+
+  private async getBypassSubscription(): Promise<ResolvedSubscription | null> {
     const raw = await getFromStorage<Record<string, unknown>>(STORAGE_KEYS.DEV_AUTH_BYPASS)
     if (!raw || typeof raw !== "object" || raw.enabled !== true) {
       return null
     }
 
     const tier = this.normalizeTier(String(raw.tier ?? ""))
+    const cycle = this.normalizeCycle(raw.cycle)
     if (tier === "free" || tier === "pro") {
-      return "thinker"
+      return { tier: "thinker", cycle: cycle === "none" ? "monthly" : cycle }
     }
-    return tier
+    return { tier, cycle: cycle === "none" ? "monthly" : cycle }
   }
 
   async getLimits(): Promise<PlanLimits> {
-    const tier = await this.getTier()
-    return PLANS[tier].limits
+    const { tier, cycle } = await this.getResolvedSubscription()
+    return resolvePlanLimits(tier, cycle)
   }
 
   async canUseFeature(feature: keyof PlanLimits): Promise<boolean> {

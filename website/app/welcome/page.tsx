@@ -21,14 +21,14 @@ const onboardingSteps = [
     title: "Enable Focus Docks",
     description:
       "Create isolated dock contexts per topic to keep your sessions clean and easy to resume.",
-    href: "https://minddock.app/#features",
+    href: "https://minddocklm.digital/#features",
     cta: "View Focus Docks"
   },
   {
     title: "Try Prompt Library",
     description:
       "Use ready-to-use prompts to save time and get stronger outputs with less rewriting.",
-    href: "https://minddock.app/#pricing",
+    href: "https://minddocklm.digital/#pricing",
     cta: "Explore plans"
   }
 ]
@@ -44,7 +44,7 @@ export default function WelcomePage() {
         <header className="mx-auto flex w-full max-w-5xl items-center justify-between rounded-full border border-white/10 bg-black/40 px-4 py-3 backdrop-blur-md sm:px-5">
           <Image src={minddockLogo} alt="MindDock" className="h-10 w-auto object-contain" priority />
           <Link
-            href="https://minddock.app"
+            href="https://minddocklm.digital"
             className="inline-flex items-center rounded-full border border-white/15 bg-white/[0.04] px-4 py-2 text-xs font-medium text-white/85 transition hover:border-white/25 hover:bg-white/[0.08]">
             Go to site
           </Link>
@@ -90,7 +90,7 @@ export default function WelcomePage() {
               <Link href="https://notebooklm.google.com" className="cta-primary">
                 Start now
               </Link>
-              <Link href="https://minddock.app/#pricing" className="cta-secondary">
+              <Link href="https://minddocklm.digital/#pricing" className="cta-secondary">
                 View pricing
               </Link>
             </div>

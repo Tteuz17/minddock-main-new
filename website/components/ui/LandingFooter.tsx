@@ -4,7 +4,7 @@ import footerBg from "../../../public/lp/background footer.png"
 
 const CHROME_URL = "https://chromewebstore.google.com/detail/minddock/your-extension-id"
 const GITHUB_URL  = "https://github.com/Tteuz17/minddock-main-new"
-const CONTACT_URL = "mailto:hello@minddock.ai"
+const CONTACT_URL = "mailto:hello@minddocklm.digital"
 
 const nav = [
   {
@@ -20,6 +20,13 @@ const nav = [
     links: [
       { label: "GitHub",     href: GITHUB_URL,  external: true },
       { label: "Contact",    href: CONTACT_URL },
+    ],
+  },
+  {
+    heading: "Legal",
+    links: [
+      { label: "Terms of Use", href: "/terms" },
+      { label: "Privacy Policy", href: "/privacy" },
     ],
   },
 ]
@@ -42,6 +49,8 @@ export default function LandingFooter() {
         alt=""
         aria-hidden="true"
         fill
+        sizes="100vw"
+        quality={72}
         style={{ objectFit: "cover", objectPosition: "center bottom", opacity: 0.55, pointerEvents: "none" }}
         priority={false}
       />
@@ -107,6 +116,7 @@ export default function LandingFooter() {
             <Image
               src={minddockLogo}
               alt="MindDock"
+              sizes="154px"
               style={{ height: "2.4rem", width: "auto", objectFit: "contain", marginBottom: "2rem" }}
             />
 

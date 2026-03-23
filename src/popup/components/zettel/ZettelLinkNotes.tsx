@@ -66,11 +66,11 @@ export function ZettelLinkNotes() {
     try {
       await zettelkastenService.createLink(noteA.id, noteB.id, user.id)
       await refetch()
-      setFeedback({ type: "success", msg: "Notas conectadas!" })
+      setFeedback({ type: "success", msg: "Notes connected!" })
     } catch (err) {
       setFeedback({
         type: "error",
-        msg: err instanceof Error ? err.message : "Erro ao conectar."
+        msg: err instanceof Error ? err.message : "Failed to connect."
       })
     } finally {
       setIsLinking(false)
@@ -85,11 +85,11 @@ export function ZettelLinkNotes() {
       await zettelkastenService.deleteLink(noteA.id, noteB.id)
       await zettelkastenService.deleteLink(noteB.id, noteA.id)
       await refetch()
-      setFeedback({ type: "success", msg: "Link removido." })
+      setFeedback({ type: "success", msg: "Link removed." })
     } catch (err) {
       setFeedback({
         type: "error",
-        msg: err instanceof Error ? err.message : "Erro ao desconectar."
+        msg: err instanceof Error ? err.message : "Failed to disconnect."
       })
     } finally {
       setIsUnlinking(false)
@@ -113,7 +113,7 @@ export function ZettelLinkNotes() {
       )
       setSuggestions(result)
     } catch {
-      setFeedback({ type: "error", msg: "Erro ao buscar sugestoes de IA." })
+      setFeedback({ type: "error", msg: "Failed to fetch AI suggestions." })
     } finally {
       setIsSuggesting(false)
     }
@@ -126,9 +126,9 @@ export function ZettelLinkNotes() {
         await zettelkastenService.createLink(noteA.id, suggestion.noteId, user.id)
         await refetch()
         setSuggestions((prev) => prev.filter((s) => s.noteId !== suggestion.noteId))
-        setFeedback({ type: "success", msg: `Conectada a "${suggestion.noteTitle}"` })
+        setFeedback({ type: "success", msg: `Connected to "${suggestion.noteTitle}"` })
       } catch {
-        setFeedback({ type: "error", msg: "Erro ao conectar sugestao." })
+        setFeedback({ type: "error", msg: "Failed to connect suggestion." })
       }
     },
     [noteA, user, refetch]
@@ -147,7 +147,7 @@ export function ZettelLinkNotes() {
       <div className="flex flex-col items-center justify-center gap-2 py-10">
         <GitBranchPlus size={20} className="text-zinc-600" />
         <p className="text-[11px] text-zinc-400">
-          Crie pelo menos 2 notas para conecta-las.
+          Create at least 2 notes to connect them.
         </p>
       </div>
     )
@@ -158,13 +158,13 @@ export function ZettelLinkNotes() {
       <div className="mb-2 flex items-center gap-2">
         <GitBranchPlus size={12} className="text-green-400" />
         <p className="text-[10px] font-medium uppercase tracking-wider text-zinc-500">
-          Conectar Notas
+          Link Notes
         </p>
       </div>
 
       {/* Selector A */}
       <NoteSelector
-        label="Nota A"
+        label="Note A"
         selected={noteA}
         search={searchA}
         onSearchChange={setSearchA}
@@ -198,7 +198,7 @@ export function ZettelLinkNotes() {
 
       {/* Selector B */}
       <NoteSelector
-        label="Nota B"
+        label="Note B"
         selected={noteB}
         search={searchB}
         onSearchChange={setSearchB}
@@ -230,7 +230,7 @@ export function ZettelLinkNotes() {
               ) : (
                 <Unlink size={12} />
               )}
-              Desconectar
+              Disconnect
             </button>
           ) : (
             <button
@@ -243,7 +243,7 @@ export function ZettelLinkNotes() {
               ) : (
                 <GitBranchPlus size={12} />
               )}
-              Conectar
+              Connect
             </button>
           )}
         </motion.div>
@@ -254,7 +254,7 @@ export function ZettelLinkNotes() {
         <div className="mt-3 border-t border-white/[0.04] pt-2">
           <div className="flex items-center justify-between">
             <p className="text-[9px] font-medium uppercase tracking-wider text-zinc-600">
-              Sugestoes de IA
+              AI Suggestions
             </p>
             <button
               type="button"
@@ -266,7 +266,7 @@ export function ZettelLinkNotes() {
               ) : (
                 <Sparkles size={10} />
               )}
-              {isSuggesting ? "Analisando..." : "Sugerir links"}
+              {isSuggesting ? "Analyzing..." : "Suggest links"}
             </button>
           </div>
 
@@ -283,7 +283,7 @@ export function ZettelLinkNotes() {
                     {s.noteTitle}
                   </p>
                   <p className="text-[8px] text-zinc-600">
-                    Relevancia: {Math.round(s.relevance * 100)}%
+                    Relevance: {Math.round(s.relevance * 100)}%
                   </p>
                 </div>
                 <button
@@ -361,7 +361,7 @@ function NoteSelector({
             type="button"
             onClick={onClear}
             className="ml-2 text-[9px] text-zinc-600 hover:text-zinc-300">
-            trocar
+            switch
           </button>
         </div>
       ) : (
@@ -372,7 +372,7 @@ function NoteSelector({
               value={search}
               onChange={(e) => onSearchChange(e.target.value)}
               onFocus={onFocus}
-              placeholder={`Buscar ${label.toLowerCase()}...`}
+              placeholder={`Search ${label.toLowerCase()}...`}
               className="flex-1 bg-transparent text-[10px] text-white placeholder:text-zinc-700 focus:outline-none"
             />
           </div>
@@ -389,7 +389,7 @@ function NoteSelector({
               ))}
               {filtered.length === 0 && (
                 <p className="px-2 py-1.5 text-[10px] text-zinc-600">
-                  Nenhuma nota encontrada
+                  No notes found
                 </p>
               )}
             </div>

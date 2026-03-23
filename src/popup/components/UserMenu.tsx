@@ -1,5 +1,7 @@
 import {
   ArrowUp,
+  BarChart3,
+  ChevronRight,
   CreditCard,
   LogOut,
   Settings,
@@ -19,7 +21,12 @@ import {
   DropdownMenuTrigger
 } from "~/components/ui/dropdown-menu"
 
-export function UserMenu() {
+interface UserMenuProps {
+  onOpenUsage?: () => void
+  onOpenPlans?: () => void
+}
+
+export function UserMenu({ onOpenUsage, onOpenPlans }: UserMenuProps) {
   const { user, signOut } = useAuth()
   const { tier } = useSubscription()
 
@@ -101,61 +108,119 @@ export function UserMenu() {
                 align="end"
                 side="top"
                 sideOffset={10}
-                className="mb-1 w-60 rounded-[22px] border border-white/[0.05] bg-[linear-gradient(180deg,rgba(20,23,28,0.9),rgba(14,16,20,0.82))] p-2 shadow-[0_20px_42px_rgba(0,0,0,0.42)] backdrop-blur-2xl">
-                <div className="space-y-1">
-                  <DropdownMenuItem asChild>
-                    <button
-                      type="button"
-                      onClick={() => chrome.tabs.create({ url: "https://minddock.app/account" })}
-                      className="flex w-full items-center gap-3 rounded-2xl px-3 py-2.5 text-zinc-400 transition-colors hover:bg-white/[0.04] hover:text-white">
-                      <User className="h-3.5 w-3.5" />
-                      <span className="text-xs font-medium">Minha conta</span>
-                    </button>
-                  </DropdownMenuItem>
+                className="relative mb-1 w-[252px] overflow-hidden rounded-[22px] border border-white/[0.08] bg-[#050505] p-2.5 shadow-[0_24px_52px_rgba(0,0,0,0.55)] backdrop-blur-2xl">
+                <div className="pointer-events-none absolute inset-x-0 top-0 h-10 bg-[linear-gradient(180deg,rgba(255,255,255,0.06),transparent)] opacity-30" />
+
+                <div className="relative z-10">
+                  <div className="mb-2 rounded-[15px] border border-white/[0.08] bg-white/[0.03] px-2.5 py-2.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]">
+                    <div className="flex items-start gap-2.5">
+                      <div className="flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-[11px] bg-[#e7d7c4] shadow-[inset_0_1px_0_rgba(255,255,255,0.28)]">
+                        {user.avatarUrl ? (
+                          <img src={user.avatarUrl} alt={displayName} className="h-full w-full object-cover" />
+                        ) : (
+                          <span className="text-[12px] font-semibold tracking-[-0.03em] text-zinc-900">
+                            {initials}
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="min-w-0 flex-1">
+                        <p className="text-[10px] uppercase tracking-[0.12em] text-zinc-500">Account</p>
+                        <p className="truncate text-[12px] font-semibold text-zinc-100">{displayName}</p>
+                        <p className="truncate text-[10px] text-zinc-500">{user.email}</p>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="space-y-1">
+                    <DropdownMenuItem asChild>
+                      <button
+                        type="button"
+                        onClick={() => chrome.tabs.create({ url: "https://minddocklm.digital/account" })}
+                        className="group flex w-full items-center gap-2.5 rounded-[13px] border border-transparent px-2.5 py-2 text-zinc-300 transition-all hover:border-white/[0.08] hover:bg-white/[0.04] hover:text-white">
+                        <span className="flex h-7 w-7 items-center justify-center rounded-[10px] border border-white/[0.08] bg-white/[0.03] text-zinc-400 group-hover:text-white">
+                          <User className="h-3.5 w-3.5" />
+                        </span>
+                        <span className="flex-1 text-left text-[12px] font-medium">My account</span>
+                        <ChevronRight className="h-3.5 w-3.5 text-zinc-600 group-hover:text-zinc-300" />
+                      </button>
+                    </DropdownMenuItem>
+
+                    <DropdownMenuItem asChild>
+                      <button
+                        type="button"
+                        onClick={() => onOpenPlans ? onOpenPlans() : chrome.tabs.create({ url: "https://minddocklm.digital/pricing" })}
+                        className="group flex w-full items-center gap-2.5 rounded-[13px] border border-transparent px-2.5 py-2 text-zinc-300 transition-all hover:border-white/[0.08] hover:bg-white/[0.04] hover:text-white">
+                        <span className="flex h-7 w-7 items-center justify-center rounded-[10px] border border-white/[0.08] bg-white/[0.03] text-zinc-400 group-hover:text-white">
+                          <Sparkles className="h-3.5 w-3.5" />
+                        </span>
+                        <span className="flex-1 text-left text-[12px] font-medium">Plan</span>
+                        <span className="rounded-full border border-[#facc15]/28 bg-[#facc15]/10 px-2 py-0.5 text-[10px] font-medium text-[#facc15]">
+                          {planName}
+                        </span>
+                      </button>
+                    </DropdownMenuItem>
+
+                    <DropdownMenuItem asChild>
+                      <button
+                        type="button"
+                        onClick={() => chrome.tabs.create({ url: "https://minddocklm.digital/billing" })}
+                        className="group flex w-full items-center gap-2.5 rounded-[13px] border border-transparent px-2.5 py-2 text-zinc-300 transition-all hover:border-white/[0.08] hover:bg-white/[0.04] hover:text-white">
+                        <span className="flex h-7 w-7 items-center justify-center rounded-[10px] border border-white/[0.08] bg-white/[0.03] text-zinc-400 group-hover:text-white">
+                          <CreditCard className="h-3.5 w-3.5" />
+                        </span>
+                        <span className="flex-1 text-left text-[12px] font-medium">Subscription</span>
+                        <ChevronRight className="h-3.5 w-3.5 text-zinc-600 group-hover:text-zinc-300" />
+                      </button>
+                    </DropdownMenuItem>
+
+                    <DropdownMenuItem asChild>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (onOpenUsage) {
+                            onOpenUsage()
+                            return
+                          }
+                          chrome.tabs.create({ url: "https://minddocklm.digital/usage" })
+                        }}
+                        className="group flex w-full items-center gap-2.5 rounded-[13px] border border-transparent px-2.5 py-2 text-zinc-300 transition-all hover:border-white/[0.08] hover:bg-white/[0.04] hover:text-white">
+                        <span className="flex h-7 w-7 items-center justify-center rounded-[10px] border border-white/[0.08] bg-white/[0.03] text-zinc-400 group-hover:text-white">
+                          <BarChart3 className="h-3.5 w-3.5" />
+                        </span>
+                        <span className="flex-1 text-left text-[12px] font-medium">Usage</span>
+                        <ChevronRight className="h-3.5 w-3.5 text-zinc-600 group-hover:text-zinc-300" />
+                      </button>
+                    </DropdownMenuItem>
+
+                    <DropdownMenuItem asChild>
+                      <button
+                        type="button"
+                        onClick={() => chrome.tabs.create({ url: "https://minddocklm.digital/settings" })}
+                        className="group flex w-full items-center gap-2.5 rounded-[13px] border border-transparent px-2.5 py-2 text-zinc-300 transition-all hover:border-white/[0.08] hover:bg-white/[0.04] hover:text-white">
+                        <span className="flex h-7 w-7 items-center justify-center rounded-[10px] border border-white/[0.08] bg-white/[0.03] text-zinc-400 group-hover:text-white">
+                          <Settings className="h-3.5 w-3.5" />
+                        </span>
+                        <span className="flex-1 text-left text-[12px] font-medium">Settings</span>
+                        <ChevronRight className="h-3.5 w-3.5 text-zinc-600 group-hover:text-zinc-300" />
+                      </button>
+                    </DropdownMenuItem>
+                  </div>
+
+                  <DropdownMenuSeparator className="my-2 bg-white/[0.08]" />
 
                   <DropdownMenuItem asChild>
                     <button
                       type="button"
-                      onClick={() => chrome.tabs.create({ url: "https://minddock.app/pricing" })}
-                      className="flex w-full items-center gap-3 rounded-2xl px-3 py-2.5 text-zinc-400 transition-colors hover:bg-white/[0.04] hover:text-white">
-                      <Sparkles className="h-3.5 w-3.5" />
-                      <span className="flex-1 text-left text-xs font-medium">Plano</span>
-                      <span className="text-[10px] text-zinc-500">{planName}</span>
-                    </button>
-                  </DropdownMenuItem>
-
-                  <DropdownMenuItem asChild>
-                    <button
-                      type="button"
-                      onClick={() => chrome.tabs.create({ url: "https://minddock.app/billing" })}
-                      className="flex w-full items-center gap-3 rounded-2xl px-3 py-2.5 text-zinc-400 transition-colors hover:bg-white/[0.04] hover:text-white">
-                      <CreditCard className="h-3.5 w-3.5" />
-                      <span className="text-xs font-medium">Assinatura</span>
-                    </button>
-                  </DropdownMenuItem>
-
-                  <DropdownMenuItem asChild>
-                    <button
-                      type="button"
-                      onClick={() => chrome.tabs.create({ url: "https://minddock.app/settings" })}
-                      className="flex w-full items-center gap-3 rounded-2xl px-3 py-2.5 text-zinc-400 transition-colors hover:bg-white/[0.04] hover:text-white">
-                      <Settings className="h-3.5 w-3.5" />
-                      <span className="text-xs font-medium">Configuracoes</span>
+                      onClick={signOut}
+                      className="group flex w-full items-center gap-2.5 rounded-[13px] border border-transparent px-2.5 py-2 text-red-400 transition-all hover:border-red-500/25 hover:bg-red-500/10 hover:text-red-300">
+                      <span className="flex h-7 w-7 items-center justify-center rounded-[10px] border border-red-500/25 bg-red-500/10 text-red-400 group-hover:text-red-300">
+                        <LogOut className="h-3.5 w-3.5" />
+                      </span>
+                      <span className="text-[12px] font-medium">Sign out</span>
                     </button>
                   </DropdownMenuItem>
                 </div>
-
-                <DropdownMenuSeparator className="my-2 bg-white/8" />
-
-                <DropdownMenuItem asChild>
-                  <button
-                    type="button"
-                    onClick={signOut}
-                    className="flex w-full items-center gap-3 rounded-2xl px-3 py-2.5 text-red-400 transition-colors hover:bg-red-500/10">
-                    <LogOut className="h-3.5 w-3.5" />
-                    <span className="text-xs font-medium">Sair</span>
-                  </button>
-                </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
           </div>

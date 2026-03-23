@@ -34,6 +34,7 @@ export interface RPCTokens {
 
 export type SubscriptionTier = "free" | "pro" | "thinker" | "thinker_pro"
 export type SubscriptionStatus = "active" | "inactive" | "canceled" | "past_due"
+export type SubscriptionCycle = "none" | "monthly" | "yearly"
 
 export interface UserProfile {
   id: string
@@ -43,6 +44,7 @@ export interface UserProfile {
   stripeCustomerId?: string
   subscriptionTier: SubscriptionTier
   subscriptionStatus: SubscriptionStatus
+  subscriptionCycle: SubscriptionCycle
   createdAt: string
   updatedAt: string
 }
@@ -233,9 +235,12 @@ export interface PlanLimits {
   agile_prompts_basic?: boolean
   agile_prompts_ai?: boolean
   ai_calls_per_day?: number | "unlimited"
+  agile_prompts_per_month?: number | "unlimited"
+  docks_summaries_per_month?: number | "unlimited"
   notes_limit?: number | "unlimited"
   priority_support?: boolean
   early_access?: boolean
+  brain_merges_per_month?: number | "unlimited"
 }
 
 // ─── Graph View Types ───────────────────────────────────────────────────────

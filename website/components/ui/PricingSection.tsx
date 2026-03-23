@@ -1,13 +1,18 @@
 "use client";
 
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
-import { Sparkles } from "@/components/ui/sparkles";
 import { TimelineContent } from "@/components/ui/timeline-animation";
 import { VerticalCutReveal } from "@/components/ui/vertical-cut-reveal";
 import { cn } from "@/lib/utils";
+import dynamic from "next/dynamic";
 import NumberFlow from "@number-flow/react";
-import { motion } from "framer-motion";
+import { motion, useReducedMotion } from "framer-motion";
 import { useRef, useState } from "react";
+
+const Sparkles = dynamic(
+  () => import("@/components/ui/sparkles").then((mod) => mod.Sparkles),
+  { ssr: false }
+);
 
 const plans = [
   {
@@ -47,13 +52,15 @@ const plans = [
   },
   {
     name: "Thinker",
-    description: "Everything in Pro, plus Agile Prompts and a Prompt Library.",
+    description: "Plan with a controlled monthly AI package.",
     price: 7.99,
-    yearlyPrice: 64.99,
+    yearlyPrice: 59.99,
     buttonText: "Subscribe to Thinker",
     buttonVariant: "outline" as const,
     includes: [
       "Everything in Pro, plus:",
+      "50 Agile Prompt upgrades / month",
+      "Focus Docks (12 Docks summaries / month)",
       "Agile Prompts",
       "Prompt Library (ready-to-use prompts)",
       "Wikilinks between notes",
@@ -115,15 +122,16 @@ const PricingSwitch = ({ onSwitch }: { onSwitch: (value: string) => void }) => {
 export default function PricingSection() {
   const [isYearly, setIsYearly] = useState(true);
   const pricingRef = useRef<HTMLDivElement>(null);
+  const shouldReduceMotion = useReducedMotion();
 
   const revealVariants = {
     visible: (i: number) => ({
       y: 0,
       opacity: 1,
       filter: "blur(0px)",
-      transition: { delay: i * 0.4, duration: 0.5 },
+      transition: { delay: shouldReduceMotion ? 0 : i * 0.4, duration: shouldReduceMotion ? 0.2 : 0.5 },
     }),
-    hidden: { filter: "blur(10px)", y: -20, opacity: 0 },
+    hidden: shouldReduceMotion ? { y: 0, opacity: 0 } : { filter: "blur(10px)", y: -20, opacity: 0 },
   };
 
   const togglePricingPeriod = (value: string) =>
@@ -142,13 +150,15 @@ export default function PricingSection() {
         className="absolute top-0 h-96 w-screen overflow-hidden [mask-image:radial-gradient(50%_50%,white,transparent)]"
       >
         <div className="absolute bottom-0 left-0 right-0 top-0 bg-[linear-gradient(to_right,#ffffff2c_1px,transparent_1px),linear-gradient(to_bottom,#3a3a3a01_1px,transparent_1px)] bg-[size:70px_80px]" />
-        <Sparkles
-          density={1800}
-          direction="bottom"
-          speed={1}
-          color="#FFFFFF"
-          className="absolute inset-x-0 bottom-0 h-full w-full [mask-image:radial-gradient(50%_50%,white,transparent_85%)]"
-        />
+        {!shouldReduceMotion ? (
+          <Sparkles
+            density={1200}
+            direction="bottom"
+            speed={0.9}
+            color="#FFFFFF"
+            className="absolute inset-x-0 bottom-0 h-full w-full [mask-image:radial-gradient(50%_50%,white,transparent_85%)]"
+          />
+        ) : null}
       </TimelineContent>
 
       {/* Yellow glow ring */}
@@ -234,21 +244,34 @@ export default function PricingSection() {
             >
               {(() => {
                 const isThinkerPlan = plan.name === "Thinker";
+                const thinkerAgileLimit = isYearly ? 50 : 30;
+                const thinkerDocksLimit = isYearly ? 12 : 6;
+                const thinkerBrainMergeLimit = isYearly ? 5 : 0;
+                const thinkerHasBrainMerge = isThinkerPlan && isYearly;
+                const thinkerHasSniperImport = isThinkerPlan;
                 const planDescription = isThinkerPlan
-                  ? isYearly
-                    ? "Everything in Pro, plus Focus Docks, Smart Video Import, Agile Prompts, and a Prompt Library."
-                    : "Everything in Pro, plus Agile Prompts and a Prompt Library."
+                  ? thinkerHasBrainMerge
+                    ? `${thinkerAgileLimit} Agile Prompt upgrades, ${thinkerDocksLimit} Focus Docks summaries, ${thinkerBrainMergeLimit} Brain Merges and Sniper Video Import access per month.`
+                    : `${thinkerAgileLimit} Agile Prompt upgrades, ${thinkerDocksLimit} Focus Docks summaries and Sniper Video Import access per month. Brain Merge is unlocked only in Thinker Annual.`
                   : plan.description;
                 const monthlyEquivalent = Number((plan.yearlyPrice / 12).toFixed(2));
                 const displayPrice = isYearly ? monthlyEquivalent : plan.price;
+                const buttonLabel = isThinkerPlan
+                  ? isYearly
+                    ? "Start Thinker Annual"
+                    : "Subscribe to Thinker Monthly"
+                  : plan.buttonText;
 
                 const planIncludes = isThinkerPlan
-                  ? isYearly
+                  ? thinkerHasBrainMerge
                     ? [
                         "Everything in Pro, plus:",
-                        "Focus Docks",
-                        "Smart Video Import",
-                        "Agile Prompts",
+                        `${thinkerAgileLimit} Agile Prompt upgrades / month`,
+                        `Focus Docks (${thinkerDocksLimit} Docks summaries / month)`,
+                        `Brain Merge (${thinkerBrainMergeLimit} per month)`,
+                        thinkerHasSniperImport
+                          ? "Sniper Video Import (YouTube transcript to NotebookLM)"
+                          : "Sniper Video Import",
                         "Prompt Library (ready-to-use prompts)",
                         "Wikilinks between notes",
                         "Session history",
@@ -256,7 +279,12 @@ export default function PricingSection() {
                       ]
                     : [
                         "Everything in Pro, plus:",
-                        "Agile Prompts",
+                        `${thinkerAgileLimit} Agile Prompt upgrades / month`,
+                        `Focus Docks (${thinkerDocksLimit} Docks summaries / month)`,
+                        "Brain Merge (Thinker Annual only)",
+                        thinkerHasSniperImport
+                          ? "Sniper Video Import (included in Thinker Monthly)"
+                          : "Sniper Video Import",
                         "Prompt Library (ready-to-use prompts)",
                         "Wikilinks between notes",
                         "Session history",
@@ -306,18 +334,20 @@ export default function PricingSection() {
                       : "bg-gradient-to-t from-neutral-950 to-neutral-600 shadow-lg shadow-neutral-900 border border-neutral-800 text-white"
                   }`}
                 >
-                  {plan.buttonText}
+                  {buttonLabel}
                 </button>
 
                 <div className="space-y-3 pt-4 border-t border-neutral-700">
                   <h4 className="font-medium text-sm mb-3 text-white/70">{planIncludes[0]}</h4>
                   <ul className="space-y-2">
-                    {planIncludes.slice(1).map((feature, featureIndex) => (
-                      <li key={featureIndex} className="flex items-center gap-2">
-                        <span className="h-1.5 w-1.5 bg-yellow-400/60 rounded-full shrink-0" />
-                        <span className="text-sm text-gray-300">{feature}</span>
-                      </li>
-                    ))}
+                    {planIncludes.slice(1).map((feature, featureIndex) => {
+                      return (
+                        <li key={featureIndex} className="flex items-center gap-2">
+                          <span className="h-1.5 w-1.5 rounded-full shrink-0 bg-yellow-400/60" />
+                          <span className="text-sm text-gray-300">{feature}</span>
+                        </li>
+                      );
+                    })}
                   </ul>
                 </div>
               </CardContent>
