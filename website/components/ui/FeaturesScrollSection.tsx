@@ -1,7 +1,9 @@
 'use client';
 
-import React, { useEffect, useRef } from 'react';
-import Beams from './Beams';
+import React, { useEffect, useRef, useState } from 'react';
+import dynamic from 'next/dynamic';
+
+const Beams = dynamic(() => import('./Beams'), { ssr: false });
 
 const Y = '#facc15';
 const Yi = 'rgba(250,204,21,0.08)';
@@ -64,6 +66,64 @@ const features = [
     ),
   },
   {
+    eyebrow: 'Brain Merge',
+    title: 'Merge multiple notebooks into one final AI synthesis',
+    body: 'Select sources from different notebooks and generate one structured document that connects insights, removes duplication, and delivers a final answer.',
+    stat: '5/mo',
+    statLabel: 'Thinker Annual quota',
+    availability: 'Thinker Annual',
+    icon: (
+      <svg width="28" height="28" viewBox="0 0 28 28" fill="none">
+        <path d="M7 8h6v4H7zM15 8h6v4h-6zM11 16h6v4h-6z" stroke={Y} strokeWidth="1.6" fill={Yi} />
+        <path d="M10 12v2m8-2v2m-4 2v-2" stroke={Y} strokeWidth="1.4" strokeLinecap="round" />
+      </svg>
+    ),
+    visual: (
+      <div className="flex flex-col gap-2">
+        {['Notebook A', 'Notebook B', 'Notebook C'].map((label, i) => (
+          <div key={label} className="rounded-xl px-3 py-2 text-sm text-white/55" style={{ border: `1px solid ${Yb}`, background: Yi, opacity: 1 - i * 0.16 }}>
+            {label}
+          </div>
+        ))}
+        <div className="flex justify-center pt-1">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+            <path d="M7 2v10M7 12l-3-3M7 12l3-3" stroke={Y} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </div>
+        <div className="rounded-xl px-3 py-2 text-sm text-white/70" style={{ border: `1px solid ${Yb}`, background: Yi }}>
+          Unified synthesis output
+        </div>
+      </div>
+    ),
+  },
+  {
+    eyebrow: 'Sniper Video Import',
+    title: 'Capture YouTube clips and import the transcript',
+    body: 'Pick a time range from a video and import the transcript straight into NotebookLM, ready to be summarized, quoted, and linked in your research flow.',
+    stat: 'YT',
+    statLabel: 'targeted capture',
+    availability: 'Thinker (Monthly + Annual)',
+    icon: (
+      <svg width="28" height="28" viewBox="0 0 28 28" fill="none">
+        <rect x="4" y="7" width="20" height="14" rx="4" stroke={Y} strokeWidth="1.8" fill={Yi} />
+        <path d="M12 11l6 3-6 3v-6z" stroke={Y} strokeWidth="1.4" strokeLinejoin="round" fill="rgba(250,204,21,0.24)" />
+      </svg>
+    ),
+    visual: (
+      <div className="flex flex-col gap-2">
+        <div className="rounded-xl px-3 py-2 text-[11px] text-white/55" style={{ border: `1px solid ${Yb}`, background: Yi }}>
+          02:29 → 05:42
+        </div>
+        <div className="h-1.5 rounded-full bg-white/10">
+          <div className="h-full w-2/5 rounded-full bg-yellow-400/70" />
+        </div>
+        <div className="rounded-xl px-3 py-2 text-xs text-white/60" style={{ border: `1px solid ${Yb}`, background: Yi }}>
+          Transcript imported to NotebookLM
+        </div>
+      </div>
+    ),
+  },
+  {
     eyebrow: 'AI Capture',
     title: 'Capture any response from any AI',
     body: 'ChatGPT, Claude, Gemini, Perplexity — MindDock captures and automatically imports the best of each conversation directly into your NotebookLM notebook.',
@@ -87,39 +147,6 @@ const features = [
             <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
               <path d="M2 6h8M7 4l3 2-3 2" stroke={Y} strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
             </svg>
-          </div>
-        ))}
-      </div>
-    ),
-  },
-  {
-    eyebrow: 'Zettelkasten',
-    title: 'Notes that link and build knowledge',
-    body: 'Create atomic notes with wikilinks, visualize connections in an interactive graph, and build a second memory that grows with every study session.',
-    stat: '[[]]',
-    statLabel: 'wikilinks between notes',
-    icon: (
-      <svg width="28" height="28" viewBox="0 0 28 28" fill="none">
-        <circle cx="14" cy="14" r="3.5" stroke={Y} strokeWidth="1.8" fill={Yi} />
-        <circle cx="5" cy="8" r="2" stroke={Y} strokeWidth="1.4" fill={Yi} />
-        <circle cx="23" cy="8" r="2" stroke={Y} strokeWidth="1.4" fill={Yi} />
-        <circle cx="5" cy="20" r="2" stroke={Y} strokeWidth="1.4" fill={Yi} />
-        <circle cx="23" cy="20" r="2" stroke={Y} strokeWidth="1.4" fill={Yi} />
-        <path d="M7 9.5L11 12M17 12L21 9.5M7 18.5L11 16M17 16L21 18.5" stroke={Y} strokeWidth="1.2" strokeLinecap="round" />
-      </svg>
-    ),
-    visual: (
-      <div className="relative flex h-32 items-center justify-center">
-        <div className="flex h-8 w-8 items-center justify-center rounded-full" style={{ border: `1px solid ${Yb}`, background: Yi }}>
-          <div className="h-2.5 w-2.5 rounded-full bg-yellow-400/70" />
-        </div>
-        {[[-44, -22], [36, -22], [-44, 22], [36, 22]].map(([x, y], i) => (
-          <div
-            key={i}
-            className="absolute flex h-6 w-6 items-center justify-center rounded-full"
-            style={{ transform: `translate(${x}px, ${y}px)`, border: `1px solid ${Yb}`, background: Yi }}
-          >
-            <div className="h-1.5 w-1.5 rounded-full bg-yellow-400/40" />
           </div>
         ))}
       </div>
@@ -154,20 +181,57 @@ export default function FeaturesScrollSection() {
   const sectionRef = useRef<HTMLDivElement>(null);
   const cardsAreaRef = useRef<HTMLDivElement>(null);
   const cardsRef = useRef<(HTMLDivElement | null)[]>([]);
+  const [isSectionVisible, setIsSectionVisible] = useState(false);
+  const [reduceMotion, setReduceMotion] = useState(false);
   const numCards = features.length;
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const media = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const update = () => setReduceMotion(media.matches);
+    update();
+    media.addEventListener('change', update);
+    return () => media.removeEventListener('change', update);
+  }, []);
+
+  useEffect(() => {
+    const section = sectionRef.current;
+    if (!section || typeof IntersectionObserver === 'undefined') return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        setIsSectionVisible(entries[0]?.isIntersecting ?? false);
+      },
+      { rootMargin: '180% 0px 180% 0px' }
+    );
+
+    observer.observe(section);
+    return () => observer.disconnect();
+  }, []);
 
   useEffect(() => {
     const section = sectionRef.current;
     if (!section) return;
 
-    const updateCards = (scrollY: number) => {
-      const sectionDocTop = section.getBoundingClientRect().top + scrollY;
-      const sectionH = section.offsetHeight;
-      const cardsAreaH = cardsAreaRef.current?.offsetHeight ?? window.innerHeight * 0.55;
-      const vh = window.innerHeight;
+    let sectionDocTop = 0;
+    let sectionHeight = 0;
+    let cardsAreaHeight = 0;
+    let viewportHeight = window.innerHeight;
+    let active = true;
+    let rafId: number | null = null;
+    let current = window.scrollY;
+    let target = window.scrollY;
 
+    const recalcMetrics = () => {
+      sectionDocTop = section.getBoundingClientRect().top + window.scrollY;
+      sectionHeight = section.offsetHeight;
+      cardsAreaHeight = cardsAreaRef.current?.offsetHeight ?? window.innerHeight * 0.55;
+      viewportHeight = window.innerHeight;
+    };
+
+    const updateCards = (scrollY: number) => {
       const scrolled = Math.max(0, scrollY - sectionDocTop);
-      const totalScroll = sectionH - vh;
+      const totalScroll = Math.max(1, sectionHeight - viewportHeight);
       const perCard = totalScroll / numCards;
 
       cardsRef.current.forEach((card, i) => {
@@ -182,7 +246,7 @@ export default function FeaturesScrollSection() {
 
         const eased = p < 1 ? 1 - Math.pow(1 - p, 3) : 1;
 
-        const from = cardsAreaH + 60;
+        const from = cardsAreaHeight + 60;
         const to = -(depth * 28);
         const y = from + (to - from) * eased;
 
@@ -196,28 +260,84 @@ export default function FeaturesScrollSection() {
       });
     };
 
-    let rafId: number;
-    let current = window.scrollY;
-    let target = window.scrollY;
-
     const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
-
-    const onScroll = () => { target = window.scrollY; };
-    window.addEventListener('scroll', onScroll, { passive: true });
+    const stopRaf = () => {
+      if (rafId !== null) {
+        cancelAnimationFrame(rafId);
+        rafId = null;
+      }
+    };
 
     const loop = () => {
+      if (!active) {
+        stopRaf();
+        return;
+      }
       current = lerp(current, target, 0.1);
       updateCards(current);
+
+      if (Math.abs(current - target) <= 0.5) {
+        current = target;
+        updateCards(current);
+        stopRaf();
+        return;
+      }
+
       rafId = requestAnimationFrame(loop);
     };
-    rafId = requestAnimationFrame(loop);
+
+    const requestLoop = () => {
+      if (rafId === null) {
+        rafId = requestAnimationFrame(loop);
+      }
+    };
+
+    const onScroll = () => {
+      target = window.scrollY;
+      if (reduceMotion) {
+        updateCards(target);
+        return;
+      }
+      if (active) requestLoop();
+    };
+
+    const onResize = () => {
+      recalcMetrics();
+      target = window.scrollY;
+      current = target;
+      updateCards(target);
+    };
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        active = entries[0]?.isIntersecting ?? false;
+        if (!active) {
+          stopRaf();
+          return;
+        }
+        target = window.scrollY;
+        current = target;
+        updateCards(target);
+        if (!reduceMotion) requestLoop();
+      },
+      { rootMargin: '180% 0px 180% 0px' }
+    );
+    observer.observe(section);
+
+    recalcMetrics();
     updateCards(window.scrollY);
+    if (!reduceMotion && active) requestLoop();
+
+    window.addEventListener('scroll', onScroll, { passive: true });
+    window.addEventListener('resize', onResize, { passive: true });
 
     return () => {
-      cancelAnimationFrame(rafId);
+      stopRaf();
+      observer.disconnect();
       window.removeEventListener('scroll', onScroll);
+      window.removeEventListener('resize', onResize);
     };
-  }, [numCards]);
+  }, [numCards, reduceMotion]);
 
   return (
     <section
@@ -229,16 +349,21 @@ export default function FeaturesScrollSection() {
 
         {/* Beams background */}
         <div className="absolute inset-0 pointer-events-none" style={{ zIndex: 0 }}>
-          <Beams
-            beamWidth={2}
-            beamHeight={20}
-            beamNumber={14}
-            lightColor="#ffffff"
-            speed={2}
-            noiseIntensity={1.75}
-            scale={0.2}
-            rotation={30}
-          />
+          {isSectionVisible && !reduceMotion ? (
+            <Beams
+              beamWidth={2}
+              beamHeight={20}
+              beamNumber={14}
+              lightColor="#ffffff"
+              speed={2}
+              noiseIntensity={1.75}
+              scale={0.2}
+              rotation={30}
+              active={isSectionVisible}
+            />
+          ) : (
+            <div className="h-full w-full bg-black/90" />
+          )}
         </div>
 
         {/* Heading */}
@@ -297,9 +422,16 @@ export default function FeaturesScrollSection() {
                         </p>
                         <p className="mt-0.5 text-[11px] text-white/30">{feature.statLabel}</p>
                       </div>
-                      <span className="rounded-full border border-white/8 bg-white/4 px-3 py-1.5 text-[10px] text-white/35">
-                        + NotebookLM
-                      </span>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="rounded-full border border-white/8 bg-white/4 px-3 py-1.5 text-[10px] text-white/35">
+                          + NotebookLM
+                        </span>
+                        {feature.availability ? (
+                          <span className="rounded-full border border-yellow-400/25 bg-yellow-400/10 px-3 py-1.5 text-[10px] text-yellow-300/80">
+                            {feature.availability}
+                          </span>
+                        ) : null}
+                      </div>
                     </div>
                   </div>
 

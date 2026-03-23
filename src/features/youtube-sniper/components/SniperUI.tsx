@@ -1,14 +1,16 @@
 import { useEffect, useState } from 'react';
 import { extractTranscriptSlice } from '../utils/transcriptEngine';
 
-const MAX_INTERVALO = 3600; // 1 hora
+const MAX_INTERVALO = 3600;
 const SNIPER_BUTTON_ID = 'minddock-youtube-sniper-button';
-const PANEL_WIDTH = 340;
+const PANEL_WIDTH = 352;
 
 type SniperUIProps = {
   onClose: () => void;
   defaultNotebookId: string;
 };
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function resolveYouTubeTitle(): string {
   const selectors = [
@@ -21,13 +23,12 @@ function resolveYouTubeTitle(): string {
     const text = el?.textContent?.trim();
     if (text) return text;
   }
-  const fallback = document.title.replace(/\s*-+\s*YouTube\s*$/i, '').trim();
-  return fallback || 'YouTube';
+  return document.title.replace(/\s*-+\s*YouTube\s*$/i, '').trim() || 'YouTube';
 }
 
 async function hashContent(text: string): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
-  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
+  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('');
 }
 
 async function sendRuntimeMessage<T = Record<string, unknown>>(
@@ -36,9 +37,7 @@ async function sendRuntimeMessage<T = Record<string, unknown>>(
   timeoutMs = 15000
 ): Promise<{ success: boolean; payload?: T; data?: T; error?: string }> {
   const runtimeApi = typeof chrome !== 'undefined' ? chrome.runtime : undefined;
-  if (!runtimeApi?.sendMessage) {
-    return { success: false, error: 'CHROME_RUNTIME_UNAVAILABLE' };
-  }
+  if (!runtimeApi?.sendMessage) return { success: false, error: 'CHROME_RUNTIME_UNAVAILABLE' };
 
   return new Promise((resolve) => {
     let settled = false;
@@ -73,28 +72,138 @@ function readPlayerTimes(): { duration: number; currentTime: number } {
   const player = document.querySelector('#movie_player') as any;
   const rawDuration = Number(player?.getDuration?.());
   const rawCurrent = Number(player?.getCurrentTime?.());
-
   const video = document.querySelector('video') as HTMLVideoElement | null;
-  const videoDuration = Number(video?.duration);
-  const videoCurrent = Number(video?.currentTime);
-
-  const duration = Number.isFinite(rawDuration) && rawDuration > 0
-    ? rawDuration
-    : Number.isFinite(videoDuration)
-    ? videoDuration
-    : 0;
-
-  const currentTime = Number.isFinite(rawCurrent) && rawCurrent > 0
-    ? rawCurrent
-    : Number.isFinite(videoCurrent)
-    ? videoCurrent
-    : 0;
-
-  return {
-    duration: Math.floor(duration),
-    currentTime: Math.floor(currentTime),
-  };
+  const duration = Number.isFinite(rawDuration) && rawDuration > 0 ? rawDuration : Number(video?.duration) || 0;
+  const currentTime = Number.isFinite(rawCurrent) && rawCurrent > 0 ? rawCurrent : Number(video?.currentTime) || 0;
+  return { duration: Math.floor(duration), currentTime: Math.floor(currentTime) };
 }
+
+// ─── Logo Mark ───────────────────────────────────────────────────────────────
+
+function MindDockMark() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 22 22" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <rect width="22" height="22" rx="6" fill="rgba(255,255,255,0.1)" />
+      <path
+        d="M5 16V7.5L11 13L17 7.5V16"
+        stroke="rgba(255,255,255,0.75)"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+// ─── Timeline Range Bar ───────────────────────────────────────────────────────
+
+function TimelineBar({
+  duration,
+  startSec,
+  endSec,
+  currentTime,
+}: {
+  duration: number;
+  startSec: number;
+  endSec: number;
+  currentTime: number;
+}) {
+  const d = Math.max(duration, 1);
+  const startPct = (startSec / d) * 100;
+  const widthPct = ((endSec - startSec) / d) * 100;
+  const nowPct = (currentTime / d) * 100;
+
+  return (
+    <div className="relative h-[3px] w-full overflow-hidden rounded-full bg-white/10">
+      {/* Selected range */}
+      <div
+        className="absolute top-0 h-full rounded-full"
+        style={{
+          left: `${startPct}%`,
+          width: `${Math.max(widthPct, 1)}%`,
+          background: 'rgba(255,255,255,0.5)',
+        }}
+      />
+      {/* Playhead */}
+      <div
+        className="absolute top-[-4px] h-[11px] w-[1.5px] rounded-full bg-white"
+        style={{ left: `${nowPct}%`, transform: 'translateX(-50%)' }}
+      />
+    </div>
+  );
+}
+
+// ─── Slider Control ───────────────────────────────────────────────────────────
+
+function SliderControl({
+  label,
+  value,
+  max,
+  onChange,
+  onSetNow,
+}: {
+  label: string;
+  value: number;
+  max: number;
+  onChange: (v: number) => void;
+  onSetNow: () => void;
+}) {
+  return (
+    <div className="flex-1 space-y-2">
+      <div className="flex items-center justify-between">
+        <span
+          className="text-[9px] font-medium uppercase tracking-widest"
+          style={{ color: 'rgba(255,255,255,0.3)' }}
+        >
+          {label}
+        </span>
+        <span className="font-mono text-[11px] font-medium" style={{ color: 'rgba(255,255,255,0.8)' }}>
+          {formatTime(value)}
+        </span>
+      </div>
+      <input
+        type="range"
+        min={0}
+        max={max}
+        value={value}
+        onChange={(e) => onChange(Number(e.target.value))}
+        className="w-full cursor-pointer"
+        style={{ accentColor: 'rgba(255,255,255,0.7)', height: '3px' }}
+      />
+      <button
+        type="button"
+        onClick={onSetNow}
+        className="flex w-full items-center justify-center gap-1 rounded-md border transition-all duration-150 cursor-pointer"
+        style={{
+          borderColor: 'rgba(255,255,255,0.08)',
+          backgroundColor: 'transparent',
+          padding: '5px 8px',
+          color: 'rgba(255,255,255,0.4)',
+          fontSize: '10px',
+          fontWeight: 400,
+        }}
+        onMouseEnter={(e) => {
+          (e.currentTarget as HTMLButtonElement).style.backgroundColor = 'rgba(255,255,255,0.06)';
+          (e.currentTarget as HTMLButtonElement).style.borderColor = 'rgba(255,255,255,0.15)';
+          (e.currentTarget as HTMLButtonElement).style.color = 'rgba(255,255,255,0.7)';
+        }}
+        onMouseLeave={(e) => {
+          (e.currentTarget as HTMLButtonElement).style.backgroundColor = 'transparent';
+          (e.currentTarget as HTMLButtonElement).style.borderColor = 'rgba(255,255,255,0.08)';
+          (e.currentTarget as HTMLButtonElement).style.color = 'rgba(255,255,255,0.4)';
+        }}
+      >
+        <svg width="9" height="9" viewBox="0 0 9 9" fill="none">
+          <circle cx="4.5" cy="4.5" r="3.5" stroke="currentColor" strokeWidth="1.2" />
+          <circle cx="4.5" cy="4.5" r="1.5" fill="currentColor" />
+        </svg>
+        Set to now
+      </button>
+    </div>
+  );
+}
+
+// ─── Main Component ───────────────────────────────────────────────────────────
 
 export function SniperUI({ onClose, defaultNotebookId }: SniperUIProps) {
   const [duration, setDuration] = useState(0);
@@ -105,16 +214,21 @@ export function SniperUI({ onClose, defaultNotebookId }: SniperUIProps) {
   const [message, setMessage] = useState('');
   const [extractedText, setExtractedText] = useState('');
   const [anchorPos, setAnchorPos] = useState<{ left: number; top: number } | null>(null);
+  const [visible, setVisible] = useState(false);
+
+  // Mount animation
+  useEffect(() => {
+    const t = window.setTimeout(() => setVisible(true), 20);
+    return () => window.clearTimeout(t);
+  }, []);
 
   useEffect(() => {
-    // Inicializa com valores atuais
     const { duration: dur, currentTime: cur } = readPlayerTimes();
     setDuration(dur);
     setCurrentTime(cur);
     setStartSec(Math.max(0, cur - 30));
     setEndSec(cur);
 
-    // Atualiza a cada segundo
     const interval = setInterval(() => {
       const snapshot = readPlayerTimes();
       setDuration(snapshot.duration);
@@ -140,13 +254,11 @@ export function SniperUI({ onClose, defaultNotebookId }: SniperUIProps) {
     };
 
     updatePosition();
-    const handleScroll = () => updatePosition();
-    const handleResize = () => updatePosition();
-    window.addEventListener('scroll', handleScroll, true);
-    window.addEventListener('resize', handleResize);
+    window.addEventListener('scroll', updatePosition, true);
+    window.addEventListener('resize', updatePosition);
     return () => {
-      window.removeEventListener('scroll', handleScroll, true);
-      window.removeEventListener('resize', handleResize);
+      window.removeEventListener('scroll', updatePosition, true);
+      window.removeEventListener('resize', updatePosition);
     };
   }, []);
 
@@ -155,220 +267,371 @@ export function SniperUI({ onClose, defaultNotebookId }: SniperUIProps) {
     const timer = window.setTimeout(() => {
       setMessage('');
       setExtractedText('');
-    }, 3000);
+    }, 4000);
     return () => window.clearTimeout(timer);
   }, [message, status]);
 
-  const updateStartSec = (nextValue: number) => {
-    const clampedStart = Math.min(Math.max(nextValue, 0), duration);
-    const maxEnd = Math.min(duration, clampedStart + MAX_INTERVALO);
-    setStartSec(clampedStart);
-    setEndSec((prev) => {
-      const nextEnd = Math.min(Math.max(prev, clampedStart), maxEnd);
-      return nextEnd;
-    });
+  const updateStartSec = (v: number) => {
+    const clamped = Math.min(Math.max(v, 0), duration);
+    setStartSec(clamped);
+    setEndSec((prev) => Math.min(Math.max(prev, clamped), Math.min(duration, clamped + MAX_INTERVALO)));
   };
 
-  const updateEndSec = (nextValue: number) => {
-    const maxEnd = Math.min(duration, startSec + MAX_INTERVALO);
-    const clamped = Math.min(Math.max(nextValue, startSec), maxEnd);
-    setEndSec(clamped);
+  const updateEndSec = (v: number) => {
+    setEndSec(Math.min(Math.max(v, startSec), Math.min(duration, startSec + MAX_INTERVALO)));
   };
+
   async function handleExtract() {
     if (startSec >= endSec) {
       setStatus('error');
-      setMessage('O tempo de início deve ser menor que o tempo de fim');
+      setMessage('Start time must be before end time.');
       return;
     }
-
     const notebookId = defaultNotebookId?.trim();
     if (!notebookId) {
       setStatus('error');
-      setMessage('Selecione um caderno padrão no popup antes de extrair.');
+      setMessage('Select a default notebook in the popup first.');
       return;
     }
-
-    // Limite de 1 hora
     if (endSec - startSec > MAX_INTERVALO) {
       setStatus('error');
-      setMessage('Intervalo máximo é de 1:00:00. Ajuste os sliders.');
+      setMessage('Max interval is 1 hour. Adjust the sliders.');
       return;
     }
 
-    const MAX_TENTATIVAS = 3;
-    const DELAY_ENTRE_TENTATIVAS = 3000;
-
-    for (let tentativa = 1; tentativa <= MAX_TENTATIVAS; tentativa++) {
+    const MAX_ATTEMPTS = 3;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       setStatus('loading');
-      setMessage(tentativa === 1
-        ? 'Extraindo legenda...'
-        : `Tentativa ${tentativa} de ${MAX_TENTATIVAS}...`
-      );
+      setMessage(attempt === 1 ? 'Extracting transcript...' : `Retrying (${attempt}/${MAX_ATTEMPTS})...`);
       setExtractedText('');
 
       try {
         const text = await extractTranscriptSlice(startSec, endSec);
         setExtractedText(text);
-        setMessage('Salvando no caderno padrão...');
+        setMessage('Saving to notebook...');
 
         const intervalLabel = `${formatTime(startSec)} → ${formatTime(endSec)}`;
-        const sourceTitle = `${resolveYouTubeTitle()}\nURL: ${window.location.href}\nIntervalo: ${intervalLabel}`;
-        const payloadText = text;
-        const currentHash = await hashContent(payloadText);
+        const sourceTitle = `${resolveYouTubeTitle()}\nURL: ${window.location.href}\nInterval: ${intervalLabel}`;
+        const currentHash = await hashContent(text);
         const response = await sendRuntimeMessage('PROTOCOL_APPEND_SOURCE', {
           notebookId,
           sourceTitle,
           sourcePlatform: 'Youtube',
           sourceKind: 'chat',
-          conversation: [{ role: 'assistant', content: payloadText }],
+          conversation: [{ role: 'assistant', content: text }],
           capturedFromUrl: window.location.href,
           isResync: false,
           currentHash,
         }, 20000);
 
-        if (!response.success) {
-          throw new Error(response.error ?? 'Falha ao salvar no caderno.');
-        }
+        if (!response.success) throw new Error(response.error ?? 'Failed to save.');
 
         setStatus('success');
-        setMessage(`${text.split(' ').length} palavras extraídas e salvas no caderno`);
-        return; // Sucesso — para aqui
+        setMessage(`${text.split(' ').length} words extracted and saved.`);
+        return;
       } catch (err: any) {
-        if (tentativa === MAX_TENTATIVAS) {
-          // Esgotou todas as tentativas
+        if (attempt === MAX_ATTEMPTS) {
           setStatus('error');
           const msg = err.message ?? '';
-          if (msg.includes('Botão de transcrição não encontrado') || msg.includes('baseUrl')) {
-            setMessage('Este vídeo não possui transcrição disponível. Pode ser conteúdo exclusivo para membros ou legenda desativada pelo criador.');
+          if (
+            msg.includes('Botão de transcrição') ||
+            msg.includes('baseUrl') ||
+            /no transcript available/i.test(msg)
+          ) {
+            setMessage('No transcript available for this video.');
           } else if (msg.includes('intervalo')) {
-            setMessage('Nenhuma fala encontrada no intervalo selecionado. Tente ampliar o intervalo.');
+            setMessage('No speech found in the selected range. Try a wider interval.');
           } else {
-            setMessage('Não foi possível extrair a legenda. Verifique se o vídeo possui transcrição ativada.');
+            setMessage('Could not extract transcript. Make sure captions are enabled.');
           }
           return;
         }
-
-        // Aguarda antes da próxima tentativa
-        // Mantém mensagem atual sem exibir aviso de tentativa
-        await new Promise((r) => setTimeout(r, DELAY_ENTRE_TENTATIVAS));
+        await new Promise((r) => setTimeout(r, 3000));
       }
     }
   }
 
-  const statusTone =
-    status === 'error'
-      ? 'border-red-500/20 bg-red-500/10 text-red-300'
-      : status === 'success'
-      ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-300'
-      : 'border-white/10 bg-white/5 text-zinc-300';
+  const intervalSecs = endSec - startSec;
 
   return (
     <div
-      className="fixed z-[999999] w-[340px] max-w-[92vw] text-white"
-      style={
-        anchorPos
+      className="fixed z-[999999]"
+      style={{
+        width: PANEL_WIDTH,
+        maxWidth: '92vw',
+        ...(anchorPos
           ? { left: anchorPos.left, top: anchorPos.top, transform: 'translate(-50%, -100%)' }
-          : { right: 20, bottom: 80 }
-      }
+          : { right: 20, bottom: 80 }),
+        opacity: visible ? 1 : 0,
+        transform: `${anchorPos ? 'translate(-50%, -100%)' : ''} translateY(${visible ? 0 : 8}px)`,
+        transition: 'opacity 200ms ease, transform 200ms ease',
+      }}
     >
-      <div className="rounded-[14px] border border-white/10 bg-[#0b0b0b] p-3 shadow-[0_12px_30px_rgba(0,0,0,0.6)]">
-        <div className="space-y-3">
-          {/* Header */}
-          <div className="flex items-start justify-between gap-3">
-            <div className="min-w-0">
-              <div className="flex items-center gap-2">
-                <span className="text-[13px] font-semibold text-white">MindDock Sniper</span>
-                <span className="rounded-md bg-action/15 px-1.5 py-0.5 text-[8px] font-bold uppercase tracking-wider text-action">
-                  YouTube
+      {/* Card */}
+      <div
+        style={{
+          background: 'rgba(10, 10, 12, 0.97)',
+          backdropFilter: 'blur(24px)',
+          WebkitBackdropFilter: 'blur(24px)',
+          borderRadius: 16,
+          border: '1px solid rgba(255,255,255,0.08)',
+          boxShadow: '0 20px 50px rgba(0,0,0,0.6)',
+          overflow: 'hidden',
+        }}
+      >
+
+        <div style={{ padding: '14px 14px 14px' }}>
+
+          {/* ── Header ── */}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <MindDockMark />
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <span style={{ fontSize: 13, fontWeight: 500, color: 'rgba(255,255,255,0.85)', letterSpacing: '-0.01em' }}>
+                    Sniper
+                  </span>
+                  {/* YouTube badge */}
+                  <span style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 3,
+                    background: 'rgba(255,255,255,0.06)',
+                    border: '1px solid rgba(255,255,255,0.08)',
+                    borderRadius: 4,
+                    padding: '1px 5px',
+                    fontSize: 9,
+                    fontWeight: 500,
+                    color: 'rgba(255,255,255,0.35)',
+                    letterSpacing: '0.04em',
+                    textTransform: 'uppercase',
+                  }}>
+                    <span style={{ width: 4, height: 4, borderRadius: '50%', background: '#ff4444', display: 'inline-block', opacity: 0.8 }} />
+                    YouTube
+                  </span>
+                </div>
+                <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)', marginTop: 1, display: 'block' }}>
+                  {formatTime(duration)} total · {formatTime(currentTime)} now
                 </span>
               </div>
-              <span className="mt-0.5 block text-[11px] text-zinc-400">
-                Duração: {formatTime(duration)} · Agora: {formatTime(currentTime)}
-              </span>
             </div>
             <button
               type="button"
               onClick={onClose}
-              className="flex h-7 w-7 items-center justify-center rounded-xl border border-white/10 bg-white/5 text-zinc-400 transition hover:bg-white/10 hover:text-white">
-              ×
+              style={{
+                width: 28,
+                height: 28,
+                borderRadius: 10,
+                border: '1px solid rgba(255,255,255,0.1)',
+                background: 'rgba(255,255,255,0.05)',
+                color: 'rgba(255,255,255,0.45)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                cursor: 'pointer',
+                transition: 'all 150ms ease',
+                flexShrink: 0,
+              }}
+              onMouseEnter={(e) => {
+                (e.currentTarget as HTMLButtonElement).style.background = 'rgba(255,255,255,0.12)';
+                (e.currentTarget as HTMLButtonElement).style.color = '#fff';
+              }}
+              onMouseLeave={(e) => {
+                (e.currentTarget as HTMLButtonElement).style.background = 'rgba(255,255,255,0.05)';
+                (e.currentTarget as HTMLButtonElement).style.color = 'rgba(255,255,255,0.45)';
+              }}
+            >
+              <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+                <path d="M1 1l10 10M11 1L1 11" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+              </svg>
             </button>
           </div>
 
-          {/* Slider INÍCIO */}
-          <div className="rounded-[12px] border border-white/10 bg-[#111] p-2.5">
-            <div className="flex items-center justify-between text-[10px] font-medium uppercase tracking-wider text-zinc-500">
-              <span>Início</span>
-              <span className="text-action">{formatTime(startSec)}</span>
+          {/* ── Timeline visualization ── */}
+          <div style={{ marginBottom: 14 }}>
+            <TimelineBar
+              duration={duration}
+              startSec={startSec}
+              endSec={endSec}
+              currentTime={currentTime}
+            />
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4 }}>
+              <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.2)', fontFamily: 'monospace' }}>0:00</span>
+              <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.2)', fontFamily: 'monospace' }}>{formatTime(duration)}</span>
             </div>
-            <input
-              type="range"
-              min={0}
-              max={duration}
+          </div>
+
+          {/* ── Sliders side-by-side ── */}
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: '1fr 1px 1fr',
+              gap: '0 12px',
+              background: 'rgba(255,255,255,0.025)',
+              borderRadius: 10,
+              border: '1px solid rgba(255,255,255,0.06)',
+              padding: '10px 12px',
+              marginBottom: 10,
+            }}
+          >
+            <SliderControl
+              label="Start"
               value={startSec}
-              onChange={e => updateStartSec(Number(e.target.value))}
-              className="mt-2 w-full"
-              style={{ accentColor: '#facc15' }}
-            />
-            <button
-              type="button"
-              onClick={() => updateStartSec(currentTime)}
-              className="mt-2 inline-flex items-center gap-1 rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-[10px] text-zinc-300 transition hover:bg-white/10">
-              Usar tempo atual
-            </button>
-          </div>
-
-          {/* Slider FIM */}
-          <div className="rounded-[12px] border border-white/10 bg-[#111] p-2.5">
-            <div className="flex items-center justify-between text-[10px] font-medium uppercase tracking-wider text-zinc-500">
-              <span>Fim</span>
-              <span className="text-action">{formatTime(endSec)}</span>
-            </div>
-            <input
-              type="range"
-              min={0}
               max={duration}
-              value={endSec}
-              onChange={e => updateEndSec(Number(e.target.value))}
-              className="mt-2 w-full"
-              style={{ accentColor: '#facc15' }}
+              onChange={updateStartSec}
+              onSetNow={() => updateStartSec(currentTime)}
             />
-            <button
-              type="button"
-              onClick={() => updateEndSec(currentTime)}
-              className="mt-2 inline-flex items-center gap-1 rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-[10px] text-zinc-300 transition hover:bg-white/10">
-              Usar tempo atual
-            </button>
+            {/* Divider */}
+            <div style={{ background: 'rgba(255,255,255,0.08)', borderRadius: 1 }} />
+            <SliderControl
+              label="End"
+              value={endSec}
+              max={duration}
+              onChange={updateEndSec}
+              onSetNow={() => updateEndSec(currentTime)}
+            />
           </div>
 
-          {/* Intervalo selecionado */}
-          <div className="text-center text-[11px] text-zinc-400">
-            Intervalo: {formatTime(startSec)} → {formatTime(endSec)} ({formatTime(endSec - startSec)})
+          {/* ── Interval pill ── */}
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: 6,
+            marginBottom: 12,
+            padding: '6px 12px',
+            borderRadius: 8,
+            background: 'rgba(255,255,255,0.04)',
+            border: '1px solid rgba(255,255,255,0.07)',
+          }}>
+            <span style={{ fontFamily: 'monospace', fontSize: 11, color: 'rgba(255,255,255,0.55)', fontWeight: 400 }}>
+              {formatTime(startSec)}
+            </span>
+            <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.2)' }}>→</span>
+            <span style={{ fontFamily: 'monospace', fontSize: 11, color: 'rgba(255,255,255,0.55)', fontWeight: 400 }}>
+              {formatTime(endSec)}
+            </span>
+            <span style={{
+              fontSize: 10,
+              color: 'rgba(255,255,255,0.5)',
+              fontWeight: 500,
+              fontFamily: 'monospace',
+              background: 'rgba(255,255,255,0.07)',
+              borderRadius: 4,
+              padding: '1px 6px',
+            }}>
+              {formatTime(intervalSecs)}
+            </span>
           </div>
 
-          {/* Botão extrair */}
+          {/* ── Extract button ── */}
           <button
             onClick={handleExtract}
             disabled={status === 'loading'}
-            className={`btn-primary w-full ${status === 'loading' ? 'cursor-not-allowed opacity-60' : ''}`}
+            style={{
+              width: '100%',
+              padding: '10px 16px',
+              borderRadius: 10,
+              border: '1px solid rgba(255,255,255,0.12)',
+              background: status === 'loading'
+                ? 'rgba(255,255,255,0.06)'
+                : 'rgba(255,255,255,0.1)',
+              color: status === 'loading' ? 'rgba(255,255,255,0.4)' : 'rgba(255,255,255,0.85)',
+              fontSize: 12,
+              fontWeight: 500,
+              cursor: status === 'loading' ? 'not-allowed' : 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: 7,
+              transition: 'all 150ms ease',
+              letterSpacing: '0em',
+            }}
+            onMouseEnter={(e) => {
+              if (status !== 'loading') {
+                (e.currentTarget as HTMLButtonElement).style.background = 'rgba(255,255,255,0.15)';
+                (e.currentTarget as HTMLButtonElement).style.borderColor = 'rgba(255,255,255,0.2)';
+              }
+            }}
+            onMouseLeave={(e) => {
+              (e.currentTarget as HTMLButtonElement).style.background = 'rgba(255,255,255,0.1)';
+              (e.currentTarget as HTMLButtonElement).style.borderColor = 'rgba(255,255,255,0.12)';
+            }}
           >
-            {status === 'loading' ? 'Extraindo...' : 'Extrair legenda'}
+            {status === 'loading' ? (
+              <>
+                <svg width="13" height="13" viewBox="0 0 14 14" style={{ animation: 'spin 0.8s linear infinite' }}>
+                  <circle cx="7" cy="7" r="5.5" stroke="rgba(255,255,255,0.2)" strokeWidth="1.5" fill="none" />
+                  <path d="M7 1.5A5.5 5.5 0 0112.5 7" stroke="rgba(255,255,255,0.5)" strokeWidth="1.5" strokeLinecap="round" fill="none" />
+                </svg>
+                {message || 'Extracting...'}
+              </>
+            ) : (
+              <>
+                <svg width="13" height="13" viewBox="0 0 14 14" fill="none">
+                  <path d="M7 1L7 9M7 9L4 6M7 9L10 6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                  <path d="M2 11H12" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                </svg>
+                Extract Caption
+              </>
+            )}
           </button>
 
-          {/* Mensagem de status */}
-          {message && (
-            <div className={`rounded-lg border px-3 py-2 text-[11px] leading-relaxed ${statusTone}`}>
-              {message}
+          {/* ── Status message ── */}
+          {message && status !== 'loading' && (
+            <div style={{
+              marginTop: 10,
+              padding: '9px 12px',
+              borderRadius: 10,
+              fontSize: 11,
+              lineHeight: 1.5,
+              display: 'flex',
+              alignItems: 'flex-start',
+              gap: 8,
+              background: status === 'error'
+                ? 'rgba(239,68,68,0.1)'
+                : 'rgba(34,197,94,0.1)',
+              border: `1px solid ${status === 'error' ? 'rgba(239,68,68,0.2)' : 'rgba(34,197,94,0.2)'}`,
+              color: status === 'error' ? '#f87171' : '#4ade80',
+            }}>
+              {status === 'error' ? (
+                <svg width="13" height="13" viewBox="0 0 13 13" fill="none" style={{ flexShrink: 0, marginTop: 1 }}>
+                  <circle cx="6.5" cy="6.5" r="5.5" stroke="currentColor" strokeWidth="1.2" />
+                  <path d="M6.5 4v3M6.5 8.5v.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+                </svg>
+              ) : (
+                <svg width="13" height="13" viewBox="0 0 13 13" fill="none" style={{ flexShrink: 0, marginTop: 1 }}>
+                  <circle cx="6.5" cy="6.5" r="5.5" stroke="currentColor" strokeWidth="1.2" />
+                  <path d="M4 6.5l2 2 3-3" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              )}
+              <span>{message}</span>
             </div>
           )}
 
-          {/* Texto extraído */}
-          {extractedText && (
-            <div className="rounded-lg border border-white/10 bg-[#111] px-3 py-2 text-[11px] leading-relaxed text-zinc-200 max-h-32 overflow-y-auto scrollbar-thin">
+          {/* ── Extracted preview ── */}
+          {extractedText && status === 'success' && (
+            <div style={{
+              marginTop: 10,
+              maxHeight: 80,
+              overflowY: 'auto',
+              padding: '8px 12px',
+              borderRadius: 10,
+              background: 'rgba(255,255,255,0.03)',
+              border: '1px solid rgba(255,255,255,0.07)',
+              fontSize: 10,
+              lineHeight: 1.6,
+              color: 'rgba(255,255,255,0.45)',
+            }}>
               {extractedText}
             </div>
           )}
         </div>
       </div>
+
+      <style>{`
+        @keyframes spin { to { transform: rotate(360deg); } }
+      `}</style>
     </div>
   );
 }

@@ -13,7 +13,7 @@ export function SearchBar({ value, onChange, placeholder }: SearchBarProps) {
       type="text"
       value={value}
       onChange={(e) => onChange(e.target.value)}
-      placeholder={placeholder ?? "Buscar..."}
+      placeholder={placeholder ?? "Search..."}
       leftIcon={<Search size={13} strokeWidth={1.5} />}
       rightIcon={
         value ? (

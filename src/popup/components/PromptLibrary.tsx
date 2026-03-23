@@ -1,4 +1,4 @@
-import { Plus, FolderOpen, BookMarked } from "lucide-react"
+﻿import { Plus, FolderOpen, BookMarked } from "lucide-react"
 import { useState, useEffect } from "react"
 import { PromptCard } from "~/components/PromptCard"
 import { LoadingSpinner } from "~/components/LoadingSpinner"
@@ -33,11 +33,11 @@ export function PromptLibrary({ searchQuery }: PromptLibraryProps) {
     : prompts
 
   async function handleUsePrompt(prompt: SavedPrompt) {
-    // Copia pra clipboard
+    // Copy to clipboard
     await navigator.clipboard.writeText(prompt.content)
-    // Incrementa uso
+    // Increment usage
     await promptsService.incrementUseCount(prompt.id)
-    // Abre o NotebookLM se não estiver aberto
+    // Open NotebookLM if not already open
     const tabs = await chrome.tabs.query({ url: "*://notebooklm.google.com/*" })
     if (tabs.length > 0) {
       chrome.tabs.update(tabs[0].id!, { active: true })
@@ -65,18 +65,18 @@ export function PromptLibrary({ searchQuery }: PromptLibraryProps) {
         <BookMarked size={24} strokeWidth={1} className="text-text-tertiary" />
         <div>
           <p className="text-sm text-text-secondary font-medium">
-            {searchQuery ? "Nenhum prompt encontrado" : "Biblioteca vazia"}
+            {searchQuery ? "No prompts found" : "Library is empty"}
           </p>
           <p className="text-xs text-text-tertiary mt-1">
             {searchQuery
-              ? `Sem prompts com "${searchQuery}"`
-              : "Salve prompts para reusar rapidamente."}
+              ? `No prompts matching "${searchQuery}"`
+              : "Save prompts to reuse them quickly."}
           </p>
         </div>
         {!searchQuery && (
           <Button variant="secondary" size="sm">
             <Plus size={13} strokeWidth={1.5} />
-            Criar prompt
+            Create prompt
           </Button>
         )}
       </div>
@@ -91,7 +91,7 @@ export function PromptLibrary({ searchQuery }: PromptLibraryProps) {
         </span>
         <Button variant="ghost" size="sm" className="h-6 px-2 text-xs">
           <Plus size={11} strokeWidth={1.5} />
-          Novo
+          New
         </Button>
       </div>
 
@@ -108,3 +108,4 @@ export function PromptLibrary({ searchQuery }: PromptLibraryProps) {
     </div>
   )
 }
+

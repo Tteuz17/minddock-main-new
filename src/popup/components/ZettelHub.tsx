@@ -4,7 +4,6 @@ import {
   ArrowLeft,
   NotebookPen,
   Sparkles,
-  GitBranchPlus,
   Network
 } from "lucide-react"
 
@@ -12,25 +11,23 @@ import { useSubscription } from "~/hooks/useSubscription"
 import { ZettelNoteList } from "./zettel/ZettelNoteList"
 import { ZettelNoteDetail } from "./zettel/ZettelNoteDetail"
 import { ZettelMaker } from "./zettel/ZettelMaker"
-import { ZettelLinkNotes } from "./zettel/ZettelLinkNotes"
-import { ZettelGraphView } from "./zettel/ZettelGraphView"
+import { ZettelCanvas } from "./zettel/ZettelCanvas"
 
-type ZettelTab = "notas" | "maker" | "links" | "grafo"
+type ZettelTab = "notes" | "maker" | "canvas"
 
 interface ZettelHubProps {
   onBack: () => void
 }
 
 const TABS: Array<{ id: ZettelTab; label: string; icon: typeof NotebookPen }> = [
-  { id: "notas", label: "Notas", icon: NotebookPen },
+  { id: "notes", label: "Notes", icon: NotebookPen },
   { id: "maker", label: "Maker", icon: Sparkles },
-  { id: "links", label: "Links", icon: GitBranchPlus },
-  { id: "grafo", label: "Grafo", icon: Network }
+  { id: "canvas", label: "Canvas", icon: Network }
 ]
 
 export function ZettelHub({ onBack }: ZettelHubProps) {
   const { canUse } = useSubscription()
-  const [activeTab, setActiveTab] = useState<ZettelTab>("notas")
+  const [activeTab, setActiveTab] = useState<ZettelTab>("notes")
   const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null)
 
   const hasAccess = canUse("zettelkasten")
@@ -43,11 +40,6 @@ export function ZettelHub({ onBack }: ZettelHubProps) {
     setSelectedNoteId(null)
   }, [])
 
-  const handleGraphSelectNote = useCallback((noteId: string) => {
-    setSelectedNoteId(noteId)
-    setActiveTab("notas")
-  }, [])
-
   if (!hasAccess) {
     return (
       <div className="relative flex h-full flex-col bg-[#050505] text-white">
@@ -57,16 +49,16 @@ export function ZettelHub({ onBack }: ZettelHubProps) {
             <NotebookPen size={20} className="text-action" />
           </div>
           <p className="text-center text-[13px] font-medium text-white">
-            Zettelkasten
+            Notes Hub
           </p>
           <p className="text-center text-[11px] text-zinc-400">
-            Este recurso requer o plano Thinker ou superior.
+            This feature requires the Thinker plan or higher.
           </p>
           <button
             type="button"
             onClick={() => chrome.runtime.openOptionsPage()}
             className="mt-2 rounded-xl bg-action/90 px-4 py-2 text-[11px] font-semibold text-black transition hover:bg-action">
-            Ver planos
+            View plans
           </button>
         </div>
       </div>
@@ -88,7 +80,7 @@ export function ZettelHub({ onBack }: ZettelHubProps) {
               type="button"
               onClick={() => {
                 setActiveTab(tab.id)
-                if (tab.id !== "notas") setSelectedNoteId(null)
+                if (tab.id !== "notes") setSelectedNoteId(null)
               }}
               className={[
                 "relative flex flex-1 items-center justify-center gap-1.5 rounded-lg px-2 py-1.5 text-[10px] font-medium transition-all",
@@ -113,7 +105,7 @@ export function ZettelHub({ onBack }: ZettelHubProps) {
       <div className="relative flex-1 overflow-hidden">
         <AnimatePresence mode="wait">
           {/* Note detail overlay */}
-          {selectedNoteId && activeTab === "notas" ? (
+          {selectedNoteId && activeTab === "notes" ? (
             <motion.div
               key="note-detail"
               initial={{ x: "100%", opacity: 0 }}
@@ -134,14 +126,11 @@ export function ZettelHub({ onBack }: ZettelHubProps) {
               exit={{ opacity: 0, y: -6 }}
               transition={{ duration: 0.15 }}
               className="h-full">
-              {activeTab === "notas" && (
+              {activeTab === "notes" && (
                 <ZettelNoteList onSelectNote={handleSelectNote} />
               )}
               {activeTab === "maker" && <ZettelMaker />}
-              {activeTab === "links" && <ZettelLinkNotes />}
-              {activeTab === "grafo" && (
-                <ZettelGraphView onSelectNote={handleGraphSelectNote} />
-              )}
+              {activeTab === "canvas" && <ZettelCanvas />}
             </motion.div>
           )}
         </AnimatePresence>
@@ -161,7 +150,7 @@ function Header({ onBack }: { onBack: () => void }) {
       </button>
       <div className="flex items-center gap-2">
         <h1 className="text-[13px] font-bold tracking-[-0.03em] text-white">
-          Zettelkasten
+          Notes Hub
         </h1>
         <span className="rounded-md bg-action/15 px-1.5 py-0.5 text-[8px] font-bold uppercase tracking-wider text-action">
           AI

@@ -1,16 +1,19 @@
 import { useEffect, useState } from "react"
-import { motion } from "framer-motion"
+import { AnimatePresence, motion } from "framer-motion"
 import {
   Check,
   ChevronDown,
-  ArrowUpRight,
   BookMarked,
   BookOpenText,
   Eye,
   EyeOff,
   GitMerge,
+  Highlighter,
+  Lock,
   RefreshCw,
   Settings2,
+  Sparkles,
+  X,
   Workflow
 } from "lucide-react"
 
@@ -32,6 +35,9 @@ interface HomeDashboardProps {
   onOpenZettelHub?: () => void
   onOpenPromptLab?: () => void
   onOpenBrainMerge?: () => void
+  onOpenHighlights?: () => void
+  onOpenDocks?: () => void
+  onOpenPlans?: () => void
 }
 
 interface DailyUsageSnapshot {
@@ -61,6 +67,8 @@ interface NotebookAccountScope {
   authUser: string | null
   confirmed: boolean
 }
+
+type GatedCapability = "ai_features" | "zettelkasten"
 
 const SETTINGS_KEY = STORAGE_KEYS.SETTINGS
 const AUTH_USER_KEY = STORAGE_KEYS.AUTH_USER
@@ -144,7 +152,15 @@ function resolveDefaultNotebookIdFromSnapshot(
   )
 }
 
-export function HomeDashboard({ onOpenSidePanel, onOpenZettelHub, onOpenPromptLab, onOpenBrainMerge }: HomeDashboardProps) {
+export function HomeDashboard({
+  onOpenSidePanel,
+  onOpenZettelHub,
+  onOpenPromptLab,
+  onOpenBrainMerge,
+  onOpenHighlights,
+  onOpenDocks,
+  onOpenPlans
+}: HomeDashboardProps) {
   const { limits } = useSubscription()
   const {
     notebooks: fetchedNotebooks,
@@ -157,6 +173,7 @@ export function HomeDashboard({ onOpenSidePanel, onOpenZettelHub, onOpenPromptLa
   const [notebookAccountLabel, setNotebookAccountLabel] = useState("NotebookLM account not confirmed")
   const [isSavingDefaultNotebook, setIsSavingDefaultNotebook] = useState(false)
   const [isDefaultNotebookMenuOpen, setIsDefaultNotebookMenuOpen] = useState(false)
+  const [selectedLockedModuleKey, setSelectedLockedModuleKey] = useState<string | null>(null)
 
   useEffect(() => {
     chrome.storage.local.get(STORAGE_KEYS.DAILY_USAGE, (snapshot) => {
@@ -334,32 +351,96 @@ export function HomeDashboard({ onOpenSidePanel, onOpenZettelHub, onOpenPromptLa
     import.meta.url
   ).href
 
+  const openPricing = () => chrome.tabs.create({ url: `${URLS.MINDDOCK_LANDING}/pricing` })
+  const openUpgradePlans = () => {
+    setSelectedLockedModuleKey(null)
+    if (onOpenPlans) {
+      onOpenPlans()
+      return
+    }
+    openPricing()
+  }
+
   const cards = [
     {
+      key: "prompt-library",
       title: "Prompt Library",
       note: "Ready-to-use prompts for faster workflows.",
+      whatItIs:
+        "A curated prompt workspace to speed up writing, ideation and study workflows.",
+      howItHelps: [
+        "Reduces blank-page time with reusable prompt patterns.",
+        "Keeps output quality consistent across notebooks."
+      ],
+      requiredCapability: "ai_features" as GatedCapability,
+      requiredPlanLabel: "Thinker",
       icon: BookMarked,
       accent: "rgba(250,204,21,0.18)",
       accentEdge: "rgba(250,204,21,0.24)",
-      onClick: () => onOpenPromptLab ? onOpenPromptLab() : chrome.tabs.create({ url: `${URLS.MINDDOCK_LANDING}/pricing` })
+      onClick: () => (onOpenPromptLab ? onOpenPromptLab() : undefined)
     },
     {
+      key: "focus-dock",
       title: "Focus Dock",
       note: "Isolated context tabs for each conversation flow.",
+      whatItIs:
+        "Focused workspace tabs that separate contexts, goals and references per thread.",
+      howItHelps: [
+        "Avoids context mixing between different conversations.",
+        "Makes long workflows easier to continue without losing structure."
+      ],
+      requiredCapability: "zettelkasten" as GatedCapability,
+      requiredPlanLabel: "Thinker",
       icon: Workflow,
       accent: "rgba(59,130,246,0.16)",
       accentEdge: "rgba(96,165,250,0.22)",
-      onClick: () => onOpenSidePanel("create_note")
+      onClick: () =>
+        onOpenDocks
+          ? onOpenDocks()
+          : onOpenSidePanel("create_note")
     },
     {
+      key: "brain-merge",
       title: "Brain Merge",
       note: "Combine multiple notebooks with AI for a specific goal.",
+      whatItIs:
+        "AI synthesis engine that merges insights from multiple notebooks into one clear output.",
+      howItHelps: [
+        "Connects scattered sources into one consolidated analysis.",
+        "Accelerates research conclusions and decision-ready summaries."
+      ],
+      requiredCapability: "ai_features" as GatedCapability,
+      requiredPlanLabel: "Thinker",
       icon: GitMerge,
       accent: "rgba(168,85,247,0.16)",
       accentEdge: "rgba(192,132,252,0.22)",
-      onClick: () => onOpenBrainMerge ? onOpenBrainMerge() : undefined
+      onClick: () => (onOpenBrainMerge ? onOpenBrainMerge() : undefined)
+    },
+    {
+      key: "highlight-mode",
+      title: "Highlight Mode",
+      note: "Turn key citations into reusable insight cards.",
+      whatItIs:
+        "A focused review space to collect, revisit and reuse your strongest citations from NotebookLM.",
+      howItHelps: [
+        "Builds a clean bank of references you can reuse across projects.",
+        "Makes it easier to convert raw highlights into final insights."
+      ],
+      requiredCapability: "ai_features" as GatedCapability,
+      requiredPlanLabel: "Thinker",
+      icon: Highlighter,
+      accent: "rgba(56,189,248,0.14)",
+      accentEdge: "rgba(125,211,252,0.22)",
+      onClick: () => {
+        if (onOpenHighlights) {
+          onOpenHighlights()
+          return
+        }
+        void onOpenSidePanel("notes")
+      }
     }
   ]
+  const selectedLockedModule = cards.find((card) => card.key === selectedLockedModuleKey) ?? null
 
   useEffect(() => {
     if (!isDefaultNotebookMenuOpen) {
@@ -594,44 +675,70 @@ export function HomeDashboard({ onOpenSidePanel, onOpenZettelHub, onOpenPromptLa
             </div>
 
             <div className="grid grid-cols-2 gap-1.5">
-              {cards.map(({ title, note, icon: Icon, accent, accentEdge, onClick, comingSoon }, index) => {
-                const isComingSoon = Boolean(comingSoon)
+              {cards.map((card, index) => {
+                const {
+                  key,
+                  title,
+                  note,
+                  icon: Icon,
+                  accent,
+                  accentEdge,
+                  requiredCapability,
+                  requiredPlanLabel,
+                  onClick
+                } = card
+                const isLocked = !Boolean(limits[requiredCapability])
 
                 return (
                   <motion.button
-                    key={title}
+                    key={key}
                     type="button"
                     initial={{ opacity: 0, y: 10 }}
                     animate={{ opacity: 1, y: 0 }}
                     transition={{ duration: 0.22, delay: 0.07 + index * 0.03 }}
-                    whileHover={isComingSoon ? undefined : { y: -2, scale: 1.01 }}
-                    whileTap={isComingSoon ? undefined : { scale: 0.99 }}
-                    onClick={onClick}
-                    disabled={isComingSoon || typeof onClick !== "function"}
-                    className={`liquid-glass-panel h-[104px] rounded-[18px] p-2 text-left hover:border-white/[0.1] ${
-                      isComingSoon ? "cursor-not-allowed opacity-85" : ""
+                    whileHover={{ y: -2, scale: 1.01 }}
+                    whileTap={{ scale: 0.99 }}
+                    onClick={() => {
+                      if (isLocked) {
+                        setSelectedLockedModuleKey(key)
+                        return
+                      }
+                      if (typeof onClick === "function") {
+                        void onClick()
+                      }
+                    }}
+                    disabled={!isLocked && typeof onClick !== "function"}
+                    className={`liquid-glass-panel h-[112px] rounded-[18px] p-2 text-left hover:border-white/[0.1] ${
+                      isLocked ? "opacity-95" : ""
                     }`}
                     style={{
-                      background: `linear-gradient(155deg, ${accent} 0%, rgba(6,6,7,0.52) 36%, rgba(6,6,7,0.85) 100%)`,
-                      boxShadow: `inset 0 1px 0 rgba(255,255,255,0.08), 0 0 0 1px ${accentEdge}`
+                      background: isLocked
+                        ? "linear-gradient(155deg, rgba(120,120,120,0.18) 0%, rgba(10,10,10,0.84) 45%, rgba(5,5,5,0.96) 100%)"
+                        : `linear-gradient(155deg, ${accent} 0%, rgba(6,6,7,0.52) 36%, rgba(6,6,7,0.85) 100%)`,
+                      boxShadow: isLocked
+                        ? "inset 0 1px 0 rgba(255,255,255,0.05), 0 0 0 1px rgba(255,255,255,0.16)"
+                        : `inset 0 1px 0 rgba(255,255,255,0.08), 0 0 0 1px ${accentEdge}`
                     }}>
                     <div className="liquid-glass-content flex items-start justify-between gap-3">
-                      <div className="liquid-glass-soft flex h-7 w-7 items-center justify-center rounded-[14px] text-zinc-100">
+                      <div
+                        className={`liquid-glass-soft flex h-7 w-7 items-center justify-center rounded-[14px] ${
+                          isLocked ? "text-zinc-300" : "text-zinc-100"
+                        }`}>
                         <Icon size={12} strokeWidth={1.8} />
                       </div>
-                      {isComingSoon ? (
-                        <span className="rounded-full border border-[#facc15]/40 bg-[#facc15]/15 px-2 py-0.5 text-[8px] font-medium uppercase tracking-[0.12em] text-[#fde68a]">
-                          Coming soon
+                      {isLocked ? (
+                        <span className="inline-flex h-5 w-5 items-center justify-center rounded-full border border-white/25 bg-black/45 text-zinc-200">
+                          <Lock size={9} />
                         </span>
-                      ) : (
-                        <ArrowUpRight size={11} strokeWidth={2} className="mt-0.5 text-zinc-500" />
-                      )}
+                      ) : null}
                     </div>
 
                     <div className="liquid-glass-content">
-                      <div className="mt-2 h-[2px] w-7 rounded-full bg-white/[0.14]" />
-                      <h2 className="mt-2 text-[11px] font-semibold tracking-[-0.02em] text-white">{title}</h2>
-                      <p className="mt-0.5 text-[9px] text-zinc-300">{note}</p>
+                      <div className={`mt-2 h-[2px] w-7 rounded-full ${isLocked ? "bg-white/[0.08]" : "bg-white/[0.14]"}`} />
+                      <h2 className={`mt-2 text-[11px] font-semibold tracking-[-0.02em] ${isLocked ? "text-zinc-200" : "text-white"}`}>
+                        {title}
+                      </h2>
+                      <p className={`mt-0.5 text-[9px] ${isLocked ? "text-zinc-400" : "text-zinc-300"}`}>{note}</p>
                     </div>
                   </motion.button>
                 )
@@ -640,28 +747,74 @@ export function HomeDashboard({ onOpenSidePanel, onOpenZettelHub, onOpenPromptLa
           </motion.div>
         </div>
 
-        <motion.section
-          initial={{ opacity: 0, y: 8 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.22, delay: 0.1 }}
-          className="liquid-glass-panel mt-2 min-h-[64px] rounded-[18px] p-2.5">
-          <div className="liquid-glass-content flex w-full items-center justify-between gap-3">
-            <div className="min-w-0">
-              <p className="text-[10px] font-medium uppercase tracking-[0.16em] text-zinc-500">
-                Highlight Mode
-              </p>
-              <p className="mt-1 text-[10px] text-zinc-400">Your citations are ready for review.</p>
-            </div>
-
-            <button
-              type="button"
-              onClick={() => onOpenSidePanel("notes")}
-              className="liquid-glass-soft inline-flex h-8 shrink-0 items-center rounded-[12px] px-3 text-[10px] font-medium text-zinc-100 hover:-translate-y-px hover:text-white">
-              View all saved citations
-            </button>
-          </div>
-        </motion.section>
       </div>
+
+      <AnimatePresence>
+        {selectedLockedModule ? (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onClick={() => setSelectedLockedModuleKey(null)}
+            className="absolute inset-0 z-[160] flex items-end bg-black/70 p-3 backdrop-blur-[2px]">
+            <motion.div
+              initial={{ y: 24, opacity: 0 }}
+              animate={{ y: 0, opacity: 1 }}
+              exit={{ y: 24, opacity: 0 }}
+              transition={{ duration: 0.18 }}
+              onClick={(event) => event.stopPropagation()}
+              className="w-full rounded-2xl border border-[#facc15]/35 bg-[linear-gradient(170deg,rgba(250,204,21,0.13),rgba(10,10,10,0.96)_40%)] p-3 shadow-[0_20px_45px_rgba(0,0,0,0.45)]">
+              <div className="flex items-start justify-between gap-2">
+                <span className="inline-flex items-center gap-1 rounded-full border border-[#facc15]/45 bg-[#facc15]/15 px-2 py-0.5 text-[9px] font-semibold uppercase tracking-[0.13em] text-[#fde68a]">
+                  <Lock size={10} />
+                  {selectedLockedModule.requiredPlanLabel} required
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setSelectedLockedModuleKey(null)}
+                  className="inline-flex h-6 w-6 items-center justify-center rounded-full border border-white/15 bg-black/25 text-zinc-300 transition hover:text-white">
+                  <X size={12} />
+                </button>
+              </div>
+
+              <h3 className="mt-2 text-[15px] font-semibold tracking-[-0.02em] text-white">
+                {selectedLockedModule.title}
+              </h3>
+              <p className="mt-1 text-[11px] text-zinc-300">
+                {selectedLockedModule.whatItIs}
+              </p>
+
+              <div className="mt-2 rounded-xl border border-white/10 bg-black/35 p-2.5">
+                <p className="text-[9px] font-semibold uppercase tracking-[0.14em] text-zinc-500">
+                  How this helps
+                </p>
+                <ul className="mt-1.5 space-y-1.5">
+                  {selectedLockedModule.howItHelps.map((item) => (
+                    <li key={item} className="text-[11px] text-zinc-200">
+                      <span className="mr-1 text-[#facc15]">•</span>
+                      {item}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+
+              <button
+                type="button"
+                onClick={openUpgradePlans}
+                className="mt-3 inline-flex w-full items-center justify-center gap-1.5 rounded-xl bg-[#facc15] py-2.5 text-[12px] font-semibold text-black transition hover:bg-[#f7c700]">
+                <Sparkles size={12} />
+                Unlock with {selectedLockedModule.requiredPlanLabel}
+              </button>
+              <button
+                type="button"
+                onClick={() => setSelectedLockedModuleKey(null)}
+                className="mt-2 w-full rounded-xl border border-white/15 bg-white/[0.03] py-2 text-[11px] text-zinc-200 transition hover:bg-white/[0.07]">
+                Not now
+              </button>
+            </motion.div>
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
     </div>
   )
 }

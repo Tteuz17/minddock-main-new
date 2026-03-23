@@ -47,7 +47,7 @@ export function NotebookList({ searchQuery }: NotebookListProps) {
   if (isLoading) {
     return (
       <div className="py-10">
-        <LoadingSpinner label="Carregando notebooks..." />
+        <LoadingSpinner label="Loading notebooks..." />
       </div>
     )
   }
@@ -60,13 +60,13 @@ export function NotebookList({ searchQuery }: NotebookListProps) {
           <p className="text-sm text-text-secondary">{error}</p>
           {error.includes("Tokens") && (
             <p className="text-xs text-text-tertiary mt-1">
-              Abra o NotebookLM e aguarde um momento.
+              Open NotebookLM and wait a moment.
             </p>
           )}
         </div>
         <Button variant="secondary" size="sm" onClick={refetch}>
           <RefreshCw size={13} strokeWidth={1.5} />
-          Tentar novamente
+          Try again
         </Button>
       </div>
     )
@@ -78,12 +78,12 @@ export function NotebookList({ searchQuery }: NotebookListProps) {
         <BookOpen size={24} strokeWidth={1} className="text-text-tertiary" />
         <div>
           <p className="text-sm text-text-secondary font-medium">
-            {searchQuery ? "Nenhum resultado" : "Nenhum notebook encontrado"}
+            {searchQuery ? "No results" : "No notebooks found"}
           </p>
           <p className="text-xs text-text-tertiary mt-1">
             {searchQuery
-              ? `Sem notebooks com "${searchQuery}"`
-              : "Abra o NotebookLM para carregar seus notebooks."}
+              ? `No notebooks matching "${searchQuery}"`
+              : "Open NotebookLM to load your notebooks."}
           </p>
         </div>
         {!searchQuery && (
@@ -91,7 +91,7 @@ export function NotebookList({ searchQuery }: NotebookListProps) {
             variant="secondary"
             size="sm"
             onClick={() => chrome.tabs.create({ url: URLS.NOTEBOOKLM })}>
-            Abrir NotebookLM
+            Open NotebookLM
           </Button>
         )}
       </div>
@@ -107,7 +107,7 @@ export function NotebookList({ searchQuery }: NotebookListProps) {
         </span>
         <Button variant="ghost" size="sm" className="h-6 px-2 text-xs" onClick={refetch}>
           <RefreshCw size={11} strokeWidth={1.5} />
-          Atualizar
+          Refresh
         </Button>
       </div>
 

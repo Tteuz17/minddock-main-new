@@ -343,7 +343,7 @@ chrome.runtime.onInstalled.addListener(async ({ reason }) => {
   if (reason === "install") {
     console.log("[MindDock] Instalado. Bem-vindo!")
     await storageManager.initDefaults()
-    chrome.tabs?.create?.({ url: "https://minddock.app/welcome" })
+    chrome.tabs?.create?.({ url: "https://minddocklm.digital/welcome" })
   }
 
   if (reason === "update") {

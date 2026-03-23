@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from "react"
+﻿import { useEffect, useRef, useState, useCallback } from "react"
 import { motion } from "framer-motion"
 import type { Edge, Network, Node, Options } from "vis-network"
 import type { DataSet } from "vis-data"
@@ -195,9 +195,9 @@ export function ZettelGraphView({ onSelectNote }: ZettelGraphViewProps) {
         <div className="liquid-glass-soft flex h-10 w-10 items-center justify-center rounded-2xl">
           <NetworkIcon size={16} className="text-zinc-500" />
         </div>
-        <p className="text-[11px] font-medium text-zinc-400">Grafo vazio</p>
+        <p className="text-[11px] font-medium text-zinc-400">Empty graph</p>
         <p className="px-6 text-center text-[10px] text-zinc-600">
-          Crie notas e conecte-as para visualizar o grafo de conhecimento.
+          Create notes and connect them to visualize your knowledge graph.
         </p>
       </div>
     )
@@ -215,12 +215,12 @@ export function ZettelGraphView({ onSelectNote }: ZettelGraphViewProps) {
           <input
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Buscar no grafo..."
+            placeholder="Search graph..."
             className="flex-1 bg-transparent font-mono text-[10px] text-white placeholder:text-zinc-700 focus:outline-none"
           />
           {searchQuery && (
             <span className="text-[9px] text-zinc-500">
-              {matchCount} resultado{matchCount !== 1 ? "s" : ""}
+              {matchCount} result{matchCount !== 1 ? "s" : ""}
             </span>
           )}
           <div className="h-3 w-[1px] animate-pulse bg-action/50" />
@@ -232,13 +232,14 @@ export function ZettelGraphView({ onSelectNote }: ZettelGraphViewProps) {
 
       {/* Stats overlay */}
       <div className="absolute bottom-2 left-2 rounded-lg border border-white/[0.04] bg-[#0a0a0a]/80 px-2 py-1 text-[9px] text-zinc-600 backdrop-blur-sm">
-        {graphData.nodes.length} notas · {graphData.edges.length} links
+        {graphData.nodes.length} notes · {graphData.edges.length} links
       </div>
 
       {/* Hint */}
       <div className="absolute bottom-2 right-2 rounded-lg border border-white/[0.04] bg-[#0a0a0a]/80 px-2 py-1 text-[9px] text-zinc-600 backdrop-blur-sm">
-        Duplo clique → abrir nota
+        Double click to open note
       </div>
     </div>
   )
 }
+

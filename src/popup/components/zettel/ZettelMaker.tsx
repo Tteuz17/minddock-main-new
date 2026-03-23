@@ -24,7 +24,7 @@ export function ZettelMaker() {
 
   const handleAtomize = async () => {
     if (!inputText.trim() || inputText.length < 200) {
-      setError("Texto muito curto. Minimo de 200 caracteres.")
+      setError("Text is too short. Minimum of 200 characters.")
       return
     }
 
@@ -36,7 +36,7 @@ export function ZettelMaker() {
     try {
       const notes = await atomizePreview(inputText)
       if (notes.length === 0) {
-        setError("Nenhuma nota atomica gerada. Tente um texto mais longo.")
+        setError("No atomic notes were generated. Try a longer text.")
         return
       }
       setPreviewNotes(
@@ -46,7 +46,7 @@ export function ZettelMaker() {
         }))
       )
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Erro ao atomizar.")
+      setError(err instanceof Error ? err.message : "Failed to atomize.")
     } finally {
       setIsAtomizing(false)
     }
@@ -69,7 +69,7 @@ export function ZettelMaker() {
       setInputText("")
       setTimeout(() => setSuccess(false), 3000)
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Erro ao salvar notas.")
+      setError(err instanceof Error ? err.message : "Failed to save notes.")
     } finally {
       setIsSaving(false)
     }
@@ -95,11 +95,11 @@ export function ZettelMaker() {
               <div className="mb-2 flex items-center gap-2">
                 <Sparkles size={12} className="text-action" />
                 <p className="text-[10px] font-medium uppercase tracking-wider text-zinc-500">
-                  Zettel Maker
+                  Atomic Maker
                 </p>
               </div>
               <p className="mb-2 text-[10px] text-zinc-500">
-                Cole um texto longo e a IA vai dividir em notas atomicas independentes.
+                Paste a long text and AI will split it into independent atomic notes.
               </p>
 
               <div className="liquid-glass-panel rounded-[14px] p-0.5">
@@ -109,7 +109,7 @@ export function ZettelMaker() {
                     setInputText(e.target.value)
                     setError(null)
                   }}
-                  placeholder="Cole aqui um texto, resposta de IA, artigo, etc..."
+                  placeholder="Paste text, AI response, article, etc..."
                   rows={7}
                   className="liquid-glass-content w-full resize-none rounded-xl bg-transparent p-2.5 text-[11px] leading-relaxed text-white placeholder:text-zinc-700 focus:outline-none"
                 />
@@ -131,12 +131,12 @@ export function ZettelMaker() {
                   {isAtomizing ? (
                     <>
                       <Loader2 size={12} className="animate-spin" />
-                      Atomizando...
+                      Atomizing...
                     </>
                   ) : (
                     <>
                       <Sparkles size={12} />
-                      Atomizar
+                      Atomize
                     </>
                   )}
                 </button>
@@ -152,13 +152,13 @@ export function ZettelMaker() {
               animate={{ opacity: 1, y: 0 }}>
               <div className="mb-2 flex items-center justify-between">
                 <p className="text-[10px] font-medium uppercase tracking-wider text-zinc-500">
-                  {previewNotes.length} notas geradas
+                  {previewNotes.length} notes generated
                 </p>
                 <button
                   type="button"
                   onClick={() => setPreviewNotes([])}
                   className="text-[9px] text-zinc-600 transition hover:text-zinc-300">
-                  Voltar
+                  Back
                 </button>
               </div>
 
@@ -224,9 +224,9 @@ export function ZettelMaker() {
               <div className="flex h-10 w-10 items-center justify-center rounded-full bg-green-500/15">
                 <Check size={18} className="text-green-400" />
               </div>
-              <p className="text-[12px] font-medium text-white">Notas salvas!</p>
+              <p className="text-[12px] font-medium text-white">Notes saved!</p>
               <p className="text-[10px] text-zinc-500">
-                As notas atomicas foram adicionadas ao seu Zettelkasten.
+                Atomic notes were added to your library.
               </p>
             </motion.div>
           )}
@@ -248,7 +248,7 @@ export function ZettelMaker() {
       {previewNotes.length > 0 && (
         <div className="flex items-center justify-between border-t border-white/[0.04] px-3 py-2">
           <span className="text-[10px] text-zinc-600">
-            {selectedCount}/{previewNotes.length} selecionadas
+            {selectedCount}/{previewNotes.length} selected
           </span>
           <button
             type="button"
@@ -258,10 +258,10 @@ export function ZettelMaker() {
             {isSaving ? (
               <>
                 <Loader2 size={12} className="animate-spin" />
-                Salvando...
+                Saving...
               </>
             ) : (
-              `Salvar ${selectedCount} nota${selectedCount !== 1 ? "s" : ""}`
+              `Save ${selectedCount} note${selectedCount !== 1 ? "s" : ""}`
             )}
           </button>
         </div>

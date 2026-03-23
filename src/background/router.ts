@@ -7,7 +7,7 @@ import { exportService } from "~/services/export-service"
 import { NotebookLMService, type SyncVerificationResult } from "~/services/NotebookLMService"
 import { zettelkastenService } from "~/services/zettelkasten"
 import { threadService } from "./services/ThreadService"
-import { STORAGE_KEYS } from "~/lib/constants"
+import { STORAGE_KEYS, STRIPE_PRICES } from "~/lib/constants"
 import {
   FIXED_STORAGE_KEYS,
   MESSAGE_ACTIONS,
@@ -159,7 +159,7 @@ function stripTrailingContextSnippet(value: string): string {
   const [fullMatch, innerRaw] = parentheticalMatch
   const inner = String(innerRaw ?? "").trim()
   const words = inner.split(/\s+/u).filter(Boolean)
-  const hasLetters = /[A-Za-zÀ-ÖØ-öø-ÿ]/u.test(inner)
+  const hasLetters = /[A-Za-z]/u.test(inner)
   const looksLikeContextSnippet = hasLetters && (words.length >= 3 || inner.length >= 22)
 
   if (!looksLikeContextSnippet) {
@@ -216,8 +216,6 @@ class MessageRouter {
     this.register("MINDDOCK_GET_AUTH", this.handleAuthGetStatus)
     this.register("MINDDOCK_SIGN_OUT", this.handleAuthSignOut)
     this.register("MINDDOCK_SIGN_IN", this.handleLegacySignIn)
-    this.register("MINDDOCK_DEV_BYPASS_SIGN_IN", this.handleDevBypassSignIn)
-
     this.register("MINDDOCK_GET_SOURCE_CONTENT", this.handleGetSourceContent)
     this.register("MINDDOCK_ADD_SOURCE", this.handleAddSource)
     this.register("MINDDOCK_SYNC_GDOC", this.handleSyncGdoc)
@@ -241,8 +239,29 @@ class MessageRouter {
     this.register(MESSAGE_ACTIONS.CMD_RENDER_PDF_OFFSCREEN, this.handleRenderPdfOffscreen)
     this.register(MESSAGE_ACTIONS.CMD_CREATE_CHECKOUT, this.handleCreateCheckout)
     this.register(MESSAGE_ACTIONS.CMD_BRAIN_MERGE, this.handleBrainMerge)
+    this.register(MESSAGE_ACTIONS.FETCH_SNIPER_TRANSCRIPT, this.handleFetchSniperTranscript)
+
+    authManager.onAuthStateChange((user) => {
+      this.broadcastAuthChanged(user)
+    })
 
     void this.compactChatSourceBindings()
+  }
+
+  private broadcastAuthChanged(user: UserProfile | null): void {
+    try {
+      chrome.runtime.sendMessage(
+        {
+          command: "MINDDOCK_AUTH_CHANGED",
+          payload: { user }
+        },
+        () => {
+          void chrome.runtime.lastError
+        }
+      )
+    } catch {
+      // Ignore transient runtime contexts (popup closed/reloaded).
+    }
   }
 
   private register(command: string, handler: Handler): void {
@@ -328,7 +347,8 @@ class MessageRouter {
       MESSAGE_ACTIONS.THREAD_DELETE,
       MESSAGE_ACTIONS.THREAD_RENAME,
       MESSAGE_ACTIONS.THREAD_MESSAGES,
-      MESSAGE_ACTIONS.THREAD_SAVE_MESSAGES
+      MESSAGE_ACTIONS.THREAD_SAVE_MESSAGES,
+      MESSAGE_ACTIONS.FETCH_SNIPER_TRANSCRIPT
     ])
 
     if (objectPayloadActions.has(action) && !this.asRecord(payload)) {
@@ -507,6 +527,21 @@ class MessageRouter {
         return null
       }
 
+      case MESSAGE_ACTIONS.FETCH_SNIPER_TRANSCRIPT: {
+        const record = this.asRecord(payload)
+        if (!record || !this.normalizeBoundedString(record.videoId, 128)) {
+          return `Payload invalido para ${action}: videoId obrigatorio.`
+        }
+
+        const startSec = Number(record.startSec)
+        const endSec = Number(record.endSec)
+        if (!Number.isFinite(startSec) || !Number.isFinite(endSec)) {
+          return `Payload invalido para ${action}: startSec/endSec devem ser numericos.`
+        }
+
+        return null
+      }
+
       default:
         return null
     }
@@ -586,6 +621,28 @@ class MessageRouter {
       return { success: false, error }
     }
     return { success: false, error, payload }
+  }
+
+  private async openUrlInTab(url: string): Promise<void> {
+    const normalizedUrl = String(url ?? "").trim()
+    if (!normalizedUrl) {
+      throw new Error("URL do checkout ausente.")
+    }
+
+    if (!chrome.tabs?.create) {
+      throw new Error("API chrome.tabs indisponivel neste contexto.")
+    }
+
+    await new Promise<void>((resolve, reject) => {
+      chrome.tabs.create({ url: normalizedUrl }, () => {
+        const runtimeError = chrome.runtime.lastError
+        if (runtimeError?.message) {
+          reject(new Error(runtimeError.message))
+          return
+        }
+        resolve()
+      })
+    })
   }
 
   private emitResyncProgress(
@@ -990,7 +1047,7 @@ class MessageRouter {
   }
 
   private async handleAuthGetStatus(): Promise<StandardResponse> {
-    const user = await authManager.getCurrentUser()
+    const user = await authManager.initializeSession()
     return this.ok({
       isAuthenticated: !!user,
       user
@@ -1001,7 +1058,11 @@ class MessageRouter {
     const requestedTier = String((payload as { tier?: unknown })?.tier ?? "")
       .trim()
       .toLowerCase()
+    const requestedCycle = String((payload as { cycle?: unknown })?.cycle ?? "")
+      .trim()
+      .toLowerCase()
     const tier: SubscriptionTier = requestedTier === "thinker_pro" ? "thinker_pro" : "thinker"
+    const cycle = requestedCycle === "yearly" ? "yearly" : "monthly"
     const now = new Date().toISOString()
 
     const user: UserProfile = {
@@ -1010,6 +1071,7 @@ class MessageRouter {
       displayName: "Thinker Test",
       subscriptionTier: tier,
       subscriptionStatus: "active",
+      subscriptionCycle: cycle,
       createdAt: now,
       updatedAt: now
     }
@@ -1019,24 +1081,13 @@ class MessageRouter {
       [STORAGE_KEYS.DEV_AUTH_BYPASS]: {
         enabled: true,
         tier,
+        cycle,
         token: "dev-bypass-token",
         activatedAt: now
       }
     })
 
-    try {
-      chrome.runtime.sendMessage(
-        {
-          command: "MINDDOCK_AUTH_CHANGED",
-          payload: { user }
-        },
-        () => {
-          void chrome.runtime.lastError
-        }
-      )
-    } catch {
-      // Ignore listener failures in transient contexts.
-    }
+    this.broadcastAuthChanged(user)
 
     return this.ok({ isAuthenticated: true, user, bypass: true })
   }
@@ -1478,6 +1529,32 @@ class MessageRouter {
     }
   }
 
+  private async launchIdentityWebAuthFlow(
+    url: string
+  ): Promise<{ redirectUrl: string | null; runtimeErrorMessage: string | null }> {
+    if (!chrome.identity?.launchWebAuthFlow) {
+      return {
+        redirectUrl: null,
+        runtimeErrorMessage: "API chrome.identity indisponivel. Recarregue a extensao."
+      }
+    }
+
+    return new Promise((resolve) => {
+      chrome.identity.launchWebAuthFlow({ url, interactive: true }, (redirectUrl) => {
+        const runtimeErrorMessage = String(chrome.runtime.lastError?.message ?? "").trim()
+        if (runtimeErrorMessage) {
+          resolve({ redirectUrl: null, runtimeErrorMessage })
+          return
+        }
+
+        resolve({
+          redirectUrl: String(redirectUrl ?? "").trim() || null,
+          runtimeErrorMessage: null
+        })
+      })
+    })
+  }
+
   // Legacy auth command preserved for popup flow that still uses OAuth Google.
   private async handleLegacySignIn(payload: unknown): Promise<StandardResponse> {
     const email = (payload as { email?: string })?.email
@@ -1487,28 +1564,49 @@ class MessageRouter {
       return this.handleAuthSignIn(payload)
     }
 
-      const { url } = await authManager.signInWithGoogle()
-      return new Promise((resolve) => {
-        chrome.identity.launchWebAuthFlow({ url, interactive: true }, async (redirectUrl) => {
-          const runtimeErrorMessage = String(chrome.runtime.lastError?.message ?? "").trim()
-          if (runtimeErrorMessage || !redirectUrl) {
-            resolve(
-              this.fail(
-                runtimeErrorMessage ||
-                  "Falha no login Google: nenhum redirect OAuth foi retornado. Verifique o redirect URL da extensao no Supabase."
-              )
+    try {
+      const redirectDefault = chrome.identity.getRedirectURL()
+      const redirectSupabasePath = chrome.identity.getRedirectURL("supabase")
+      const redirectCandidates = Array.from(
+        new Set([redirectDefault, redirectSupabasePath].map((value) => String(value ?? "").trim()).filter(Boolean))
+      )
+      const collectedErrors: string[] = []
+
+      for (const redirectTarget of redirectCandidates) {
+        try {
+          const { url } = await authManager.signInWithGoogle(redirectTarget)
+          const flowResult = await this.launchIdentityWebAuthFlow(url)
+          if (flowResult.runtimeErrorMessage || !flowResult.redirectUrl) {
+            const runtimeErrorMessage = String(
+              flowResult.runtimeErrorMessage ??
+                "Falha no login Google: nenhum redirect OAuth foi retornado."
             )
-            return
+            collectedErrors.push(`[redirect=${redirectTarget}] ${runtimeErrorMessage}`)
+            continue
           }
 
-          try {
-            const user = await authManager.completeOAuthFlow(redirectUrl)
-          resolve(this.ok({ isAuthenticated: !!user, user }))
-        } catch (error) {
-          resolve(this.fail(error instanceof Error ? error.message : "Falha ao concluir login."))
+          const user = await authManager.completeOAuthFlow(flowResult.redirectUrl)
+          return this.ok({ isAuthenticated: !!user, user })
+        } catch (attemptError) {
+          const message =
+            attemptError instanceof Error ? attemptError.message : String(attemptError ?? "Falha desconhecida")
+          collectedErrors.push(`[redirect=${redirectTarget}] ${message}`)
         }
-      })
-    })
+      }
+
+      const mergedErrorMessage = collectedErrors.join(" | ")
+      if (/Authorization page could not be loaded/i.test(mergedErrorMessage)) {
+        return this.fail(
+          `Authorization page could not be loaded. Configure no Supabase Auth > URL Configuration os redirects: ${redirectDefault} e ${redirectSupabasePath}. Dica: adicione tambem https://*.chromiumapp.org/* para evitar erro quando o ID da extensao mudar.`
+        )
+      }
+
+      return this.fail(
+        collectedErrors[collectedErrors.length - 1] ?? "Falha ao concluir login."
+      )
+    } catch (error) {
+      return this.fail(error instanceof Error ? error.message : "Falha ao concluir login.")
+    }
   }
 
   // Existing non-phase1 handlers
@@ -2385,7 +2483,8 @@ class MessageRouter {
   private async handleCheckSubscription(): Promise<StandardResponse> {
     await subscriptionManager.invalidate()
     const tier = await subscriptionManager.getTier()
-    return this.ok({ tier })
+    const cycle = await subscriptionManager.getCycle()
+    return this.ok({ tier, cycle })
   }
 
   private async ensureAuthenticatedForAi(): Promise<StandardResponse | null> {
@@ -2450,6 +2549,7 @@ class MessageRouter {
         upgrade_url: "https://minddocklm.digital/#pricing"
       })
     }
+
     const limits = await subscriptionManager.getLimits()
     const canCallAI = await storageManager.checkUsageLimit(
       "aiCalls",
@@ -2458,14 +2558,28 @@ class MessageRouter {
     if (!canCallAI) {
       return this.fail("Limite de chamadas de IA atingido para hoje.")
     }
-    // TODO: Descomentar quando tiver a chave da API do Claude
-    // const improved = await aiService.improvePrompt(prompt)
-    // await storageManager.incrementUsage("aiCalls")
-    // return this.ok({ improved })
-    
-    return this.fail("Funcionalidade de melhoria de prompts temporariamente desabilitada. Configure PLASMO_PUBLIC_CLAUDE_API_KEY no .env para ativar.")
-  }
 
+    const canUseMonthlyAgile = await storageManager.checkAiMonthlyLimit(
+      "agilePrompts",
+      limits.agile_prompts_per_month ?? "unlimited"
+    )
+    if (!canUseMonthlyAgile) {
+      const agileLimit = limits.agile_prompts_per_month
+      return this.fail(
+        typeof agileLimit === "number"
+          ? `Limite mensal do Agile Prompts atingido (${agileLimit}/mes).`
+          : "Limite mensal do Agile Prompts atingido."
+      )
+    }
+
+    const improved = await aiService.improvePrompt(prompt, {
+      surface: "agile_prompts_bar",
+      intent: "rewrite_user_prompt"
+    })
+    await storageManager.incrementUsage("aiCalls")
+    await storageManager.incrementAiMonthlyUsage("agilePrompts")
+    return this.ok({ improved })
+  }
   private async handlePromptOptions(payload: unknown): Promise<StandardResponse> {
     const authGuard = await this.ensureAuthenticatedForAi()
     if (authGuard) {
@@ -2480,11 +2594,12 @@ class MessageRouter {
     const { prompt } = payload as { prompt: string }
     const canUseAI = await subscriptionManager.canUseFeature("ai_features")
     if (!canUseAI) {
-      return this.fail("Geração de opções requer plano Thinker ou superior.", {
+      return this.fail("Geracao de opcoes requer plano Thinker ou superior.", {
         tier_required: "thinker",
         upgrade_url: "https://minddocklm.digital/#pricing"
       })
     }
+
     const limits = await subscriptionManager.getLimits()
     const canCallAI = await storageManager.checkUsageLimit(
       "aiCalls",
@@ -2493,28 +2608,53 @@ class MessageRouter {
     if (!canCallAI) {
       return this.fail("Limite de chamadas de IA atingido para hoje.")
     }
+
     const canUseMonthlyAgile = await storageManager.checkAiMonthlyLimit(
       "agilePrompts",
       limits.agile_prompts_per_month ?? "unlimited"
     )
     if (!canUseMonthlyAgile) {
-      return this.fail("Limite mensal do Agile Prompts atingido (50/mes).")
+      const agileLimit = limits.agile_prompts_per_month
+      return this.fail(
+        typeof agileLimit === "number"
+          ? `Limite mensal do Agile Prompts atingido (${agileLimit}/mes).`
+          : "Limite mensal do Agile Prompts atingido."
+      )
     }
-    const options = await aiService.generatePromptOptions(prompt)
+
+    const options = await aiService.generatePromptOptions(prompt, {
+      surface: "agile_prompts_bar",
+      intent: "generate_prompt_variants"
+    })
     await storageManager.incrementUsage("aiCalls")
     await storageManager.incrementAiMonthlyUsage("agilePrompts")
     return this.ok({ options })
   }
-
-  // ─── Focus Threads ─────────────────────────────────────────────────────────
+  // ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ Focus Threads ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬
 
   private async handleThreadList(payload: unknown): Promise<StandardResponse> {
+    const canUseZettel = await subscriptionManager.canUseFeature("zettelkasten")
+    if (!canUseZettel) {
+      return this.fail("Focus Docks requer plano Thinker ou superior.", {
+        tier_required: "thinker",
+        upgrade_url: "https://minddocklm.digital/#pricing"
+      })
+    }
+
     const { notebookId } = payload as { notebookId: string }
     const threads = await threadService.getThreads(notebookId)
     return this.ok({ threads })
   }
 
   private async handleThreadCreate(payload: unknown): Promise<StandardResponse> {
+    const canUseZettel = await subscriptionManager.canUseFeature("zettelkasten")
+    if (!canUseZettel) {
+      return this.fail("Focus Docks requer plano Thinker ou superior.", {
+        tier_required: "thinker",
+        upgrade_url: "https://minddocklm.digital/#pricing"
+      })
+    }
+
     const { notebookId, name, topic, icon } = payload as {
       notebookId: string
       name: string
@@ -2526,24 +2666,56 @@ class MessageRouter {
   }
 
   private async handleThreadDelete(payload: unknown): Promise<StandardResponse> {
+    const canUseZettel = await subscriptionManager.canUseFeature("zettelkasten")
+    if (!canUseZettel) {
+      return this.fail("Focus Docks requer plano Thinker ou superior.", {
+        tier_required: "thinker",
+        upgrade_url: "https://minddocklm.digital/#pricing"
+      })
+    }
+
     const { threadId } = payload as { threadId: string }
     await threadService.deleteThread(threadId)
     return this.ok({})
   }
 
   private async handleThreadRename(payload: unknown): Promise<StandardResponse> {
+    const canUseZettel = await subscriptionManager.canUseFeature("zettelkasten")
+    if (!canUseZettel) {
+      return this.fail("Focus Docks requer plano Thinker ou superior.", {
+        tier_required: "thinker",
+        upgrade_url: "https://minddocklm.digital/#pricing"
+      })
+    }
+
     const { threadId, name } = payload as { threadId: string; name: string }
     const thread = await threadService.renameThread(threadId, name)
     return this.ok({ thread })
   }
 
   private async handleThreadMessages(payload: unknown): Promise<StandardResponse> {
+    const canUseZettel = await subscriptionManager.canUseFeature("zettelkasten")
+    if (!canUseZettel) {
+      return this.fail("Focus Docks requer plano Thinker ou superior.", {
+        tier_required: "thinker",
+        upgrade_url: "https://minddocklm.digital/#pricing"
+      })
+    }
+
     const { threadId } = payload as { threadId: string }
     const messages = await threadService.getMessages(threadId)
     return this.ok({ messages })
   }
 
   private async handleThreadSaveMessages(payload: unknown): Promise<StandardResponse> {
+    const canUseZettel = await subscriptionManager.canUseFeature("zettelkasten")
+    if (!canUseZettel) {
+      return this.fail("Focus Docks requer plano Thinker ou superior.", {
+        tier_required: "thinker",
+        upgrade_url: "https://minddocklm.digital/#pricing"
+      })
+    }
+
     const { threadId, messages } = payload as {
       threadId: string
       messages: Array<{ role: "user" | "assistant"; content: string }>
@@ -2636,7 +2808,12 @@ class MessageRouter {
       limits.docks_summaries_per_month ?? "unlimited"
     )
     if (!canUseMonthlyDocksSummary) {
-      return this.fail("Limite mensal de resumos do Docks atingido (12/mes).")
+      const docksLimit = limits.docks_summaries_per_month
+      return this.fail(
+        typeof docksLimit === "number"
+          ? `Limite mensal de resumos do Docks atingido (${docksLimit}/mes).`
+          : "Limite mensal de resumos do Docks atingido."
+      )
     }
 
     const user = await authManager.getCurrentUser()
@@ -2644,7 +2821,10 @@ class MessageRouter {
       return this.fail("Nao autenticado.")
     }
 
-    const notes = await aiService.atomizeContent(content)
+    const notes = await aiService.atomizeContent(content, {
+      surface: "focus_docks",
+      operation: "save_atomic_notes"
+    })
     await zettelkastenService.saveAtomicNotes(user.id, notes)
     await storageManager.incrementUsage("aiCalls")
     await storageManager.incrementAiMonthlyUsage("docksSummaries")
@@ -2750,10 +2930,18 @@ class MessageRouter {
       limits.docks_summaries_per_month ?? "unlimited"
     )
     if (!canUseMonthlyDocksSummary) {
-      return this.fail("Limite mensal de resumos do Docks atingido (12/mes).")
+      const docksLimit = limits.docks_summaries_per_month
+      return this.fail(
+        typeof docksLimit === "number"
+          ? `Limite mensal de resumos do Docks atingido (${docksLimit}/mes).`
+          : "Limite mensal de resumos do Docks atingido."
+      )
     }
 
-    const notes = await aiService.atomizeContent(content)
+    const notes = await aiService.atomizeContent(content, {
+      surface: "focus_docks",
+      operation: "preview_atomic_notes"
+    })
     await storageManager.incrementUsage("aiCalls")
     await storageManager.incrementAiMonthlyUsage("docksSummaries")
     return this.ok({ notes })
@@ -3435,41 +3623,1093 @@ class MessageRouter {
     return fallbackNotebookId
   }
 
+  private decodeTranscriptEntities(value: string): string {
+    return String(value ?? "")
+      .replace(/&amp;/g, "&")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/&#(\d+);/g, (_, rawCodePoint: string) => {
+        const codePoint = Number(rawCodePoint)
+        if (!Number.isFinite(codePoint) || codePoint <= 0) {
+          return ""
+        }
+        try {
+          return String.fromCodePoint(codePoint)
+        } catch {
+          return ""
+        }
+      })
+      .replace(/&#x([0-9a-f]+);/gi, (_, rawHexCodePoint: string) => {
+        const codePoint = Number.parseInt(rawHexCodePoint, 16)
+        if (!Number.isFinite(codePoint) || codePoint <= 0) {
+          return ""
+        }
+        try {
+          return String.fromCodePoint(codePoint)
+        } catch {
+          return ""
+        }
+      })
+  }
+
+  private normalizeTranscriptText(value: string): string {
+    return this.decodeTranscriptEntities(value)
+      .replace(/<[^>]+>/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+  }
+
+  private normalizeTranscriptBaseUrl(rawBaseUrl: unknown): string | null {
+    let normalized = String(rawBaseUrl ?? "").trim()
+    if (!normalized) {
+      return null
+    }
+
+    normalized = normalized
+      .replace(/\\u0026/g, "&")
+      .replace(/\\\//g, "/")
+      .replace(/&amp;/g, "&")
+
+    if (normalized.startsWith("//")) {
+      normalized = `https:${normalized}`
+    } else if (normalized.startsWith("/")) {
+      normalized = `https://www.youtube.com${normalized}`
+    }
+
+    try {
+      const url = new URL(normalized)
+      if (!url.searchParams.has("fmt")) {
+        url.searchParams.set("fmt", "json3")
+      }
+      return url.toString()
+    } catch {
+      return null
+    }
+  }
+
+  private dedupeTranscriptLines(lines: string[]): string[] {
+    const deduped: string[] = []
+    for (const rawLine of lines) {
+      const line = String(rawLine ?? "").trim()
+      if (!line) {
+        continue
+      }
+      if (deduped[deduped.length - 1] !== line) {
+        deduped.push(line)
+      }
+    }
+    return deduped
+  }
+
+  private pickTranscriptLinesForRange(
+    cues: Array<{ startMs: number; endMs: number; text: string }>,
+    rangeStartMs: number,
+    rangeEndMs: number
+  ): string[] {
+    const lines = cues
+      .filter((cue) => cue.endMs >= rangeStartMs && cue.startMs <= rangeEndMs)
+      .map((cue) => cue.text)
+
+    return this.dedupeTranscriptLines(lines)
+  }
+
+  private nearestCueDistanceMs(
+    cues: Array<{ startMs: number; endMs: number; text: string }>,
+    targetMs: number
+  ): number {
+    if (!Array.isArray(cues) || cues.length === 0) {
+      return Number.POSITIVE_INFINITY
+    }
+
+    let bestDistance = Number.POSITIVE_INFINITY
+    for (const cue of cues) {
+      const midpointMs = Math.round((cue.startMs + cue.endMs) / 2)
+      const distance = Math.abs(midpointMs - targetMs)
+      if (distance < bestDistance) {
+        bestDistance = distance
+      }
+    }
+    return bestDistance
+  }
+
+  private pickNearestTranscriptLines(
+    cues: Array<{ startMs: number; endMs: number; text: string }>,
+    rangeStartMs: number,
+    rangeEndMs: number,
+    maxLines = 24
+  ): string[] {
+    if (!Array.isArray(cues) || cues.length === 0) {
+      return []
+    }
+
+    const targetMs = Math.round((rangeStartMs + rangeEndMs) / 2)
+    let nearestIndex = 0
+    let nearestDistance = Number.POSITIVE_INFINITY
+
+    for (let index = 0; index < cues.length; index += 1) {
+      const cue = cues[index]
+      const midpointMs = Math.round((cue.startMs + cue.endMs) / 2)
+      const distance = Math.abs(midpointMs - targetMs)
+      if (distance < nearestDistance) {
+        nearestDistance = distance
+        nearestIndex = index
+      }
+    }
+
+    const halfWindow = Math.max(1, Math.floor(maxLines / 2))
+    const startIndex = Math.max(0, nearestIndex - halfWindow)
+    const endIndex = Math.min(cues.length, startIndex + maxLines)
+    const lines = cues.slice(startIndex, endIndex).map((cue) => cue.text)
+    return this.dedupeTranscriptLines(lines)
+  }
+
+  private extractCaptionTextFromJson3(
+    rawBody: string,
+    rangeStartMs: number,
+    rangeEndMs: number
+  ): string | null {
+    let parsed: { events?: Array<{ tStartMs?: number; dDurationMs?: number; segs?: unknown[] }> } | null = null
+    try {
+      parsed = JSON.parse(rawBody) as {
+        events?: Array<{ tStartMs?: number; dDurationMs?: number; segs?: unknown[] }>
+      }
+    } catch {
+      parsed = null
+    }
+
+    if (!parsed || !Array.isArray(parsed.events)) {
+      return null
+    }
+
+    const cuesAssumingMs: Array<{ startMs: number; endMs: number; text: string }> = []
+    const cuesAssumingSec: Array<{ startMs: number; endMs: number; text: string }> = []
+
+    for (const event of parsed.events) {
+      const startValue = Number(event?.tStartMs)
+      if (!Number.isFinite(startValue) || startValue < 0) {
+        continue
+      }
+
+      const segments = Array.isArray(event?.segs) ? event.segs : []
+      const rawText = segments
+        .map((segment) => {
+          if (!segment || typeof segment !== "object") {
+            return ""
+          }
+          return String((segment as { utf8?: unknown }).utf8 ?? "")
+        })
+        .join("")
+      const normalizedText = this.normalizeTranscriptText(rawText)
+      if (!normalizedText) {
+        continue
+      }
+
+      const durationValue = Number(event?.dDurationMs)
+      const durationMsForMsScale =
+        Number.isFinite(durationValue) && durationValue > 0 ? Math.round(durationValue) : 2500
+      const durationMsForSecScale =
+        Number.isFinite(durationValue) && durationValue > 0 ? Math.round(durationValue * 1000) : 2500
+
+      const startMsAssumingMs = Math.round(startValue)
+      const endMsAssumingMs = startMsAssumingMs + durationMsForMsScale
+      cuesAssumingMs.push({
+        startMs: startMsAssumingMs,
+        endMs: endMsAssumingMs,
+        text: normalizedText
+      })
+
+      const startMsAssumingSec = Math.round(startValue * 1000)
+      const endMsAssumingSec = startMsAssumingSec + durationMsForSecScale
+      cuesAssumingSec.push({
+        startMs: startMsAssumingSec,
+        endMs: endMsAssumingSec,
+        text: normalizedText
+      })
+    }
+
+    const linesMs = this.pickTranscriptLinesForRange(cuesAssumingMs, rangeStartMs, rangeEndMs)
+    const linesSec = this.pickTranscriptLinesForRange(cuesAssumingSec, rangeStartMs, rangeEndMs)
+
+    const selectedLinesByRange = linesMs.length >= linesSec.length ? linesMs : linesSec
+    if (selectedLinesByRange.length > 0) {
+      return selectedLinesByRange.join("\n").trim() || null
+    }
+
+    const targetMs = Math.round((rangeStartMs + rangeEndMs) / 2)
+    const distanceMs = this.nearestCueDistanceMs(cuesAssumingMs, targetMs)
+    const distanceSec = this.nearestCueDistanceMs(cuesAssumingSec, targetMs)
+    const nearestLines =
+      distanceMs <= distanceSec
+        ? this.pickNearestTranscriptLines(cuesAssumingMs, rangeStartMs, rangeEndMs)
+        : this.pickNearestTranscriptLines(cuesAssumingSec, rangeStartMs, rangeEndMs)
+
+    const mergedNearest = nearestLines.join("\n").trim()
+    return mergedNearest || null
+  }
+
+  private extractCaptionTextFromXml(
+    rawBody: string,
+    rangeStartMs: number,
+    rangeEndMs: number
+  ): string | null {
+    const cuesAssumingMs: Array<{ startMs: number; endMs: number; text: string }> = []
+    const cuesAssumingSec: Array<{ startMs: number; endMs: number; text: string }> = []
+
+    const genericNodeRegex = /<(text|p)\b([^>]*)>([\s\S]*?)<\/\1>/giu
+    let match: RegExpExecArray | null
+
+    while ((match = genericNodeRegex.exec(rawBody)) !== null) {
+      const tagName = String(match[1] ?? "").toLowerCase()
+      const attrs = String(match[2] ?? "")
+      const body = String(match[3] ?? "")
+
+      const startSecRaw = /(?:^|\s)start="([^"]+)"/u.exec(attrs)?.[1]
+      const durSecRaw = /(?:^|\s)dur="([^"]+)"/u.exec(attrs)?.[1]
+      const startMsRaw = /(?:^|\s)t="([^"]+)"/u.exec(attrs)?.[1]
+      const durMsRaw = /(?:^|\s)d="([^"]+)"/u.exec(attrs)?.[1]
+
+      const normalizedText = this.normalizeTranscriptText(body)
+      if (!normalizedText) {
+        continue
+      }
+
+      if (tagName === "text" || startSecRaw !== undefined || durSecRaw !== undefined) {
+        const startSec = Number(startSecRaw ?? "")
+        if (!Number.isFinite(startSec) || startSec < 0) {
+          continue
+        }
+
+        const durSec = Number(durSecRaw ?? "")
+        const startMs = Math.round(startSec * 1000)
+        const endMs =
+          Number.isFinite(durSec) && durSec > 0 ? startMs + Math.round(durSec * 1000) : startMs + 2500
+        cuesAssumingMs.push({ startMs, endMs, text: normalizedText })
+        cuesAssumingSec.push({ startMs, endMs, text: normalizedText })
+        continue
+      }
+
+      const startValue = Number(startMsRaw ?? "")
+      if (!Number.isFinite(startValue) || startValue < 0) {
+        continue
+      }
+
+      const durValue = Number(durMsRaw ?? "")
+
+      const startMsAssumingMs = Math.round(startValue)
+      const endMsAssumingMs =
+        Number.isFinite(durValue) && durValue > 0
+          ? startMsAssumingMs + Math.round(durValue)
+          : startMsAssumingMs + 2500
+
+      const startMsAssumingSec = Math.round(startValue * 1000)
+      const endMsAssumingSec =
+        Number.isFinite(durValue) && durValue > 0
+          ? startMsAssumingSec + Math.round(durValue * 1000)
+          : startMsAssumingSec + 2500
+
+      cuesAssumingMs.push({ startMs: startMsAssumingMs, endMs: endMsAssumingMs, text: normalizedText })
+      cuesAssumingSec.push({
+        startMs: startMsAssumingSec,
+        endMs: endMsAssumingSec,
+        text: normalizedText
+      })
+    }
+
+    const linesMs = this.pickTranscriptLinesForRange(cuesAssumingMs, rangeStartMs, rangeEndMs)
+    const linesSec = this.pickTranscriptLinesForRange(cuesAssumingSec, rangeStartMs, rangeEndMs)
+
+    const selectedLinesByRange = linesMs.length >= linesSec.length ? linesMs : linesSec
+    if (selectedLinesByRange.length > 0) {
+      return selectedLinesByRange.join("\n").trim() || null
+    }
+
+    const targetMs = Math.round((rangeStartMs + rangeEndMs) / 2)
+    const distanceMs = this.nearestCueDistanceMs(cuesAssumingMs, targetMs)
+    const distanceSec = this.nearestCueDistanceMs(cuesAssumingSec, targetMs)
+    const nearestLines =
+      distanceMs <= distanceSec
+        ? this.pickNearestTranscriptLines(cuesAssumingMs, rangeStartMs, rangeEndMs)
+        : this.pickNearestTranscriptLines(cuesAssumingSec, rangeStartMs, rangeEndMs)
+
+    const mergedNearest = nearestLines.join("\n").trim()
+    return mergedNearest || null
+  }
+
+  private extractAllCaptionTextFromJson3(rawBody: string): string | null {
+    try {
+      const parsed = JSON.parse(rawBody) as { events?: Array<{ segs?: unknown[] }> }
+      if (!parsed || !Array.isArray(parsed.events)) {
+        return null
+      }
+
+      const lines = parsed.events
+        .map((event) => {
+          const segments = Array.isArray(event?.segs) ? event.segs : []
+          const rawText = segments
+            .map((segment) => {
+              if (!segment || typeof segment !== "object") {
+                return ""
+              }
+              return String((segment as { utf8?: unknown }).utf8 ?? "")
+            })
+            .join("")
+          return this.normalizeTranscriptText(rawText)
+        })
+        .filter(Boolean)
+
+      const merged = this.dedupeTranscriptLines(lines).join("\n").trim()
+      return merged || null
+    } catch {
+      return null
+    }
+  }
+
+  private extractAllCaptionTextFromVtt(rawBody: string): string | null {
+    const trimmed = String(rawBody ?? "").trim()
+    if (!/^WEBVTT/i.test(trimmed)) {
+      return null
+    }
+
+    const lines = trimmed
+      .split(/\r?\n/u)
+      .map((line) => line.trim())
+      .filter((line) => {
+        if (!line) return false
+        if (/^WEBVTT$/i.test(line)) return false
+        if (/^\d+$/u.test(line)) return false
+        if (/^\d{1,2}:\d{2}(?::\d{2})?\.\d{3}\s+-->\s+\d{1,2}:\d{2}(?::\d{2})?\.\d{3}$/u.test(line)) {
+          return false
+        }
+        return true
+      })
+      .map((line) => this.normalizeTranscriptText(line))
+      .filter(Boolean)
+
+    const merged = this.dedupeTranscriptLines(lines).join("\n").trim()
+    return merged || null
+  }
+
+  private parseVttTimestampToMs(rawValue: string): number {
+    const normalized = String(rawValue ?? "").trim()
+    const parts = normalized.split(":")
+    if (parts.length < 2 || parts.length > 3) {
+      return NaN
+    }
+
+    const hasHours = parts.length === 3
+    const hours = hasHours ? Number(parts[0]) : 0
+    const minutes = Number(parts[hasHours ? 1 : 0])
+    const secAndMs = String(parts[hasHours ? 2 : 1] ?? "")
+    const [secRaw, msRaw] = secAndMs.split(".")
+    const seconds = Number(secRaw)
+    const milliseconds = Number((msRaw ?? "0").padEnd(3, "0").slice(0, 3))
+
+    if (
+      !Number.isFinite(hours) ||
+      !Number.isFinite(minutes) ||
+      !Number.isFinite(seconds) ||
+      !Number.isFinite(milliseconds)
+    ) {
+      return NaN
+    }
+
+    return Math.round((((hours * 60 + minutes) * 60 + seconds) * 1000) + milliseconds)
+  }
+
+  private extractCaptionTextFromVttRange(
+    rawBody: string,
+    rangeStartMs: number,
+    rangeEndMs: number
+  ): string | null {
+    const trimmed = String(rawBody ?? "").trim()
+    if (!/^WEBVTT/i.test(trimmed)) {
+      return null
+    }
+
+    const blocks = trimmed.split(/\r?\n\r?\n/u)
+    const cues: Array<{ startMs: number; endMs: number; text: string }> = []
+
+    for (const block of blocks) {
+      const lines = block
+        .split(/\r?\n/u)
+        .map((line) => line.trim())
+        .filter(Boolean)
+      if (lines.length < 2) {
+        continue
+      }
+
+      const timeLineIndex = lines.findIndex((line) => line.includes("-->"))
+      if (timeLineIndex < 0) {
+        continue
+      }
+
+      const timeLine = lines[timeLineIndex]
+      const [startRaw, endRaw] = timeLine.split("-->").map((value) => String(value ?? "").trim())
+      const startMs = this.parseVttTimestampToMs(startRaw)
+      const endMs = this.parseVttTimestampToMs(endRaw)
+      if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) {
+        continue
+      }
+
+      const cueText = lines
+        .slice(timeLineIndex + 1)
+        .map((line) => this.normalizeTranscriptText(line))
+        .filter(Boolean)
+        .join(" ")
+        .trim()
+      if (!cueText) {
+        continue
+      }
+
+      cues.push({ startMs, endMs, text: cueText })
+    }
+
+    const lines = this.pickTranscriptLinesForRange(cues, rangeStartMs, rangeEndMs)
+    if (lines.length > 0) {
+      return lines.join("\n").trim() || null
+    }
+
+    const nearest = this.pickNearestTranscriptLines(cues, rangeStartMs, rangeEndMs)
+    const mergedNearest = nearest.join("\n").trim()
+    return mergedNearest || null
+  }
+
+  private extractAllCaptionTextFromXml(rawBody: string): string | null {
+    const lines: string[] = []
+    const nodeRegex = /<(text|p|s|span)\b[^>]*>([\s\S]*?)<\/\1>/giu
+    let match: RegExpExecArray | null
+
+    while ((match = nodeRegex.exec(rawBody)) !== null) {
+      const normalized = this.normalizeTranscriptText(String(match[2] ?? ""))
+      if (!normalized) {
+        continue
+      }
+      lines.push(normalized)
+    }
+
+    const merged = this.dedupeTranscriptLines(lines).join("\n").trim()
+    return merged || null
+  }
+
+  private extractAnyCaptionText(rawBody: string): string | null {
+    const fromJson = this.extractAllCaptionTextFromJson3(rawBody)
+    if (fromJson) {
+      return fromJson
+    }
+
+    const fromVtt = this.extractAllCaptionTextFromVtt(rawBody)
+    if (fromVtt) {
+      return fromVtt
+    }
+
+    return this.extractAllCaptionTextFromXml(rawBody)
+  }
+
+  private buildTimedTextFallbackUrls(videoId: string): string[] {
+    const normalizedVideoId = String(videoId ?? "").trim()
+    if (!normalizedVideoId) {
+      return []
+    }
+
+    const langCandidates = ["pt-BR", "pt", "en"]
+    const formatCandidates = ["json3", "vtt"]
+    const kindCandidates = ["", "asr"]
+    const urls = new Set<string>()
+
+    for (const lang of langCandidates) {
+      for (const fmt of formatCandidates) {
+        for (const kind of kindCandidates) {
+          const url = new URL("https://www.youtube.com/api/timedtext")
+          url.searchParams.set("v", normalizedVideoId)
+          url.searchParams.set("lang", lang)
+          url.searchParams.set("fmt", fmt)
+          if (kind) {
+            url.searchParams.set("kind", kind)
+          }
+          urls.add(url.toString())
+        }
+      }
+    }
+
+    return Array.from(urls)
+  }
+
+  private async fetchCaptionSliceFromTimedTextFallback(
+    videoId: string,
+    rangeStartMs: number,
+    rangeEndMs: number
+  ): Promise<string | null> {
+    const candidateUrls = this.buildTimedTextFallbackUrls(videoId)
+    let looseFallbackText: string | null = null
+
+    for (const candidateUrl of candidateUrls) {
+      try {
+        const response = await fetch(candidateUrl, {
+          method: "GET",
+          credentials: "include"
+        })
+        if (!response.ok) {
+          continue
+        }
+
+        const rawBody = await response.text()
+        const fromJson = this.extractCaptionTextFromJson3(rawBody, rangeStartMs, rangeEndMs)
+        if (fromJson) {
+          return fromJson
+        }
+
+        const fromXml = this.extractCaptionTextFromXml(rawBody, rangeStartMs, rangeEndMs)
+        if (fromXml) {
+          return fromXml
+        }
+
+        const fromVtt = this.extractCaptionTextFromVttRange(rawBody, rangeStartMs, rangeEndMs)
+        if (fromVtt) {
+          return fromVtt
+        }
+
+        const fromAny = this.extractAnyCaptionText(rawBody)
+        if (fromAny && !looseFallbackText) {
+          looseFallbackText = fromAny
+        }
+      } catch {
+        // ignore fallback URL errors and continue
+      }
+    }
+
+    return looseFallbackText
+  }
+
+  private async fetchCaptionSliceFromBaseUrl(
+    baseUrl: string,
+    startSec: number,
+    endSec: number
+  ): Promise<string | null> {
+    const rangeStartMs = Math.max(0, Math.round(startSec * 1000))
+    const rangeEndMs = Math.max(rangeStartMs, Math.round(endSec * 1000))
+    const normalizedBaseUrl = this.normalizeTranscriptBaseUrl(baseUrl)
+    if (!normalizedBaseUrl) {
+      return null
+    }
+
+    const jsonUrl = new URL(normalizedBaseUrl)
+    jsonUrl.searchParams.set("fmt", "json3")
+    const xmlUrl = new URL(normalizedBaseUrl)
+    xmlUrl.searchParams.delete("fmt")
+
+    const candidateUrls = [jsonUrl.toString(), xmlUrl.toString()]
+
+    let lastErrorMessage = ""
+    let fallbackTextWithoutTiming: string | null = null
+
+    for (const candidateUrl of candidateUrls) {
+      try {
+        const response = await fetch(candidateUrl, {
+          method: "GET",
+          credentials: "include"
+        })
+        if (!response.ok) {
+          lastErrorMessage = `HTTP ${response.status}`
+          continue
+        }
+
+        const rawBody = await response.text()
+        const fromJson = this.extractCaptionTextFromJson3(rawBody, rangeStartMs, rangeEndMs)
+        if (fromJson) {
+          return fromJson
+        }
+
+        const fromXml = this.extractCaptionTextFromXml(rawBody, rangeStartMs, rangeEndMs)
+        if (fromXml) {
+          return fromXml
+        }
+
+        const fromAnyFormat = this.extractAnyCaptionText(rawBody)
+        if (fromAnyFormat && !fallbackTextWithoutTiming) {
+          fallbackTextWithoutTiming = fromAnyFormat
+        }
+      } catch (error) {
+        lastErrorMessage =
+          error instanceof Error ? error.message : String(error ?? "Erro ao buscar transcricao")
+      }
+    }
+
+    if (fallbackTextWithoutTiming) {
+      return fallbackTextWithoutTiming
+    }
+
+    if (lastErrorMessage) {
+      throw new Error(lastErrorMessage)
+    }
+
+    return null
+  }
+
+  private extractJsonArrayAt(source: string, startIndex: number): string | null {
+    if (startIndex < 0 || startIndex >= source.length || source[startIndex] !== "[") {
+      return null
+    }
+
+    let depth = 0
+    let inString = false
+    let escaped = false
+
+    for (let index = startIndex; index < source.length; index += 1) {
+      const ch = source[index]
+
+      if (escaped) {
+        escaped = false
+        continue
+      }
+      if (ch === "\\") {
+        escaped = true
+        continue
+      }
+      if (ch === '"') {
+        inString = !inString
+        continue
+      }
+      if (inString) {
+        continue
+      }
+
+      if (ch === "[") {
+        depth += 1
+      } else if (ch === "]") {
+        depth -= 1
+        if (depth === 0) {
+          return source.slice(startIndex, index + 1)
+        }
+      }
+    }
+
+    return null
+  }
+
+  private extractCaptionTracksFromWatchHtml(
+    html: string
+  ): Array<{ baseUrl?: string; languageCode?: string; kind?: string; vssId?: string }> {
+    const marker = '"captionTracks":'
+    const markerIndex = html.indexOf(marker)
+    if (markerIndex < 0) {
+      return []
+    }
+
+    const arrayStart = html.indexOf("[", markerIndex + marker.length)
+    const arrayText = this.extractJsonArrayAt(html, arrayStart)
+    if (!arrayText) {
+      return []
+    }
+
+    try {
+      const parsed = JSON.parse(arrayText)
+      return Array.isArray(parsed)
+        ? (parsed as Array<{ baseUrl?: string; languageCode?: string; kind?: string; vssId?: string }>)
+        : []
+    } catch {
+      return []
+    }
+  }
+
+  private pickCaptionTrackBaseUrl(
+    tracks: Array<{ baseUrl?: string; languageCode?: string; kind?: string; vssId?: string }>
+  ): string | null {
+    if (!Array.isArray(tracks) || tracks.length === 0) {
+      return null
+    }
+
+    const asrTrack =
+      tracks.find((track) => String(track?.kind ?? "").toLowerCase() === "asr") ??
+      tracks.find((track) => String(track?.vssId ?? "").toLowerCase().includes(".pt")) ??
+      tracks.find((track) => String(track?.languageCode ?? "").toLowerCase().startsWith("pt")) ??
+      tracks[0]
+
+    return this.normalizeTranscriptBaseUrl(asrTrack?.baseUrl ?? "")
+  }
+
+  private async resolveCaptionBaseUrlForVideo(videoId: string): Promise<string | null> {
+    const normalizedVideoId = String(videoId ?? "").trim()
+    if (!normalizedVideoId) {
+      return null
+    }
+
+    const watchUrl = `https://www.youtube.com/watch?v=${encodeURIComponent(normalizedVideoId)}&hl=pt-BR`
+    const response = await fetch(watchUrl, {
+      method: "GET",
+      credentials: "include"
+    })
+    if (!response.ok) {
+      return null
+    }
+
+    const html = await response.text()
+    const tracks = this.extractCaptionTracksFromWatchHtml(html)
+    return this.pickCaptionTrackBaseUrl(tracks)
+  }
+
+  private async handleFetchSniperTranscript(payload: unknown): Promise<StandardResponse> {
+    const record = this.asRecord(payload)
+    if (!record) {
+      return this.fail("Payload invalido para FETCH_SNIPER_TRANSCRIPT.")
+    }
+
+    const videoId = this.normalizeBoundedString(record.videoId, 128)
+    if (!videoId) {
+      return this.fail("videoId ausente para extrair transcricao.")
+    }
+
+    const startSecRaw = Number(record.startSec)
+    const endSecRaw = Number(record.endSec)
+    if (!Number.isFinite(startSecRaw) || !Number.isFinite(endSecRaw)) {
+      return this.fail("Intervalo invalido para extrair transcricao.")
+    }
+
+    const startSec = Math.max(0, Math.min(startSecRaw, endSecRaw))
+    const endSec = Math.max(startSec, Math.max(startSecRaw, endSecRaw))
+
+    const fromPayloadBaseUrl = this.normalizeTranscriptBaseUrl(record.baseUrl)
+    let resolvedBaseUrl = fromPayloadBaseUrl
+    if (!resolvedBaseUrl) {
+      try {
+        resolvedBaseUrl = await this.resolveCaptionBaseUrlForVideo(videoId)
+      } catch {
+        resolvedBaseUrl = null
+      }
+    }
+
+    if (!resolvedBaseUrl) {
+      const fallbackWithoutBaseUrl = await this.fetchCaptionSliceFromTimedTextFallback(
+        videoId,
+        Math.max(0, Math.round(startSec * 1000)),
+        Math.max(0, Math.round(endSec * 1000))
+      )
+      if (fallbackWithoutBaseUrl) {
+        return this.ok({ text: fallbackWithoutBaseUrl })
+      }
+      return this.fail("No transcript available for this video.")
+    }
+
+    try {
+      const text = await this.fetchCaptionSliceFromBaseUrl(resolvedBaseUrl, startSec, endSec)
+      if (!text) {
+        const fallbackWithoutInterval = await this.fetchCaptionSliceFromTimedTextFallback(
+          videoId,
+          Math.max(0, Math.round(startSec * 1000)),
+          Math.max(0, Math.round(endSec * 1000))
+        )
+        if (fallbackWithoutInterval) {
+          return this.ok({ text: fallbackWithoutInterval })
+        }
+        return this.fail("Nenhum texto encontrado no intervalo selecionado.")
+      }
+      return this.ok({ text })
+    } catch (error) {
+      const fallbackAfterError = await this.fetchCaptionSliceFromTimedTextFallback(
+        videoId,
+        Math.max(0, Math.round(startSec * 1000)),
+        Math.max(0, Math.round(endSec * 1000))
+      )
+      if (fallbackAfterError) {
+        return this.ok({ text: fallbackAfterError })
+      }
+
+      const details = error instanceof Error ? error.message : String(error ?? "Erro desconhecido")
+      return this.fail(`Falha ao extrair transcricao: ${details}`)
+    }
+  }
+
   private async handleCreateCheckout(payload: unknown): Promise<StandardResponse> {
-    const { priceId } = (payload ?? {}) as { priceId?: string }
+    const { priceId, openInTab } = (payload ?? {}) as { priceId?: string; openInTab?: boolean }
     if (!priceId) {
       return this.fail("priceId ausente.")
     }
 
-    const supabaseUrl = process.env.PLASMO_PUBLIC_SUPABASE_URL
-    if (!supabaseUrl) {
-      return this.fail("Supabase URL não configurada.")
+    const currentUser = await authManager.initializeSession()
+    const isDevBypassUser =
+      String(currentUser?.id ?? "").trim() === "dev-thinker-test-user" ||
+      String(currentUser?.email ?? "")
+        .trim()
+        .toLowerCase()
+        .endsWith("@minddock.local")
+    if (isDevBypassUser) {
+      return this.fail(
+        "Checkout indisponivel sem login real. Faca login com Google para abrir Stripe Checkout."
+      )
     }
 
-    const token = await authManager.getAccessToken()
-    if (!token) {
-      return this.fail("Não autenticado.")
+    const resolveTargetTierFromPriceId = (id: string): SubscriptionTier | null => {
+      const normalizedId = String(id ?? "").trim()
+      if (!normalizedId) {
+        return null
+      }
+
+      if (normalizedId === STRIPE_PRICES.pro_monthly || normalizedId === STRIPE_PRICES.pro_yearly) {
+        return "pro"
+      }
+
+      if (
+        normalizedId === STRIPE_PRICES.thinker_monthly ||
+        normalizedId === STRIPE_PRICES.thinker_yearly
+      ) {
+        return "thinker"
+      }
+
+      return null
     }
 
+    const normalizeTier = (rawTier: unknown): SubscriptionTier => {
+      const candidate = String(rawTier ?? "")
+        .trim()
+        .toLowerCase()
+      if (candidate === "pro" || candidate === "thinker" || candidate === "thinker_pro") {
+        return candidate
+      }
+      return "free"
+    }
+
+    const targetTier = resolveTargetTierFromPriceId(priceId)
+    const tierRank: Record<SubscriptionTier, number> = {
+      free: 0,
+      pro: 1,
+      thinker: 2,
+      thinker_pro: 3
+    }
+
+    const sessionTier = normalizeTier(currentUser?.subscriptionTier)
+    const sessionStatus = String(currentUser?.subscriptionStatus ?? "")
+      .trim()
+      .toLowerCase()
+    const sessionHasActivePaidPlan =
+      (sessionStatus === "active" || sessionStatus === "trialing") && sessionTier !== "free"
+
+    // Server-side truth fallback: avoids stale profile cache in popup/auth session.
+    let resolvedTier = sessionTier
+    if (sessionHasActivePaidPlan !== true) {
+      try {
+        await subscriptionManager.invalidate()
+        resolvedTier = await subscriptionManager.getTier()
+      } catch {
+        resolvedTier = sessionTier
+      }
+    }
+
+    const hasActivePaidPlan = resolvedTier !== "free"
+
+    if (hasActivePaidPlan && resolvedTier === "thinker_pro") {
+      return this.fail(
+        "Sua conta ja esta no Thinker Pro ativo. Use Subscription para gerenciar alteracoes de plano."
+      )
+    }
+
+    if (hasActivePaidPlan && targetTier && tierRank[resolvedTier] >= tierRank[targetTier]) {
+      return this.fail(
+        "Sua conta ja possui um plano ativo igual ou superior. Use Subscription para gerenciar alteracoes."
+      )
+    }
+
+    let supabaseUrl = ""
+    let supabaseAnonKey = ""
     try {
-      const res = await fetch(`${supabaseUrl}/functions/v1/create-checkout`, {
+      const config = await authManager.getSupabaseConfig()
+      supabaseUrl = String(config.url ?? "").trim()
+      supabaseAnonKey = String(config.anonKey ?? "").trim()
+    } catch (configError) {
+      return this.fail(
+        `Falha ao resolver configuracao do Supabase para checkout: ${String(
+          configError instanceof Error ? configError.message : configError
+        )}`
+      )
+    }
+
+    if (!supabaseUrl) {
+      return this.fail("Supabase URL nao configurada.")
+    }
+
+    const normalizeJwt = (rawToken: string | null | undefined): string | null => {
+      let normalized = String(rawToken ?? "").trim()
+      if (!normalized) return null
+      if (/^bearer\s+/i.test(normalized)) {
+        normalized = normalized.replace(/^bearer\s+/i, "").trim()
+      }
+      if (
+        (normalized.startsWith('"') && normalized.endsWith('"')) ||
+        (normalized.startsWith("'") && normalized.endsWith("'"))
+      ) {
+        normalized = normalized.slice(1, -1).trim()
+      }
+      const parts = normalized.split(".")
+      if (parts.length !== 3 || parts.some((part) => !part.trim())) {
+        return null
+      }
+      return normalized
+    }
+
+    const rawToken = await authManager.getVerifiedAccessToken()
+    const token = normalizeJwt(rawToken)
+    if (!token) {
+      return this.fail("Sessao de login invalida para billing. Faca login novamente.")
+    }
+
+    const extractJwtRef = (jwt: string | null | undefined): string | null => {
+      const raw = String(jwt ?? "").trim()
+      if (!raw) return null
+      const parts = raw.split(".")
+      if (parts.length < 2) return null
+      const payloadPart = parts[1].replace(/-/g, "+").replace(/_/g, "/")
+      const padded = payloadPart.padEnd(Math.ceil(payloadPart.length / 4) * 4, "=")
+
+      try {
+        const decoded = atob(padded)
+        const parsed = JSON.parse(decoded) as { ref?: unknown }
+        const ref = String(parsed?.ref ?? "").trim()
+        return ref || null
+      } catch {
+        return null
+      }
+    }
+
+    const extractProjectRefFromUrl = (url: string): string | null => {
+      try {
+        const host = new URL(url).hostname
+        const ref = String(host.split(".")[0] ?? "").trim()
+        return ref || null
+      } catch {
+        return null
+      }
+    }
+
+    const projectRef = extractProjectRefFromUrl(supabaseUrl)
+    const tokenRef = extractJwtRef(token)
+    const anonRef = extractJwtRef(supabaseAnonKey)
+    const shouldSendApiKey =
+      Boolean(supabaseAnonKey) && (!projectRef || !anonRef || anonRef === projectRef)
+
+    const fallbackUrlFromTokenRef =
+      tokenRef && tokenRef !== projectRef ? `https://${tokenRef}.supabase.co` : null
+
+    const requestTargets: Array<{ baseUrl: string; apiKey: string; label: string }> = []
+    if (fallbackUrlFromTokenRef) {
+      requestTargets.push({
+        baseUrl: fallbackUrlFromTokenRef,
+        apiKey: anonRef === tokenRef ? supabaseAnonKey : "",
+        label: "token-ref"
+      })
+    }
+
+    requestTargets.push({
+      baseUrl: supabaseUrl,
+      apiKey: shouldSendApiKey ? supabaseAnonKey : "",
+      label: "config"
+    })
+
+    const callCheckout = async (
+      baseUrl: string,
+      accessToken: string,
+      apiKey: string
+    ): Promise<{ res: Response; rawBody: string; json: { url?: string; error?: string } | null }> => {
+      const res = await fetch(`${baseUrl}/functions/v1/create-checkout`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`
+          Authorization: `Bearer ${accessToken}`,
+          ...(apiKey ? { apikey: apiKey } : {})
         },
         body: JSON.stringify({ priceId })
       })
 
-      const json = await res.json() as { url?: string; error?: string }
-
-      if (!res.ok || !json.url) {
-        return this.fail(json.error ?? `Erro ao criar checkout (${res.status})`)
+      const rawBody = await res.text()
+      let json: { url?: string; error?: string } | null = null
+      try {
+        json = JSON.parse(rawBody) as { url?: string; error?: string }
+      } catch {
+        json = null
       }
 
-      return this.ok({ url: json.url })
+      return { res, rawBody, json }
+    }
+
+    const openCheckout = async (checkoutUrl: string): Promise<StandardResponse> => {
+      const shouldOpenInTab = openInTab !== false
+      if (shouldOpenInTab) {
+        try {
+          await this.openUrlInTab(checkoutUrl)
+        } catch (openError) {
+          return this.fail(
+            `Checkout criado, mas nao foi possivel abrir a aba: ${String(
+              openError instanceof Error ? openError.message : openError
+            )}`,
+            { url: checkoutUrl, opened: false }
+          )
+        }
+      }
+
+      return this.ok({ url: checkoutUrl, opened: shouldOpenInTab })
+    }
+
+    try {
+      let lastJwtError: string | null = null
+
+      for (const target of requestTargets) {
+        let tokenToUse = token
+
+        const firstAttempt = await callCheckout(target.baseUrl, tokenToUse, target.apiKey)
+        if (firstAttempt.res.ok) {
+          const checkoutUrl = String(firstAttempt.json?.url ?? "").trim()
+          if (!checkoutUrl) {
+            return this.fail("Checkout sem URL retornada pela funcao.")
+          }
+          return openCheckout(checkoutUrl)
+        }
+
+        const firstErrorMessage =
+          String(firstAttempt.json?.error ?? firstAttempt.rawBody ?? "").trim() ||
+          `Erro ao criar checkout (${firstAttempt.res.status})`
+        const firstIsJwtError = /invalid jwt|jwt/i.test(firstErrorMessage)
+
+        if (!firstIsJwtError) {
+          return this.fail(
+            `Checkout falhou (${target.label}, status ${firstAttempt.res.status}): ${firstErrorMessage}`
+          )
+        }
+
+        lastJwtError = firstErrorMessage
+
+        const refreshedToken = normalizeJwt(await authManager.refreshAccessToken(null))
+        if (!refreshedToken || refreshedToken === tokenToUse) {
+          continue
+        }
+
+        tokenToUse = refreshedToken
+        const retryAttempt = await callCheckout(target.baseUrl, tokenToUse, target.apiKey)
+        if (retryAttempt.res.ok) {
+          const checkoutUrl = String(retryAttempt.json?.url ?? "").trim()
+          if (!checkoutUrl) {
+            return this.fail("Checkout sem URL retornada pela funcao.")
+          }
+          return openCheckout(checkoutUrl)
+        }
+
+        const retryErrorMessage =
+          String(retryAttempt.json?.error ?? retryAttempt.rawBody ?? "").trim() ||
+          `Erro ao criar checkout (${retryAttempt.res.status})`
+        const retryIsJwtError = /invalid jwt|jwt/i.test(retryErrorMessage)
+
+        if (!retryIsJwtError) {
+          return this.fail(
+            `Checkout falhou (${target.label}, status ${retryAttempt.res.status}): ${retryErrorMessage}`
+          )
+        }
+
+        lastJwtError = retryErrorMessage
+      }
+
+      return this.fail(
+        `BILL-CHK-V4 Sessao invalida ou expirada para billing. Faca login novamente e tente o checkout. [project=${projectRef ?? "n/a"} token=${tokenRef ?? "n/a"} anon=${anonRef ?? "n/a"} apikey=${shouldSendApiKey ? "on" : "off"} targets=${requestTargets.map((target) => target.label).join(",")} detail=${lastJwtError ?? "n/a"}]`
+      )
     } catch (err) {
-      return this.fail(`Falha ao criar sessão de checkout: ${String(err)}`)
+      return this.fail(`Falha ao criar sessao de checkout: ${String(err)}`)
     }
   }
 
@@ -3490,12 +4730,44 @@ class MessageRouter {
       return this.fail("Descreva o objetivo do Brain Merge.")
     }
 
+    const authGuard = await this.ensureAuthenticatedForAi()
+    if (authGuard) {
+      return authGuard
+    }
+
+    const rateGuard = await this.enforceAiRateLimit()
+    if (rateGuard) {
+      return rateGuard
+    }
+
     const canUseAI = await subscriptionManager.canUseFeature("ai_features")
     if (!canUseAI) {
       return this.fail("Brain Merge requer plano Thinker ou superior.", {
         tier_required: "thinker",
         upgrade_url: "https://minddocklm.digital/#pricing"
       })
+    }
+
+    const limits = await subscriptionManager.getLimits()
+    const canCallAI = await storageManager.checkUsageLimit(
+      "aiCalls",
+      limits.ai_calls_per_day ?? "unlimited"
+    )
+    if (!canCallAI) {
+      return this.fail("Limite de chamadas de IA atingido para hoje.")
+    }
+
+    const canUseMonthlyBrainMerge = await storageManager.checkAiMonthlyLimit(
+      "brainMerges",
+      limits.brain_merges_per_month ?? "unlimited"
+    )
+    if (!canUseMonthlyBrainMerge) {
+      const brainMergeLimit = limits.brain_merges_per_month
+      return this.fail(
+        typeof brainMergeLimit === "number"
+          ? `Limite mensal do Brain Merge atingido (${brainMergeLimit}/mes).`
+          : "Limite mensal do Brain Merge atingido."
+      )
     }
 
     try {
@@ -3511,15 +4783,42 @@ class MessageRouter {
 
         if (!notebookId || sourceIds.length === 0) continue
 
-        const result = await service.getSourcesContent(notebookId, sourceIds)
-        const snippets = (result as { sourceSnippets?: Array<{ title?: string; content?: string }> }).sourceSnippets ?? []
+        const listedSources = await service.listSources(notebookId).catch(() => [])
+        const sourceTitleById = new Map<string, string>()
 
-        for (const snippet of snippets) {
-          flatSources.push({
-            notebookTitle,
-            sourceTitle: String(snippet.title ?? "Untitled"),
-            content: String(snippet.content ?? "")
-          })
+        for (const source of listedSources) {
+          const sourceId = String(source.id ?? "").trim()
+          const sourceTitle = String(source.title ?? "").trim() || "Untitled"
+          if (!sourceId) {
+            continue
+          }
+          sourceTitleById.set(sourceId, sourceTitle)
+        }
+
+        const result = await service.getSourcesContent(notebookId, sourceIds)
+        const snippetsBySourceId = result.sourceSnippets
+
+        for (const sourceId of sourceIds) {
+          const snippets = Array.isArray(snippetsBySourceId[sourceId])
+            ? snippetsBySourceId[sourceId]
+            : []
+          if (snippets.length === 0) {
+            continue
+          }
+
+          const sourceTitle = sourceTitleById.get(sourceId) ?? "Untitled"
+          for (const snippet of snippets) {
+            const content = String(snippet ?? "").trim()
+            if (!content) {
+              continue
+            }
+
+            flatSources.push({
+              notebookTitle,
+              sourceTitle,
+              content
+            })
+          }
         }
       }
 
@@ -3527,7 +4826,13 @@ class MessageRouter {
         return this.fail("Nenhum conteudo encontrado nas fontes selecionadas.")
       }
 
-      const document = await aiService.brainMerge(flatSources, goal)
+      const document = await aiService.brainMerge(flatSources, goal, {
+        surface: "brain_merge_hub",
+        notebookCount: notebookSources.length,
+        sourceSnippetCount: flatSources.length
+      })
+      await storageManager.incrementUsage("aiCalls")
+      await storageManager.incrementAiMonthlyUsage("brainMerges")
       return this.ok({ document })
     } catch (error) {
       return this.fail(error instanceof Error ? error.message : "Falha no Brain Merge.")
@@ -3536,3 +4841,5 @@ class MessageRouter {
 }
 
 export const router = new MessageRouter()
+
+

@@ -33,9 +33,8 @@ const FEATURE_CAROUSEL = [
 ] as const
 
 export function AuthScreen({ compact }: AuthScreenProps) {
-  const { signIn, signInBypassThinker, error } = useAuth()
+  const { signIn, error } = useAuth()
   const [isLoading, setIsLoading] = useState(false)
-  const [isBypassLoading, setIsBypassLoading] = useState(false)
   const [activeSlide, setActiveSlide] = useState(0)
 
   useEffect(() => {
@@ -61,17 +60,6 @@ export function AuthScreen({ compact }: AuthScreenProps) {
     }
   }
 
-  async function handleBypassThinker() {
-    setIsBypassLoading(true)
-    try {
-      await signInBypassThinker()
-    } catch {
-      // The hook already surfaces auth errors.
-    } finally {
-      setIsBypassLoading(false)
-    }
-  }
-
   if (compact) {
     return (
       <div className="flex flex-col items-center justify-center gap-4 p-6 text-center">
@@ -84,16 +72,6 @@ export function AuthScreen({ compact }: AuthScreenProps) {
             <Chrome size={14} strokeWidth={1.5} />
           )}
           Continue with Google
-        </Button>
-        <Button
-          variant="secondary"
-          size="sm"
-          onClick={handleBypassThinker}
-          disabled={isBypassLoading || isLoading}>
-          {isBypassLoading ? (
-            <Loader2 size={14} strokeWidth={1.5} className="animate-spin" />
-          ) : null}
-          Thinker test bypass
         </Button>
       </div>
     )
@@ -177,7 +155,7 @@ export function AuthScreen({ compact }: AuthScreenProps) {
             variant="primary"
             size="lg"
             onClick={handleSignIn}
-            disabled={isLoading || isBypassLoading}
+            disabled={isLoading}
             className="h-11 w-full gap-2 rounded-xl border border-[#facc15]/55 bg-[#facc15] text-[14px] font-semibold text-black shadow-[0_10px_28px_rgba(250,204,21,0.25)] hover:bg-[#f4c400]">
             {isLoading ? (
               <Loader2 size={16} strokeWidth={1.5} className="animate-spin" />
@@ -185,18 +163,6 @@ export function AuthScreen({ compact }: AuthScreenProps) {
               <Chrome size={16} strokeWidth={1.5} />
             )}
             {isLoading ? "Signing in..." : "Continue with Google"}
-          </Button>
-
-          <Button
-            variant="secondary"
-            size="md"
-            onClick={handleBypassThinker}
-            disabled={isBypassLoading || isLoading}
-            className="mt-2 h-10 w-full gap-2 rounded-xl border border-white/15 bg-transparent text-[13px] text-zinc-200 hover:border-white/25 hover:bg-white/[0.04]">
-            {isBypassLoading ? (
-              <Loader2 size={16} strokeWidth={1.5} className="animate-spin" />
-            ) : null}
-            Thinker test bypass
           </Button>
 
           {error ? (

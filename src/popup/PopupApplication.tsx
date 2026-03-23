@@ -146,6 +146,9 @@ export default function PopupApplication() {
               onOpenZettelHub={() => setView("zettel")}
               onOpenPromptLab={() => setView("prompt-lab")}
               onOpenBrainMerge={() => setView("brain-merge")}
+              onOpenHighlights={() => setView("highlights")}
+              onOpenDocks={() => setView("docks")}
+              onOpenPlans={() => setView("plans")}
             />
             <UserMenu
               onOpenUsage={() => setView("usage")}
