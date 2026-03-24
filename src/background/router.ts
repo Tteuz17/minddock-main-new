@@ -2,23 +2,30 @@ import { authManager } from "./auth-manager"
 import { storageManager } from "./storage-manager"
 import { subscriptionManager } from "./subscription"
 import { renderPdfBase64ViaOffscreen } from "./services/offscreen-pdf-service"
+import { aiService } from "~/services/ai-service"
 import { exportService } from "~/services/export-service"
 import { NotebookLMService, type SyncVerificationResult } from "~/services/NotebookLMService"
 import { zettelkastenService } from "~/services/zettelkasten"
-import { threadService } from "~/services/thread-service"
-import { STORAGE_KEYS } from "~/lib/constants"
+import { threadService } from "./services/ThreadService"
+import { STORAGE_KEYS, STRIPE_PRICES } from "~/lib/constants"
 import {
   FIXED_STORAGE_KEYS,
   MESSAGE_ACTIONS,
   type StandardResponse
 } from "~/lib/contracts"
-import { formatChatAsReadableMarkdownV2 } from "~/lib/utils"
+import {
+  formatChatAsReadableMarkdownV2,
+  getFromSecureStorage,
+  setInSecureStorage
+} from "~/lib/utils"
 import type {
   ChromeMessage,
   ChromeMessageResponse,
   Notebook,
   SidePanelLaunchTarget,
-  SidePanelNoteDraft
+  SidePanelNoteDraft,
+  SubscriptionTier,
+  UserProfile
 } from "~/lib/types"
 import {
   buildNotebookAccountKey,
@@ -31,8 +38,6 @@ import {
   resolveConversationAliasKeys,
   resolveConversationPrimaryKey
 } from "~/lib/conversation-resync-identity"
-
-const IS_DEV = process.env.NODE_ENV === "development"
 
 type MessageSender = chrome.runtime.MessageSender
 type CaptureSourceKind = "chat" | "doc"
@@ -49,6 +54,14 @@ const RESYNC_PROGRESS_EVENT = "MINDDOCK_RESYNC_PROGRESS"
 const RESYNC_SUCCESS_EVENT = "MINDDOCK_RESYNC_SUCCESS"
 const RESYNC_FLOW_VERSION = "resync-v6"
 const GDOC_SYNC_STEP_DELAY_MS = 320
+const MAX_MESSAGE_FIELD_LENGTH = 160
+const MAX_MESSAGE_PAYLOAD_SIZE = 1_000_000
+const AI_RATE_LIMIT_WINDOW_MS = 60_000
+const AI_RATE_LIMIT_MAX_REQUESTS = 8
+const CHAT_SOURCE_BINDING_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000
+const CHAT_SOURCE_BINDING_MAX_TITLE_LENGTH = 180
+const CHAT_SOURCE_BINDING_MAX_HASH_LENGTH = 128
+const CHAT_SOURCE_BINDING_MAX_KEY_LENGTH = 420
 const BLOCKED_NOTEBOOK_TITLE_KEYS = new Set([
   "conversa",
   "conversas",
@@ -98,7 +111,6 @@ function normalizePlatformLabel(value: string): string {
   if (normalizedValue.includes("youtube")) {
     return "YOUTUBE"
   }
-
   return rawValue.toUpperCase()
 }
 
@@ -150,7 +162,7 @@ function stripTrailingContextSnippet(value: string): string {
   const [fullMatch, innerRaw] = parentheticalMatch
   const inner = String(innerRaw ?? "").trim()
   const words = inner.split(/\s+/u).filter(Boolean)
-  const hasLetters = /[A-Za-z\u00c0-\u00ff]/u.test(inner)
+  const hasLetters = /[A-Za-z]/u.test(inner)
   const looksLikeContextSnippet = hasLetters && (words.length >= 3 || inner.length >= 22)
 
   if (!looksLikeContextSnippet) {
@@ -180,8 +192,9 @@ class MessageRouter {
   private readonly pendingNotebookResultKey = "minddock_pending_notebook_result"
   private readonly pendingNotebookErrorKey = "minddock_pending_notebook_error"
   private readonly chatSourceBindingsKey = "minddock_chat_source_bindings"
-  private readonly maxChatSourceBindings = 250
+  private readonly maxChatSourceBindings = 180
   private readonly resyncInFlight = new Set<string>()
+  private readonly aiRateLimitHits = new Map<string, number[]>()
   private createNotebookRequestLocked = false
 
   constructor() {
@@ -206,7 +219,6 @@ class MessageRouter {
     this.register("MINDDOCK_GET_AUTH", this.handleAuthGetStatus)
     this.register("MINDDOCK_SIGN_OUT", this.handleAuthSignOut)
     this.register("MINDDOCK_SIGN_IN", this.handleLegacySignIn)
-
     this.register("MINDDOCK_GET_SOURCE_CONTENT", this.handleGetSourceContent)
     this.register("MINDDOCK_ADD_SOURCE", this.handleAddSource)
     this.register("MINDDOCK_SYNC_GDOC", this.handleSyncGdoc)
@@ -220,10 +232,6 @@ class MessageRouter {
     this.register(MESSAGE_ACTIONS.PROMPT_OPTIONS, this.handlePromptOptions)
     this.register("MINDDOCK_EXPORT_SOURCES", this.handleExportSources)
     this.register("MINDDOCK_HIGHLIGHT_SNIPE", this.handleHighlightSnipe)
-    this.register(
-      MESSAGE_ACTIONS.FETCH_SNIPER_TRANSCRIPT,
-      this.handleFetchSniperTranscript.bind(this)
-    )
     this.register(MESSAGE_ACTIONS.THREAD_LIST, this.handleThreadList)
     this.register(MESSAGE_ACTIONS.THREAD_CREATE, this.handleThreadCreate)
     this.register(MESSAGE_ACTIONS.THREAD_DELETE, this.handleThreadDelete)
@@ -232,10 +240,314 @@ class MessageRouter {
     this.register(MESSAGE_ACTIONS.THREAD_SAVE_MESSAGES, this.handleThreadSaveMessages)
     this.register(MESSAGE_ACTIONS.OPEN_SIDEPANEL, this.handleOpenSidePanel)
     this.register(MESSAGE_ACTIONS.CMD_RENDER_PDF_OFFSCREEN, this.handleRenderPdfOffscreen)
+    this.register(MESSAGE_ACTIONS.CMD_CREATE_CHECKOUT, this.handleCreateCheckout)
+    this.register(MESSAGE_ACTIONS.CMD_BRAIN_MERGE, this.handleBrainMerge)
+    this.register(MESSAGE_ACTIONS.FETCH_SNIPER_TRANSCRIPT, this.handleFetchSniperTranscript)
+
+    authManager.onAuthStateChange((user) => {
+      this.broadcastAuthChanged(user)
+    })
+
+    void this.compactChatSourceBindings()
+  }
+
+  private broadcastAuthChanged(user: UserProfile | null): void {
+    try {
+      chrome.runtime.sendMessage(
+        {
+          command: "MINDDOCK_AUTH_CHANGED",
+          payload: { user }
+        },
+        () => {
+          void chrome.runtime.lastError
+        }
+      )
+    } catch {
+      // Ignore transient runtime contexts (popup closed/reloaded).
+    }
   }
 
   private register(command: string, handler: Handler): void {
     this.handlers.set(command, handler.bind(this))
+  }
+
+  private asRecord(value: unknown): Record<string, unknown> | null {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return null
+    }
+    return value as Record<string, unknown>
+  }
+
+  private normalizeBoundedString(value: unknown, maxLength: number): string | null {
+    if (typeof value !== "string") {
+      return null
+    }
+    const normalized = value.trim()
+    if (!normalized || normalized.length > maxLength) {
+      return null
+    }
+    return normalized
+  }
+
+  private validateIncomingMessageEnvelope(message: unknown): string | null {
+    const record = this.asRecord(message)
+    if (!record) {
+      return "Mensagem invalida: payload de runtime deve ser objeto."
+    }
+
+    for (const field of ["command", "action", "intent"] as const) {
+      const value = record[field]
+      if (value === undefined) {
+        continue
+      }
+      if (typeof value !== "string") {
+        return `Mensagem invalida: campo '${field}' deve ser string.`
+      }
+      if (value.trim().length > MAX_MESSAGE_FIELD_LENGTH) {
+        return `Mensagem invalida: campo '${field}' excede limite.`
+      }
+    }
+
+    for (const field of ["payload", "tokens"] as const) {
+      const value = record[field]
+      if (value === undefined) {
+        continue
+      }
+      if (typeof value === "function" || typeof value === "symbol" || typeof value === "bigint") {
+        return `Mensagem invalida: campo '${field}' contem tipo nao suportado.`
+      }
+
+      try {
+        const serialized = JSON.stringify(value)
+        if ((serialized?.length ?? 0) > MAX_MESSAGE_PAYLOAD_SIZE) {
+          return `Mensagem invalida: campo '${field}' excede limite de tamanho.`
+        }
+      } catch {
+        return `Mensagem invalida: campo '${field}' nao serializavel.`
+      }
+    }
+
+    return null
+  }
+
+  private validateMessagePayload(action: string, payload: unknown): string | null {
+    const objectPayloadActions = new Set<string>([
+      MESSAGE_ACTIONS.STORE_SESSION_TOKENS,
+      "MINDDOCK_SAVE_TOKENS",
+      MESSAGE_ACTIONS.CMD_AUTH_SIGN_IN,
+      "MINDDOCK_ADD_SOURCE",
+      "MINDDOCK_IMPORT_AI_CHAT",
+      "PROTOCOL_APPEND_SOURCE",
+      "MINDDOCK_IMPROVE_PROMPT",
+      MESSAGE_ACTIONS.PROMPT_OPTIONS,
+      "MINDDOCK_ATOMIZE_NOTE",
+      MESSAGE_ACTIONS.ATOMIZE_PREVIEW,
+      MESSAGE_ACTIONS.SAVE_ATOMIC_NOTES,
+      "MINDDOCK_EXPORT_SOURCES",
+      "MINDDOCK_HIGHLIGHT_SNIPE",
+      MESSAGE_ACTIONS.THREAD_LIST,
+      MESSAGE_ACTIONS.THREAD_CREATE,
+      MESSAGE_ACTIONS.THREAD_DELETE,
+      MESSAGE_ACTIONS.THREAD_RENAME,
+      MESSAGE_ACTIONS.THREAD_MESSAGES,
+      MESSAGE_ACTIONS.THREAD_SAVE_MESSAGES,
+      MESSAGE_ACTIONS.FETCH_SNIPER_TRANSCRIPT
+    ])
+
+    if (objectPayloadActions.has(action) && !this.asRecord(payload)) {
+      return `Payload invalido para ${action}: objeto esperado.`
+    }
+
+    switch (action) {
+      case MESSAGE_ACTIONS.STORE_SESSION_TOKENS:
+      case "MINDDOCK_SAVE_TOKENS": {
+        const record = this.asRecord(payload)
+        if (!record) return `Payload invalido para ${action}.`
+        const nested = this.asRecord(record.tokens) ?? {}
+        const at =
+          this.normalizeBoundedString(record.at, 8192) ??
+          this.normalizeBoundedString(record.atToken, 8192) ??
+          this.normalizeBoundedString(nested.at, 8192) ??
+          this.normalizeBoundedString(nested.atToken, 8192)
+        const bl =
+          this.normalizeBoundedString(record.bl, 8192) ??
+          this.normalizeBoundedString(record.blToken, 8192) ??
+          this.normalizeBoundedString(nested.bl, 8192) ??
+          this.normalizeBoundedString(nested.blToken, 8192)
+        if (!at || !bl) {
+          return `Payload invalido para ${action}: at/bl obrigatorios.`
+        }
+        return null
+      }
+
+      case MESSAGE_ACTIONS.CMD_AUTH_SIGN_IN: {
+        const record = this.asRecord(payload)
+        if (!record) return `Payload invalido para ${action}.`
+        if (!this.normalizeBoundedString(record.email, 320)) {
+          return "Payload invalido para login: email obrigatorio."
+        }
+        if (!this.normalizeBoundedString(record.password, 2048)) {
+          return "Payload invalido para login: senha obrigatoria."
+        }
+        return null
+      }
+
+      case "MINDDOCK_SIGN_IN": {
+        if (payload === undefined || payload === null) {
+          return null
+        }
+        const record = this.asRecord(payload)
+        if (!record) return `Payload invalido para ${action}.`
+        const email = this.normalizeBoundedString(record.email, 320)
+        const password = this.normalizeBoundedString(record.password, 2048)
+        if ((email && !password) || (!email && password)) {
+          return "Payload invalido para login legado: email e senha devem ser informados juntos."
+        }
+        return null
+      }
+
+      case "MINDDOCK_IMPROVE_PROMPT":
+      case MESSAGE_ACTIONS.PROMPT_OPTIONS: {
+        const record = this.asRecord(payload)
+        if (!record || !this.normalizeBoundedString(record.prompt, 20_000)) {
+          return `Payload invalido para ${action}: prompt obrigatorio.`
+        }
+        return null
+      }
+
+      case "MINDDOCK_ATOMIZE_NOTE":
+      case MESSAGE_ACTIONS.ATOMIZE_PREVIEW: {
+        const record = this.asRecord(payload)
+        if (!record || !this.normalizeBoundedString(record.content, 120_000)) {
+          return `Payload invalido para ${action}: content obrigatorio.`
+        }
+        return null
+      }
+
+      case MESSAGE_ACTIONS.SAVE_ATOMIC_NOTES: {
+        const record = this.asRecord(payload)
+        const notes = Array.isArray(record?.notes) ? record.notes : []
+        if (notes.length === 0 || notes.length > 200) {
+          return `Payload invalido para ${action}: quantidade de notas invalida.`
+        }
+        return null
+      }
+
+      case MESSAGE_ACTIONS.THREAD_LIST: {
+        const record = this.asRecord(payload)
+        if (
+          !record ||
+          !this.normalizeBoundedString(record.notebookId, 128)
+        ) {
+          return `Payload invalido para ${action}.`
+        }
+        return null
+      }
+
+      case MESSAGE_ACTIONS.THREAD_CREATE: {
+        const record = this.asRecord(payload)
+        const topic = record ? this.normalizeBoundedString(record.topic, 120) : null
+        const icon = record ? this.normalizeBoundedString(record.icon, 32) : null
+        if (
+          !record ||
+          !this.normalizeBoundedString(record.notebookId, 128) ||
+          !this.normalizeBoundedString(record.name, 120) ||
+          (record.topic !== undefined && record.topic !== null && !topic) ||
+          (record.icon !== undefined && record.icon !== null && !icon)
+        ) {
+          return `Payload invalido para ${action}.`
+        }
+        return null
+      }
+
+      case MESSAGE_ACTIONS.THREAD_DELETE:
+      case MESSAGE_ACTIONS.THREAD_MESSAGES: {
+        const record = this.asRecord(payload)
+        if (!record || !this.normalizeBoundedString(record.threadId, 128)) {
+          return `Payload invalido para ${action}.`
+        }
+        return null
+      }
+
+      case MESSAGE_ACTIONS.THREAD_RENAME: {
+        const record = this.asRecord(payload)
+        if (
+          !record ||
+          !this.normalizeBoundedString(record.threadId, 128) ||
+          !this.normalizeBoundedString(record.name, 120)
+        ) {
+          return `Payload invalido para ${action}.`
+        }
+        return null
+      }
+
+      case MESSAGE_ACTIONS.THREAD_SAVE_MESSAGES: {
+        const record = this.asRecord(payload)
+        if (
+          !record ||
+          !this.normalizeBoundedString(record.threadId, 128) ||
+          !Array.isArray(record.messages)
+        ) {
+          return `Payload invalido para ${action}.`
+        }
+        return null
+      }
+
+      case "MINDDOCK_ADD_SOURCE": {
+        const record = this.asRecord(payload)
+        if (
+          !record ||
+          !this.normalizeBoundedString(record.notebookId, 128) ||
+          !this.normalizeBoundedString(record.title, 280) ||
+          !this.normalizeBoundedString(record.content, 120_000)
+        ) {
+          return `Payload invalido para ${action}.`
+        }
+        return null
+      }
+
+      case "MINDDOCK_EXPORT_SOURCES": {
+        const record = this.asRecord(payload)
+        const format = this.normalizeBoundedString(record?.format, 16)
+        const sources = Array.isArray(record?.sources) ? record.sources : null
+        if (!format || !sources) {
+          return `Payload invalido para ${action}.`
+        }
+        if (!["markdown", "txt", "pdf", "json"].includes(format)) {
+          return `Payload invalido para ${action}: formato nao suportado.`
+        }
+        return null
+      }
+
+      case "MINDDOCK_HIGHLIGHT_SNIPE": {
+        const record = this.asRecord(payload)
+        if (!record) return `Payload invalido para ${action}.`
+        const content = this.normalizeBoundedString(record.content, 120_000)
+        const text = this.normalizeBoundedString(record.text, 120_000)
+        if (!content && !text) {
+          return `Payload invalido para ${action}: content/text obrigatorio.`
+        }
+        return null
+      }
+
+      case MESSAGE_ACTIONS.FETCH_SNIPER_TRANSCRIPT: {
+        const record = this.asRecord(payload)
+        if (!record || !this.normalizeBoundedString(record.videoId, 128)) {
+          return `Payload invalido para ${action}: videoId obrigatorio.`
+        }
+
+        const startSec = Number(record.startSec)
+        const endSec = Number(record.endSec)
+        if (!Number.isFinite(startSec) || !Number.isFinite(endSec)) {
+          return `Payload invalido para ${action}: startSec/endSec devem ser numericos.`
+        }
+
+        return null
+      }
+
+      default:
+        return null
+    }
   }
 
   async handle(
@@ -243,6 +555,12 @@ class MessageRouter {
     sender: MessageSender,
     sendResponse: (response: ChromeMessageResponse) => void
   ): Promise<void> {
+    const envelopeError = this.validateIncomingMessageEnvelope(message)
+    if (envelopeError) {
+      sendResponse(this.normalizeResponse(this.fail(envelopeError)))
+      return
+    }
+
     const action = this.resolveIncomingAction(message)
     const handler = this.handlers.get(action)
     if (!handler) {
@@ -257,6 +575,11 @@ class MessageRouter {
 
     try {
       const payload = this.resolveIncomingPayload(message, action)
+      const payloadValidationError = this.validateMessagePayload(action, payload)
+      if (payloadValidationError) {
+        sendResponse(this.normalizeResponse(this.fail(payloadValidationError)))
+        return
+      }
       const result = await handler(payload, sender)
       sendResponse(this.normalizeResponse(result))
     } catch (err) {
@@ -301,6 +624,28 @@ class MessageRouter {
       return { success: false, error }
     }
     return { success: false, error, payload }
+  }
+
+  private async openUrlInTab(url: string): Promise<void> {
+    const normalizedUrl = String(url ?? "").trim()
+    if (!normalizedUrl) {
+      throw new Error("URL do checkout ausente.")
+    }
+
+    if (!chrome.tabs?.create) {
+      throw new Error("API chrome.tabs indisponivel neste contexto.")
+    }
+
+    await new Promise<void>((resolve, reject) => {
+      chrome.tabs.create({ url: normalizedUrl }, () => {
+        const runtimeError = chrome.runtime.lastError
+        if (runtimeError?.message) {
+          reject(new Error(runtimeError.message))
+          return
+        }
+        resolve()
+      })
+    })
   }
 
   private emitResyncProgress(
@@ -381,7 +726,7 @@ class MessageRouter {
       return "RESYNC_INSERT_INVALID"
     }
 
-    if (/TIMEOUT|\d+s|RESYNC_ABORTED/i.test(normalizedMessage)) {
+    if (/TIMEOUT|RESYNC_ABORTED|\b\d+s\b/i.test(normalizedMessage)) {
       return "RESYNC_TIMEOUT"
     }
 
@@ -530,12 +875,15 @@ class MessageRouter {
       return this.fail("Payload invalido para MINDDOCK_STORE_SESSION_TOKENS: at/bl obrigatorios.")
     }
 
+    await Promise.all([
+      setInSecureStorage(FIXED_STORAGE_KEYS.AT_TOKEN, at),
+      setInSecureStorage(FIXED_STORAGE_KEYS.BL_TOKEN, bl),
+      setInSecureStorage(FIXED_STORAGE_KEYS.SESSION_ID, sessionId),
+      setInSecureStorage(FIXED_STORAGE_KEYS.TOKEN_EXPIRES_AT, Date.now() + 60 * 60 * 1000)
+    ])
+
     const storagePatch: Record<string, unknown> = {
-      [FIXED_STORAGE_KEYS.AT_TOKEN]: at,
-      [FIXED_STORAGE_KEYS.BL_TOKEN]: bl,
-      [FIXED_STORAGE_KEYS.SESSION_ID]: sessionId,
-      [FIXED_STORAGE_KEYS.AUTH_USER]: authUser,
-      [FIXED_STORAGE_KEYS.TOKEN_EXPIRES_AT]: Date.now() + 60 * 60 * 1000
+      [FIXED_STORAGE_KEYS.AUTH_USER]: authUser
     }
     if (accountEmail) {
       storagePatch[this.notebookAccountEmailKey] = accountEmail
@@ -558,6 +906,7 @@ class MessageRouter {
     confirmed: boolean
   }> {
     try {
+      const secureSession = await getFromSecureStorage<Record<string, unknown>>("notebooklm_session")
       const snapshot = await chrome.storage.local.get([
         FIXED_STORAGE_KEYS.AUTH_USER,
         this.notebookAccountEmailKey,
@@ -568,7 +917,7 @@ class MessageRouter {
       const fixedAuthUser = normalizeAuthUser(snapshot[FIXED_STORAGE_KEYS.AUTH_USER])
       const fixedAccountEmail = normalizeAccountEmail(snapshot[this.notebookAccountEmailKey])
 
-      const session = snapshot["notebooklm_session"]
+      const session = secureSession ?? snapshot["notebooklm_session"]
       const sessionTokens =
         session && typeof session === "object"
           ? (session as { authUser?: unknown; accountEmail?: unknown })
@@ -701,11 +1050,49 @@ class MessageRouter {
   }
 
   private async handleAuthGetStatus(): Promise<StandardResponse> {
-    const user = await authManager.getCurrentUser()
+    const user = await authManager.initializeSession()
     return this.ok({
       isAuthenticated: !!user,
       user
     })
+  }
+
+  private async handleDevBypassSignIn(payload: unknown): Promise<StandardResponse> {
+    const requestedTier = String((payload as { tier?: unknown })?.tier ?? "")
+      .trim()
+      .toLowerCase()
+    const requestedCycle = String((payload as { cycle?: unknown })?.cycle ?? "")
+      .trim()
+      .toLowerCase()
+    const tier: SubscriptionTier = requestedTier === "thinker_pro" ? "thinker_pro" : "thinker"
+    const cycle = requestedCycle === "yearly" ? "yearly" : "monthly"
+    const now = new Date().toISOString()
+
+    const user: UserProfile = {
+      id: "dev-thinker-test-user",
+      email: "thinker.test@minddock.local",
+      displayName: "Thinker Test",
+      subscriptionTier: tier,
+      subscriptionStatus: "active",
+      subscriptionCycle: cycle,
+      createdAt: now,
+      updatedAt: now
+    }
+
+    await chrome.storage.local.set({
+      [STORAGE_KEYS.USER_PROFILE]: user,
+      [STORAGE_KEYS.DEV_AUTH_BYPASS]: {
+        enabled: true,
+        tier,
+        cycle,
+        token: "dev-bypass-token",
+        activatedAt: now
+      }
+    })
+
+    this.broadcastAuthChanged(user)
+
+    return this.ok({ isAuthenticated: true, user, bypass: true })
   }
 
   private async handleGetNotebooks(): Promise<StandardResponse> {
@@ -1145,6 +1532,32 @@ class MessageRouter {
     }
   }
 
+  private async launchIdentityWebAuthFlow(
+    url: string
+  ): Promise<{ redirectUrl: string | null; runtimeErrorMessage: string | null }> {
+    if (!chrome.identity?.launchWebAuthFlow) {
+      return {
+        redirectUrl: null,
+        runtimeErrorMessage: "API chrome.identity indisponivel. Recarregue a extensao."
+      }
+    }
+
+    return new Promise((resolve) => {
+      chrome.identity.launchWebAuthFlow({ url, interactive: true }, (redirectUrl) => {
+        const runtimeErrorMessage = String(chrome.runtime.lastError?.message ?? "").trim()
+        if (runtimeErrorMessage) {
+          resolve({ redirectUrl: null, runtimeErrorMessage })
+          return
+        }
+
+        resolve({
+          redirectUrl: String(redirectUrl ?? "").trim() || null,
+          runtimeErrorMessage: null
+        })
+      })
+    })
+  }
+
   // Legacy auth command preserved for popup flow that still uses OAuth Google.
   private async handleLegacySignIn(payload: unknown): Promise<StandardResponse> {
     const email = (payload as { email?: string })?.email
@@ -1154,28 +1567,49 @@ class MessageRouter {
       return this.handleAuthSignIn(payload)
     }
 
-      const { url } = await authManager.signInWithGoogle()
-      return new Promise((resolve) => {
-        chrome.identity.launchWebAuthFlow({ url, interactive: true }, async (redirectUrl) => {
-          const runtimeErrorMessage = String(chrome.runtime.lastError?.message ?? "").trim()
-          if (runtimeErrorMessage || !redirectUrl) {
-            resolve(
-              this.fail(
-                runtimeErrorMessage ||
-                  "Falha no login Google: nenhum redirect OAuth foi retornado. Verifique o redirect URL da extensao no Supabase."
-              )
+    try {
+      const redirectDefault = chrome.identity.getRedirectURL()
+      const redirectSupabasePath = chrome.identity.getRedirectURL("supabase")
+      const redirectCandidates = Array.from(
+        new Set([redirectDefault, redirectSupabasePath].map((value) => String(value ?? "").trim()).filter(Boolean))
+      )
+      const collectedErrors: string[] = []
+
+      for (const redirectTarget of redirectCandidates) {
+        try {
+          const { url } = await authManager.signInWithGoogle(redirectTarget)
+          const flowResult = await this.launchIdentityWebAuthFlow(url)
+          if (flowResult.runtimeErrorMessage || !flowResult.redirectUrl) {
+            const runtimeErrorMessage = String(
+              flowResult.runtimeErrorMessage ??
+                "Falha no login Google: nenhum redirect OAuth foi retornado."
             )
-            return
+            collectedErrors.push(`[redirect=${redirectTarget}] ${runtimeErrorMessage}`)
+            continue
           }
 
-          try {
-            const user = await authManager.completeOAuthFlow(redirectUrl)
-          resolve(this.ok({ isAuthenticated: !!user, user }))
-        } catch (error) {
-          resolve(this.fail(error instanceof Error ? error.message : "Falha ao concluir login."))
+          const user = await authManager.completeOAuthFlow(flowResult.redirectUrl)
+          return this.ok({ isAuthenticated: !!user, user })
+        } catch (attemptError) {
+          const message =
+            attemptError instanceof Error ? attemptError.message : String(attemptError ?? "Falha desconhecida")
+          collectedErrors.push(`[redirect=${redirectTarget}] ${message}`)
         }
-      })
-    })
+      }
+
+      const mergedErrorMessage = collectedErrors.join(" | ")
+      if (/Authorization page could not be loaded/i.test(mergedErrorMessage)) {
+        return this.fail(
+          `Authorization page could not be loaded. Configure no Supabase Auth > URL Configuration os redirects: ${redirectDefault} e ${redirectSupabasePath}. Dica: adicione tambem https://*.chromiumapp.org/* para evitar erro quando o ID da extensao mudar.`
+        )
+      }
+
+      return this.fail(
+        collectedErrors[collectedErrors.length - 1] ?? "Falha ao concluir login."
+      )
+    } catch (error) {
+      return this.fail(error instanceof Error ? error.message : "Falha ao concluir login.")
+    }
   }
 
   // Existing non-phase1 handlers
@@ -1603,14 +2037,14 @@ class MessageRouter {
       if (requestedResync && Date.now() >= resyncDeadlineTs) {
         return this.fail(
           "RESYNC_TIMEOUT",
-            this.buildResyncErrorPayload(
-              resolvedNotebookId,
-              targetSourceToSwap,
-              resyncStartTs,
-              `Re-sync excedeu o limite de ${RESYNC_TOTAL_BUDGET_SECONDS}s durante a fase de validacao.`
-            )
+          this.buildResyncErrorPayload(
+            resolvedNotebookId,
+            targetSourceToSwap,
+            resyncStartTs,
+            `Re-sync excedeu o limite de ${RESYNC_TOTAL_BUDGET_SECONDS}s durante a fase de validacao.`
           )
-        }
+        )
+      }
 
       let sourceId = ""
       if (requestedResync && targetSourceToSwap) {
@@ -2027,22 +2461,9 @@ class MessageRouter {
       if (requestedResync) {
         this.emitResyncProgress(capturedFromUrl, "error")
       }
-      const rawErrorMessage = error instanceof Error ? error.message : "Falha ao importar conversa."
-      const normalizedErrorMessageKey = String(rawErrorMessage ?? "")
-        .normalize("NFD")
-        .replace(/[\u0300-\u036f]/g, "")
-        .toLowerCase()
-
-      const userFacingErrorMessage =
-        normalizedErrorMessageKey.includes("unexpected end of json input") ||
-        normalizedErrorMessageKey.includes("fim inesperado da entrada json") ||
-        normalizedErrorMessageKey.includes("json parse") ||
-        normalizedErrorMessageKey.includes("json.parse")
-          ? "Resposta invalida do NotebookLM/YouTube. Recarregue o YouTube e o NotebookLM e tente novamente."
-          : rawErrorMessage
-
+      const errorMessage = error instanceof Error ? error.message : "Falha ao importar conversa."
       if (requestedResync) {
-        const normalizedErrorDetail = String(rawErrorMessage ?? "").replace(/\s+/g, " ").trim()
+        const normalizedErrorDetail = String(errorMessage ?? "").replace(/\s+/g, " ").trim()
         const errorCode = this.classifyResyncErrorCode(normalizedErrorDetail)
         return this.fail(
           errorCode,
@@ -2054,7 +2475,7 @@ class MessageRouter {
           )
         )
       }
-      return this.fail(userFacingErrorMessage)
+      return this.fail(errorMessage)
     } finally {
       if (requestedResync && resyncInFlightKey) {
         this.resyncInFlight.delete(resyncInFlightKey)
@@ -2065,80 +2486,239 @@ class MessageRouter {
   private async handleCheckSubscription(): Promise<StandardResponse> {
     await subscriptionManager.invalidate()
     const tier = await subscriptionManager.getTier()
-    return this.ok({ tier })
+    const cycle = await subscriptionManager.getCycle()
+    return this.ok({ tier, cycle })
   }
 
+  private async ensureAuthenticatedForAi(): Promise<StandardResponse | null> {
+    const token = await authManager.getAccessToken()
+    if (!token) {
+      return this.fail("Nao autenticado.")
+    }
+    return null
+  }
+
+  private async enforceAiRateLimit(): Promise<StandardResponse | null> {
+    const now = Date.now()
+
+    for (const [key, timestamps] of this.aiRateLimitHits.entries()) {
+      const fresh = timestamps.filter((timestamp) => now - timestamp < AI_RATE_LIMIT_WINDOW_MS)
+      if (fresh.length === 0) {
+        this.aiRateLimitHits.delete(key)
+      } else {
+        this.aiRateLimitHits.set(key, fresh)
+      }
+    }
+
+    const user = await authManager.getCurrentUser()
+    const key = String(user?.id ?? "").trim()
+    if (!key) {
+      return this.fail("Nao autenticado.")
+    }
+
+    const hits = this.aiRateLimitHits.get(key) ?? []
+    if (hits.length >= AI_RATE_LIMIT_MAX_REQUESTS) {
+      const retryAfterSeconds = Math.max(
+        1,
+        Math.ceil((AI_RATE_LIMIT_WINDOW_MS - (now - hits[0])) / 1000)
+      )
+      return this.fail(
+        `Muitas requisicoes de IA em pouco tempo. Aguarde ${retryAfterSeconds}s e tente novamente.`
+      )
+    }
+
+    hits.push(now)
+    this.aiRateLimitHits.set(key, hits)
+    return null
+  }
+
+
   private async handleImprovePrompt(payload: unknown): Promise<StandardResponse> {
+    const authGuard = await this.ensureAuthenticatedForAi()
+    if (authGuard) {
+      return authGuard
+    }
+
+    const rateGuard = await this.enforceAiRateLimit()
+    if (rateGuard) {
+      return rateGuard
+    }
+
     const { prompt } = payload as { prompt: string }
     const canUseAI = await subscriptionManager.canUseFeature("ai_features")
     if (!canUseAI) {
-      return this.fail("Melhoria de prompts requer plano Thinker ou superior.")
+      return this.fail("Melhoria de prompts requer plano Thinker ou superior.", {
+        tier_required: "thinker",
+        upgrade_url: "https://minddocklm.digital/#pricing"
+      })
     }
+
+    const limits = await subscriptionManager.getLimits()
     const canCallAI = await storageManager.checkUsageLimit(
       "aiCalls",
-      (await subscriptionManager.getLimits()).ai_calls_per_day ?? 0
+      limits.ai_calls_per_day ?? "unlimited"
     )
     if (!canCallAI) {
       return this.fail("Limite de chamadas de IA atingido para hoje.")
     }
-    
-    // TODO: Descomentar quando tiver a chave da API do Claude
-    // const improved = await aiService.improvePrompt(prompt)
-    // await storageManager.incrementUsage("aiCalls")
-    // return this.ok({ improved })
-    
-    return this.fail(
-      "Funcionalidade de melhoria de prompts temporariamente desabilitada no cliente. Use um proxy server-side para IA."
-    )
-  }
 
+    const canUseMonthlyAgile = await storageManager.checkAiMonthlyLimit(
+      "agilePrompts",
+      limits.agile_prompts_per_month ?? "unlimited"
+    )
+    if (!canUseMonthlyAgile) {
+      const agileLimit = limits.agile_prompts_per_month
+      return this.fail(
+        typeof agileLimit === "number"
+          ? `Limite mensal do Agile Prompts atingido (${agileLimit}/mes).`
+          : "Limite mensal do Agile Prompts atingido."
+      )
+    }
+
+    const improved = await aiService.improvePrompt(prompt, {
+      surface: "agile_prompts_bar",
+      intent: "rewrite_user_prompt"
+    })
+    await storageManager.incrementUsage("aiCalls")
+    await storageManager.incrementAiMonthlyUsage("agilePrompts")
+    return this.ok({ improved })
+  }
   private async handlePromptOptions(payload: unknown): Promise<StandardResponse> {
-    const { prompt } = payload as { prompt: string }
-    
-    // TODO: Descomentar quando tiver a chave da API do Claude
-    // const options = await aiService.generatePromptOptions(prompt)
-    // return this.ok({ options })
-    
-    return this.fail(
-      "Funcionalidade de opcoes de prompt temporariamente desabilitada no cliente. Use um proxy server-side para IA."
-    )
-  }
+    const authGuard = await this.ensureAuthenticatedForAi()
+    if (authGuard) {
+      return authGuard
+    }
 
-  // ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ Focus Threads ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬
+    const rateGuard = await this.enforceAiRateLimit()
+    if (rateGuard) {
+      return rateGuard
+    }
+
+    const { prompt } = payload as { prompt: string }
+    const canUseAI = await subscriptionManager.canUseFeature("ai_features")
+    if (!canUseAI) {
+      return this.fail("Geracao de opcoes requer plano Thinker ou superior.", {
+        tier_required: "thinker",
+        upgrade_url: "https://minddocklm.digital/#pricing"
+      })
+    }
+
+    const limits = await subscriptionManager.getLimits()
+    const canCallAI = await storageManager.checkUsageLimit(
+      "aiCalls",
+      limits.ai_calls_per_day ?? "unlimited"
+    )
+    if (!canCallAI) {
+      return this.fail("Limite de chamadas de IA atingido para hoje.")
+    }
+
+    const canUseMonthlyAgile = await storageManager.checkAiMonthlyLimit(
+      "agilePrompts",
+      limits.agile_prompts_per_month ?? "unlimited"
+    )
+    if (!canUseMonthlyAgile) {
+      const agileLimit = limits.agile_prompts_per_month
+      return this.fail(
+        typeof agileLimit === "number"
+          ? `Limite mensal do Agile Prompts atingido (${agileLimit}/mes).`
+          : "Limite mensal do Agile Prompts atingido."
+      )
+    }
+
+    const options = await aiService.generatePromptOptions(prompt, {
+      surface: "agile_prompts_bar",
+      intent: "generate_prompt_variants"
+    })
+    await storageManager.incrementUsage("aiCalls")
+    await storageManager.incrementAiMonthlyUsage("agilePrompts")
+    return this.ok({ options })
+  }
+  // ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ Focus Threads ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚ÂÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬
 
   private async handleThreadList(payload: unknown): Promise<StandardResponse> {
-    const { userId, notebookId } = payload as { userId: string; notebookId: string }
-    const threads = await threadService.getThreads(userId, notebookId)
+    const canUseZettel = await subscriptionManager.canUseFeature("zettelkasten")
+    if (!canUseZettel) {
+      return this.fail("Focus Docks requer plano Thinker ou superior.", {
+        tier_required: "thinker",
+        upgrade_url: "https://minddocklm.digital/#pricing"
+      })
+    }
+
+    const { notebookId } = payload as { notebookId: string }
+    const threads = await threadService.getThreads(notebookId)
     return this.ok({ threads })
   }
 
   private async handleThreadCreate(payload: unknown): Promise<StandardResponse> {
-    const { userId, notebookId, name } = payload as {
-      userId: string; notebookId: string; name: string
+    const canUseZettel = await subscriptionManager.canUseFeature("zettelkasten")
+    if (!canUseZettel) {
+      return this.fail("Focus Docks requer plano Thinker ou superior.", {
+        tier_required: "thinker",
+        upgrade_url: "https://minddocklm.digital/#pricing"
+      })
     }
-    const thread = await threadService.createThread(userId, notebookId, name)
+
+    const { notebookId, name, topic, icon } = payload as {
+      notebookId: string
+      name: string
+      topic?: string
+      icon?: string
+    }
+    const thread = await threadService.createThread(notebookId, name, { topic, icon })
     return this.ok({ thread })
   }
 
   private async handleThreadDelete(payload: unknown): Promise<StandardResponse> {
+    const canUseZettel = await subscriptionManager.canUseFeature("zettelkasten")
+    if (!canUseZettel) {
+      return this.fail("Focus Docks requer plano Thinker ou superior.", {
+        tier_required: "thinker",
+        upgrade_url: "https://minddocklm.digital/#pricing"
+      })
+    }
+
     const { threadId } = payload as { threadId: string }
     await threadService.deleteThread(threadId)
     return this.ok({})
   }
 
   private async handleThreadRename(payload: unknown): Promise<StandardResponse> {
+    const canUseZettel = await subscriptionManager.canUseFeature("zettelkasten")
+    if (!canUseZettel) {
+      return this.fail("Focus Docks requer plano Thinker ou superior.", {
+        tier_required: "thinker",
+        upgrade_url: "https://minddocklm.digital/#pricing"
+      })
+    }
+
     const { threadId, name } = payload as { threadId: string; name: string }
     const thread = await threadService.renameThread(threadId, name)
     return this.ok({ thread })
   }
 
   private async handleThreadMessages(payload: unknown): Promise<StandardResponse> {
+    const canUseZettel = await subscriptionManager.canUseFeature("zettelkasten")
+    if (!canUseZettel) {
+      return this.fail("Focus Docks requer plano Thinker ou superior.", {
+        tier_required: "thinker",
+        upgrade_url: "https://minddocklm.digital/#pricing"
+      })
+    }
+
     const { threadId } = payload as { threadId: string }
     const messages = await threadService.getMessages(threadId)
     return this.ok({ messages })
   }
 
   private async handleThreadSaveMessages(payload: unknown): Promise<StandardResponse> {
+    const canUseZettel = await subscriptionManager.canUseFeature("zettelkasten")
+    if (!canUseZettel) {
+      return this.fail("Focus Docks requer plano Thinker ou superior.", {
+        tier_required: "thinker",
+        upgrade_url: "https://minddocklm.digital/#pricing"
+      })
+    }
+
     const { threadId, messages } = payload as {
       threadId: string
       messages: Array<{ role: "user" | "assistant"; content: string }>
@@ -2199,25 +2779,59 @@ class MessageRouter {
   }
 
   private async handleAtomizeNote(payload: unknown): Promise<StandardResponse> {
+    const authGuard = await this.ensureAuthenticatedForAi()
+    if (authGuard) {
+      return authGuard
+    }
+
+    const rateGuard = await this.enforceAiRateLimit()
+    if (rateGuard) {
+      return rateGuard
+    }
+
     const { content } = payload as { content: string }
     const canUseZettel = await subscriptionManager.canUseFeature("zettelkasten")
     if (!canUseZettel) {
-      return this.fail("Zettelkasten requer plano Thinker ou superior.")
+      return this.fail("Zettelkasten requer plano Thinker ou superior.", {
+        tier_required: "thinker",
+        upgrade_url: "https://minddocklm.digital/#pricing"
+      })
     }
-    
-    // TODO: Descomentar quando tiver a chave da API do Claude
-    // const notes = await aiService.atomizeContent(content)
-    // const user = await authManager.getCurrentUser()
-    // if (!user) {
-    //   return this.fail("Nao autenticado.")
-    // }
-    // await zettelkastenService.saveAtomicNotes(user.id, notes)
-    // await storageManager.incrementUsage("aiCalls")
-    // return this.ok({ count: notes.length })
-    
-    return this.fail(
-      "Funcionalidade de atomizacao temporariamente desabilitada no cliente. Use um proxy server-side para IA."
+
+    const limits = await subscriptionManager.getLimits()
+    const canCallAI = await storageManager.checkUsageLimit(
+      "aiCalls",
+      limits.ai_calls_per_day ?? "unlimited"
     )
+    if (!canCallAI) {
+      return this.fail("Limite de chamadas de IA atingido para hoje.")
+    }
+    const canUseMonthlyDocksSummary = await storageManager.checkAiMonthlyLimit(
+      "docksSummaries",
+      limits.docks_summaries_per_month ?? "unlimited"
+    )
+    if (!canUseMonthlyDocksSummary) {
+      const docksLimit = limits.docks_summaries_per_month
+      return this.fail(
+        typeof docksLimit === "number"
+          ? `Limite mensal de resumos do Docks atingido (${docksLimit}/mes).`
+          : "Limite mensal de resumos do Docks atingido."
+      )
+    }
+
+    const user = await authManager.getCurrentUser()
+    if (!user) {
+      return this.fail("Nao autenticado.")
+    }
+
+    const notes = await aiService.atomizeContent(content, {
+      surface: "focus_docks",
+      operation: "save_atomic_notes"
+    })
+    await zettelkastenService.saveAtomicNotes(user.id, notes)
+    await storageManager.incrementUsage("aiCalls")
+    await storageManager.incrementAiMonthlyUsage("docksSummaries")
+    return this.ok({ count: notes.length })
   }
 
   private async handleExportSources(payload: unknown): Promise<StandardResponse> {
@@ -2283,18 +2897,57 @@ class MessageRouter {
   }
 
   private async handleAtomizePreview(payload: unknown): Promise<StandardResponse> {
+    const authGuard = await this.ensureAuthenticatedForAi()
+    if (authGuard) {
+      return authGuard
+    }
+
+    const rateGuard = await this.enforceAiRateLimit()
+    if (rateGuard) {
+      return rateGuard
+    }
+
     const { content } = payload as { content: string }
     if (!content?.trim()) {
       return this.fail("Conteudo vazio para atomizacao.")
     }
-    
-    // TODO: Descomentar quando tiver a chave da API do Claude
-    // const notes = await aiService.atomizeContent(content)
-    // return this.ok({ notes })
-    
-    return this.fail(
-      "Funcionalidade de atomizacao temporariamente desabilitada no cliente. Use um proxy server-side para IA."
+
+    const canUseZettel = await subscriptionManager.canUseFeature("zettelkasten")
+    if (!canUseZettel) {
+      return this.fail("Zettelkasten requer plano Thinker ou superior.", {
+        tier_required: "thinker",
+        upgrade_url: "https://minddocklm.digital/#pricing"
+      })
+    }
+
+    const limits = await subscriptionManager.getLimits()
+    const canCallAI = await storageManager.checkUsageLimit(
+      "aiCalls",
+      limits.ai_calls_per_day ?? "unlimited"
     )
+    if (!canCallAI) {
+      return this.fail("Limite de chamadas de IA atingido para hoje.")
+    }
+    const canUseMonthlyDocksSummary = await storageManager.checkAiMonthlyLimit(
+      "docksSummaries",
+      limits.docks_summaries_per_month ?? "unlimited"
+    )
+    if (!canUseMonthlyDocksSummary) {
+      const docksLimit = limits.docks_summaries_per_month
+      return this.fail(
+        typeof docksLimit === "number"
+          ? `Limite mensal de resumos do Docks atingido (${docksLimit}/mes).`
+          : "Limite mensal de resumos do Docks atingido."
+      )
+    }
+
+    const notes = await aiService.atomizeContent(content, {
+      surface: "focus_docks",
+      operation: "preview_atomic_notes"
+    })
+    await storageManager.incrementUsage("aiCalls")
+    await storageManager.incrementAiMonthlyUsage("docksSummaries")
+    return this.ok({ notes })
   }
 
   private async handleSaveAtomicNotes(payload: unknown): Promise<StandardResponse> {
@@ -2353,8 +3006,13 @@ class MessageRouter {
       return {}
     }
 
+    const now = Date.now()
     const output: Record<string, ChatSourceBindingRecord> = {}
     for (const [key, candidate] of Object.entries(rawValue as Record<string, unknown>)) {
+      if (!key || key.length > CHAT_SOURCE_BINDING_MAX_KEY_LENGTH) {
+        continue
+      }
+
       if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
         continue
       }
@@ -2364,14 +3022,26 @@ class MessageRouter {
         continue
       }
 
+      const updatedAtRaw = String((candidate as { updatedAt?: unknown }).updatedAt ?? "").trim()
+      const updatedAtMs = Date.parse(updatedAtRaw)
+      const isStale =
+        !Number.isFinite(updatedAtMs) || now - updatedAtMs > CHAT_SOURCE_BINDING_MAX_AGE_MS
+      if (isStale) {
+        continue
+      }
+
+      const sourceTitle = String((candidate as { sourceTitle?: unknown }).sourceTitle ?? "")
+        .trim()
+        .slice(0, CHAT_SOURCE_BINDING_MAX_TITLE_LENGTH)
+      const lastSyncHash = String((candidate as { lastSyncHash?: unknown }).lastSyncHash ?? "")
+        .trim()
+        .slice(0, CHAT_SOURCE_BINDING_MAX_HASH_LENGTH)
+
       output[key] = {
         sourceId,
-        sourceTitle: String((candidate as { sourceTitle?: unknown }).sourceTitle ?? "").trim(),
-        lastSyncHash:
-          String((candidate as { lastSyncHash?: unknown }).lastSyncHash ?? "").trim() || undefined,
-        updatedAt:
-          String((candidate as { updatedAt?: unknown }).updatedAt ?? "").trim() ||
-          new Date(0).toISOString()
+        sourceTitle,
+        lastSyncHash: lastSyncHash || undefined,
+        updatedAt: new Date(updatedAtMs).toISOString()
       }
     }
 
@@ -2381,8 +3051,42 @@ class MessageRouter {
   private async writeChatSourceBindingsMap(
     bindings: Record<string, ChatSourceBindingRecord>
   ): Promise<void> {
+    const now = Date.now()
     const trimmedBindings = Object.fromEntries(
       Object.entries(bindings)
+        .filter(([key, value]) => {
+          if (!key || key.length > CHAT_SOURCE_BINDING_MAX_KEY_LENGTH) {
+            return false
+          }
+
+          const sourceId = String(value?.sourceId ?? "").trim()
+          if (!sourceId) {
+            return false
+          }
+
+          const updatedAtMs = Date.parse(String(value?.updatedAt ?? "").trim())
+          if (!Number.isFinite(updatedAtMs) || now - updatedAtMs > CHAT_SOURCE_BINDING_MAX_AGE_MS) {
+            return false
+          }
+
+          return true
+        })
+        .map(
+          ([key, value]): [string, ChatSourceBindingRecord] => [
+            key,
+            {
+              sourceId: String(value.sourceId ?? "").trim(),
+              sourceTitle: String(value.sourceTitle ?? "")
+                .trim()
+                .slice(0, CHAT_SOURCE_BINDING_MAX_TITLE_LENGTH),
+              lastSyncHash:
+                String(value.lastSyncHash ?? "")
+                  .trim()
+                  .slice(0, CHAT_SOURCE_BINDING_MAX_HASH_LENGTH) || undefined,
+              updatedAt: new Date(value.updatedAt).toISOString()
+            }
+          ]
+        )
         .sort((left, right) => {
           const leftTime = Date.parse(left[1].updatedAt)
           const rightTime = Date.parse(right[1].updatedAt)
@@ -2397,6 +3101,15 @@ class MessageRouter {
     await chrome.storage.local.set({
       [this.chatSourceBindingsKey]: trimmedBindings
     })
+  }
+
+  private async compactChatSourceBindings(): Promise<void> {
+    try {
+      const bindings = await this.readChatSourceBindingsMap()
+      await this.writeChatSourceBindingsMap(bindings)
+    } catch (error) {
+      console.warn("[MindDock] Falha ao compactar chatSourceBindings.", error)
+    }
   }
 
   private async readChatSourceBinding(url: string, notebookId: string): Promise<string | null> {
@@ -2482,8 +3195,10 @@ class MessageRouter {
     const normalizedLastSyncHash = String(lastSyncHash ?? "").trim()
     const nextRecord: ChatSourceBindingRecord = {
       sourceId: normalizedSourceId,
-      sourceTitle: String(sourceTitle ?? "").trim(),
-      lastSyncHash: normalizedLastSyncHash || undefined,
+      sourceTitle: String(sourceTitle ?? "")
+        .trim()
+        .slice(0, CHAT_SOURCE_BINDING_MAX_TITLE_LENGTH),
+      lastSyncHash: normalizedLastSyncHash.slice(0, CHAT_SOURCE_BINDING_MAX_HASH_LENGTH) || undefined,
       updatedAt: new Date().toISOString()
     }
     for (const key of keys) {
@@ -2911,254 +3626,1222 @@ class MessageRouter {
     return fallbackNotebookId
   }
 
-  private async handleFetchSniperTranscript(
-    payload: unknown,
-    sender: MessageSender
-  ): Promise<StandardResponse> {
-    const data = payload as Record<string, unknown>
-    const videoId = String(data.videoId ?? "").trim()
-    const startSec = Number(data.startSec)
-    const endSec = Number(data.endSec)
+  private decodeTranscriptEntities(value: string): string {
+    return String(value ?? "")
+      .replace(/&amp;/g, "&")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/&#(\d+);/g, (_, rawCodePoint: string) => {
+        const codePoint = Number(rawCodePoint)
+        if (!Number.isFinite(codePoint) || codePoint <= 0) {
+          return ""
+        }
+        try {
+          return String.fromCodePoint(codePoint)
+        } catch {
+          return ""
+        }
+      })
+      .replace(/&#x([0-9a-f]+);/gi, (_, rawHexCodePoint: string) => {
+        const codePoint = Number.parseInt(rawHexCodePoint, 16)
+        if (!Number.isFinite(codePoint) || codePoint <= 0) {
+          return ""
+        }
+        try {
+          return String.fromCodePoint(codePoint)
+        } catch {
+          return ""
+        }
+      })
+  }
 
-    if (!videoId) return this.fail("videoId ausente")
+  private normalizeTranscriptText(value: string): string {
+    return this.decodeTranscriptEntities(value)
+      .replace(/<[^>]+>/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+  }
 
-    const safeStart = Math.min(startSec, endSec)
-    const safeEnd = Math.max(startSec, endSec)
+  private normalizeTranscriptBaseUrl(rawBaseUrl: unknown): string | null {
+    let normalized = String(rawBaseUrl ?? "").trim()
+    if (!normalized) {
+      return null
+    }
+
+    normalized = normalized
+      .replace(/\\u0026/g, "&")
+      .replace(/\\\//g, "/")
+      .replace(/&amp;/g, "&")
+
+    if (normalized.startsWith("//")) {
+      normalized = `https:${normalized}`
+    } else if (normalized.startsWith("/")) {
+      normalized = `https://www.youtube.com${normalized}`
+    }
 
     try {
-      const tabs = await chrome.tabs.query({ active: true, currentWindow: true })
-      const tabId = tabs.find((t) => t.url?.includes("youtube.com/watch"))?.id
-      if (!tabId) return this.fail("Aba do YouTube nao encontrada")
-
-      try {
-        const [result] = await chrome.scripting.executeScript({
-          target: { tabId },
-          world: "MAIN",
-          func: async (safeStart: number, safeEnd: number) => {
-            const PANEL_MODERN  = 'ytd-engagement-panel-section-list-renderer[target-id="PAmodern_transcript_view"]'
-            const PANEL_LEGACY  = 'ytd-engagement-panel-section-list-renderer[target-id="engagement-panel-searchable-transcript"]'
-            const SEGMENT_NEW   = "TRANSCRIPT-SEGMENT-VIEW-MODEL"
-            const SEGMENT_OLD   = "ytd-transcript-segment-renderer"
-            const TS_NEW        = ".ytwTranscriptSegmentViewModelTimestamp"
-            const TS_OLD        = ".segment-timestamp"
-            const TXT_NEW       = ".yt-core-attributed-string"
-            const TXT_OLD       = ".segment-text"
-            const STYLE_ID      = "__sniper_hide__"
-
-            const OPEN_LABELS = [
-              "Mostrar transcri\u00e7\u00e3o", "Show transcript",
-              "Mostrar transcripci\u00f3n", "Afficher la transcription",
-              "Transkript anzeigen", "Transcript weergeven",
-              "Mostrar legendas", "Visa transkription",
-              "Vis transskription", "N\u00e4yt\u00e4 transkriptio",
-            ]
-            const CLOSE_LABELS = [
-              "Fechar transcri\u00e7\u00e3o", "Close transcript",
-              "Cerrar transcripci\u00f3n", "Fermer la transcription",
-              "Transkript schlie\u00dfen", "Transcript verbergen",
-              "DÃ¶lj transkription", "Skjul transskription",
-            ]
-
-            function timeToSeconds(raw: string): number {
-              const parts = raw.trim().split(":").map(Number)
-              if (parts.length === 2) return parts[0] * 60 + parts[1]
-              if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2]
-              return 0
-            }
-
-            function injectHideStyle(): void {
-              if (document.getElementById(STYLE_ID)) return
-              const style = document.createElement("style")
-              style.id = STYLE_ID
-              style.textContent = [
-                PANEL_MODERN + " { position: fixed !important; top: -9999px !important; left: -9999px !important; opacity: 0 !important; pointer-events: none !important; }",
-                PANEL_LEGACY + " { position: fixed !important; top: -9999px !important; left: -9999px !important; opacity: 0 !important; pointer-events: none !important; }",
-                "ytd-engagement-panel-section-list-renderer[visibility='ENGAGEMENT_PANEL_VISIBILITY_EXPANDED'] { position: fixed !important; top: -9999px !important; left: -9999px !important; opacity: 0 !important; pointer-events: none !important; }",
-              ].join("\n")
-              document.head.appendChild(style)
-            }
-
-            function removeHideStyle(): void {
-              document.getElementById(STYLE_ID)?.remove()
-            }
-
-            // Aguarda segmentos em QUALQUER painel (novo ou legado, qualquer target-id)
-            // Para videos longos, espera o numero de segmentos estabilizar.
-            function waitForSegmentsAnyPanel(timeout = 8000): Promise<{ segments: Element[], isNewFormat: boolean } | null> {
-              return new Promise((resolve) => {
-                let stabilizeTimer: any = null
-                let timeoutTimer: any = null
-                let lastCount = 0
-                let lastResult: { segments: Element[], isNewFormat: boolean } | null = null
-
-                function check() {
-                  for (const el of document.querySelectorAll("ytd-engagement-panel-section-list-renderer")) {
-                    const novo = Array.from(el.querySelectorAll(SEGMENT_NEW))
-                    const velho = Array.from(el.querySelectorAll(SEGMENT_OLD))
-                    const segs = novo.length > 0 ? novo : velho
-                    const isNew = novo.length > 0
-                    if (segs.length > 0) return { segments: segs, isNewFormat: isNew }
-                  }
-                  return null
-                }
-
-                function finalize(result: { segments: Element[], isNewFormat: boolean } | null) {
-                  if (stabilizeTimer) clearTimeout(stabilizeTimer)
-                  if (timeoutTimer) clearTimeout(timeoutTimer)
-                  observer.disconnect()
-                  resolve(result)
-                }
-
-                function updateIfNeeded() {
-                  const res = check()
-                  if (!res) return
-                  if (res.segments.length !== lastCount) {
-                    lastCount = res.segments.length
-                    lastResult = res
-                    if (stabilizeTimer) clearTimeout(stabilizeTimer)
-                    // Espera 800ms sem mudança antes de resolver
-                    stabilizeTimer = setTimeout(() => {
-                      finalize(lastResult)
-                    }, 800)
-                  }
-                }
-
-                const observer = new MutationObserver(() => {
-                  updateIfNeeded()
-                })
-                observer.observe(document.body, { childList: true, subtree: true })
-
-                updateIfNeeded()
-
-                timeoutTimer = setTimeout(() => finalize(null), timeout)
-              })
-            }
-
-            // 1. Fecha qualquer painel aberto primeiro
-            Array.from(document.querySelectorAll("ytd-engagement-panel-section-list-renderer"))
-              .forEach(el => {
-                if (el.getAttribute("visibility") === "ENGAGEMENT_PANEL_VISIBILITY_EXPANDED") {
-                  el.setAttribute("visibility", "ENGAGEMENT_PANEL_VISIBILITY_HIDDEN")
-                }
-              })
-
-            // Pequena pausa para o YouTube processar o fechamento
-            await new Promise((r) => setTimeout(r, 300))
-
-            // 2. Injeta CSS invisivel
-            injectHideStyle()
-            await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r as any)))
-
-            // 2. Encontra o botao — fallback universal por keyword
-            let openBtn: HTMLElement | null = null
-            openBtn = Array.from(
-              document.querySelectorAll<HTMLElement>('button[aria-label]')
-            ).find(b => {
-              if (b.closest('ytd-engagement-panel-section-list-renderer')) return false
-              // Exclui botoes do player de video (ficam dentro de .ytp-chrome-controls)
-              if (b.closest('.ytp-chrome-controls')) return false
-              if (b.closest('.ytp-right-controls')) return false
-              if (b.closest('.ytp-left-controls')) return false
-              const label = (b.getAttribute('aria-label') ?? '').toLowerCase()
-              return (
-                label.includes('transcript') || label.includes('transcri') ||
-                label.includes('\u5b57\u5e55') || label.includes('\uc790\ub9c9') ||
-                label.includes('legenda') || label.includes('caption')
-              )
-            }) ?? null
-
-            if (!openBtn) {
-              for (const label of OPEN_LABELS) {
-                const all = Array.from(
-                  document.querySelectorAll<HTMLElement>(`button[aria-label="${label}"]`)
-                ).filter(b => !b.closest("ytd-engagement-panel-section-list-renderer"))
-                if (all.length > 0) { openBtn = all[0]; break }
-              }
-            }
-            if (!openBtn) {
-              removeHideStyle()
-              return { totalSegments: 0, filteredSegments: 0, text: "__ERROR__:Bot\u00e3o de transcri\u00e7\u00e3o n\u00e3o encontrado. O v\u00eddeo possui legendas?" }
-            }
-
-            // 3. Abre painel via botao (sempre, ja garantimos fechamento acima)
-            openBtn.click()
-
-            // 4. Aguarda segmentos em qualquer painel
-            const found = await waitForSegmentsAnyPanel(8000)
-
-            if (!found || found.segments.length === 0) {
-              removeHideStyle()
-              return { totalSegments: 0, filteredSegments: 0, text: "__ERROR__:Nenhum segmento encontrado. O v\u00eddeo possui legenda?" }
-            }
-
-            const { segments, isNewFormat } = found
-
-            // 5. Filtrar pelo intervalo
-            const tsSelector  = isNewFormat ? TS_NEW  : TS_OLD
-            const txtSelector = isNewFormat ? TXT_NEW : TXT_OLD
-            const lines: string[] = []
-            for (const seg of segments) {
-              const tsEl  = seg.querySelector(tsSelector)
-              const txtEl = seg.querySelector(txtSelector)
-              if (!tsEl || !txtEl) continue
-              const seconds = timeToSeconds(tsEl.textContent ?? "")
-              const text    = (txtEl.textContent ?? "").trim()
-              if (seconds >= safeStart && seconds <= safeEnd && text) lines.push(text)
-            }
-            // 6. Fechar painel
-            let closeBtn: HTMLElement | null = null
-            for (const label of CLOSE_LABELS) {
-              const all = Array.from(
-                document.querySelectorAll<HTMLElement>(`button[aria-label="${label}"]`)
-              ).filter(b => !b.closest("ytd-engagement-panel-section-list-renderer"))
-              if (all.length > 0) { closeBtn = all[0]; break }
-            }
-            if (closeBtn) {
-              closeBtn.click()
-            } else {
-              document.querySelectorAll("ytd-engagement-panel-section-list-renderer").forEach(el => {
-                if (el.getAttribute("visibility") === "ENGAGEMENT_PANEL_VISIBILITY_EXPANDED") {
-                  el.setAttribute("visibility", "ENGAGEMENT_PANEL_VISIBILITY_HIDDEN")
-                }
-              })
-            }
-            removeHideStyle()
-
-            // 7. Retornar
-            const text = lines.length > 0
-              ? lines.join(" ")
-              : "__ERROR__:Nenhuma legenda encontrada no intervalo selecionado."
-            return { totalSegments: segments.length, filteredSegments: lines.length, text }
-          },
-          args: [safeStart, safeEnd]
-        })
-
-        const payloadResult = result?.result as
-          | { text?: string; totalSegments?: number; filteredSegments?: number }
-          | undefined
-
-        if (!payloadResult) return this.fail("Falha ao executar script na pagina do YouTube.")
-
-        const text = String(payloadResult.text ?? "")
-        if (!text || text.startsWith("__ERROR__:")) {
-          return this.fail(text.replace("__ERROR__:", "").trim() || "Erro desconhecido.")
-        }
-
-        return this.ok({ text: text.trim(), eventsCount: payloadResult.totalSegments ?? 0 })
-      } catch (err: any) {
-        if (IS_DEV) {
-          console.error("[SNIPER][BG] executeScript falhou:", err?.message ?? err)
-        }
-        return this.fail("executeScript falhou: " + (err?.message ?? "erro desconhecido"))
+      const url = new URL(normalized)
+      if (!url.searchParams.has("fmt")) {
+        url.searchParams.set("fmt", "json3")
       }
-    } catch (err: any) {
-      if (IS_DEV) {
-        console.error("[SNIPER][BG] erro:", err?.message ?? err)
-      }
-      return this.fail(err?.message ?? "erro desconhecido")
+      return url.toString()
+    } catch {
+      return null
     }
   }
 
+  private dedupeTranscriptLines(lines: string[]): string[] {
+    const deduped: string[] = []
+    for (const rawLine of lines) {
+      const line = String(rawLine ?? "").trim()
+      if (!line) {
+        continue
+      }
+      if (deduped[deduped.length - 1] !== line) {
+        deduped.push(line)
+      }
+    }
+    return deduped
+  }
+
+  private pickTranscriptLinesForRange(
+    cues: Array<{ startMs: number; endMs: number; text: string }>,
+    rangeStartMs: number,
+    rangeEndMs: number
+  ): string[] {
+    const lines = cues
+      .filter((cue) => cue.endMs >= rangeStartMs && cue.startMs <= rangeEndMs)
+      .map((cue) => cue.text)
+
+    return this.dedupeTranscriptLines(lines)
+  }
+
+  private nearestCueDistanceMs(
+    cues: Array<{ startMs: number; endMs: number; text: string }>,
+    targetMs: number
+  ): number {
+    if (!Array.isArray(cues) || cues.length === 0) {
+      return Number.POSITIVE_INFINITY
+    }
+
+    let bestDistance = Number.POSITIVE_INFINITY
+    for (const cue of cues) {
+      const midpointMs = Math.round((cue.startMs + cue.endMs) / 2)
+      const distance = Math.abs(midpointMs - targetMs)
+      if (distance < bestDistance) {
+        bestDistance = distance
+      }
+    }
+    return bestDistance
+  }
+
+  private pickNearestTranscriptLines(
+    cues: Array<{ startMs: number; endMs: number; text: string }>,
+    rangeStartMs: number,
+    rangeEndMs: number,
+    maxLines = 24
+  ): string[] {
+    if (!Array.isArray(cues) || cues.length === 0) {
+      return []
+    }
+
+    const targetMs = Math.round((rangeStartMs + rangeEndMs) / 2)
+    let nearestIndex = 0
+    let nearestDistance = Number.POSITIVE_INFINITY
+
+    for (let index = 0; index < cues.length; index += 1) {
+      const cue = cues[index]
+      const midpointMs = Math.round((cue.startMs + cue.endMs) / 2)
+      const distance = Math.abs(midpointMs - targetMs)
+      if (distance < nearestDistance) {
+        nearestDistance = distance
+        nearestIndex = index
+      }
+    }
+
+    const halfWindow = Math.max(1, Math.floor(maxLines / 2))
+    const startIndex = Math.max(0, nearestIndex - halfWindow)
+    const endIndex = Math.min(cues.length, startIndex + maxLines)
+    const lines = cues.slice(startIndex, endIndex).map((cue) => cue.text)
+    return this.dedupeTranscriptLines(lines)
+  }
+
+  private extractCaptionTextFromJson3(
+    rawBody: string,
+    rangeStartMs: number,
+    rangeEndMs: number
+  ): string | null {
+    let parsed: { events?: Array<{ tStartMs?: number; dDurationMs?: number; segs?: unknown[] }> } | null = null
+    try {
+      parsed = JSON.parse(rawBody) as {
+        events?: Array<{ tStartMs?: number; dDurationMs?: number; segs?: unknown[] }>
+      }
+    } catch {
+      parsed = null
+    }
+
+    if (!parsed || !Array.isArray(parsed.events)) {
+      return null
+    }
+
+    const cuesAssumingMs: Array<{ startMs: number; endMs: number; text: string }> = []
+    const cuesAssumingSec: Array<{ startMs: number; endMs: number; text: string }> = []
+
+    for (const event of parsed.events) {
+      const startValue = Number(event?.tStartMs)
+      if (!Number.isFinite(startValue) || startValue < 0) {
+        continue
+      }
+
+      const segments = Array.isArray(event?.segs) ? event.segs : []
+      const rawText = segments
+        .map((segment) => {
+          if (!segment || typeof segment !== "object") {
+            return ""
+          }
+          return String((segment as { utf8?: unknown }).utf8 ?? "")
+        })
+        .join("")
+      const normalizedText = this.normalizeTranscriptText(rawText)
+      if (!normalizedText) {
+        continue
+      }
+
+      const durationValue = Number(event?.dDurationMs)
+      const durationMsForMsScale =
+        Number.isFinite(durationValue) && durationValue > 0 ? Math.round(durationValue) : 2500
+      const durationMsForSecScale =
+        Number.isFinite(durationValue) && durationValue > 0 ? Math.round(durationValue * 1000) : 2500
+
+      const startMsAssumingMs = Math.round(startValue)
+      const endMsAssumingMs = startMsAssumingMs + durationMsForMsScale
+      cuesAssumingMs.push({
+        startMs: startMsAssumingMs,
+        endMs: endMsAssumingMs,
+        text: normalizedText
+      })
+
+      const startMsAssumingSec = Math.round(startValue * 1000)
+      const endMsAssumingSec = startMsAssumingSec + durationMsForSecScale
+      cuesAssumingSec.push({
+        startMs: startMsAssumingSec,
+        endMs: endMsAssumingSec,
+        text: normalizedText
+      })
+    }
+
+    const linesMs = this.pickTranscriptLinesForRange(cuesAssumingMs, rangeStartMs, rangeEndMs)
+    const linesSec = this.pickTranscriptLinesForRange(cuesAssumingSec, rangeStartMs, rangeEndMs)
+
+    const selectedLinesByRange = linesMs.length >= linesSec.length ? linesMs : linesSec
+    if (selectedLinesByRange.length > 0) {
+      return selectedLinesByRange.join("\n").trim() || null
+    }
+
+    const targetMs = Math.round((rangeStartMs + rangeEndMs) / 2)
+    const distanceMs = this.nearestCueDistanceMs(cuesAssumingMs, targetMs)
+    const distanceSec = this.nearestCueDistanceMs(cuesAssumingSec, targetMs)
+    const nearestLines =
+      distanceMs <= distanceSec
+        ? this.pickNearestTranscriptLines(cuesAssumingMs, rangeStartMs, rangeEndMs)
+        : this.pickNearestTranscriptLines(cuesAssumingSec, rangeStartMs, rangeEndMs)
+
+    const mergedNearest = nearestLines.join("\n").trim()
+    return mergedNearest || null
+  }
+
+  private extractCaptionTextFromXml(
+    rawBody: string,
+    rangeStartMs: number,
+    rangeEndMs: number
+  ): string | null {
+    const cuesAssumingMs: Array<{ startMs: number; endMs: number; text: string }> = []
+    const cuesAssumingSec: Array<{ startMs: number; endMs: number; text: string }> = []
+
+    const genericNodeRegex = /<(text|p)\b([^>]*)>([\s\S]*?)<\/\1>/giu
+    let match: RegExpExecArray | null
+
+    while ((match = genericNodeRegex.exec(rawBody)) !== null) {
+      const tagName = String(match[1] ?? "").toLowerCase()
+      const attrs = String(match[2] ?? "")
+      const body = String(match[3] ?? "")
+
+      const startSecRaw = /(?:^|\s)start="([^"]+)"/u.exec(attrs)?.[1]
+      const durSecRaw = /(?:^|\s)dur="([^"]+)"/u.exec(attrs)?.[1]
+      const startMsRaw = /(?:^|\s)t="([^"]+)"/u.exec(attrs)?.[1]
+      const durMsRaw = /(?:^|\s)d="([^"]+)"/u.exec(attrs)?.[1]
+
+      const normalizedText = this.normalizeTranscriptText(body)
+      if (!normalizedText) {
+        continue
+      }
+
+      if (tagName === "text" || startSecRaw !== undefined || durSecRaw !== undefined) {
+        const startSec = Number(startSecRaw ?? "")
+        if (!Number.isFinite(startSec) || startSec < 0) {
+          continue
+        }
+
+        const durSec = Number(durSecRaw ?? "")
+        const startMs = Math.round(startSec * 1000)
+        const endMs =
+          Number.isFinite(durSec) && durSec > 0 ? startMs + Math.round(durSec * 1000) : startMs + 2500
+        cuesAssumingMs.push({ startMs, endMs, text: normalizedText })
+        cuesAssumingSec.push({ startMs, endMs, text: normalizedText })
+        continue
+      }
+
+      const startValue = Number(startMsRaw ?? "")
+      if (!Number.isFinite(startValue) || startValue < 0) {
+        continue
+      }
+
+      const durValue = Number(durMsRaw ?? "")
+
+      const startMsAssumingMs = Math.round(startValue)
+      const endMsAssumingMs =
+        Number.isFinite(durValue) && durValue > 0
+          ? startMsAssumingMs + Math.round(durValue)
+          : startMsAssumingMs + 2500
+
+      const startMsAssumingSec = Math.round(startValue * 1000)
+      const endMsAssumingSec =
+        Number.isFinite(durValue) && durValue > 0
+          ? startMsAssumingSec + Math.round(durValue * 1000)
+          : startMsAssumingSec + 2500
+
+      cuesAssumingMs.push({ startMs: startMsAssumingMs, endMs: endMsAssumingMs, text: normalizedText })
+      cuesAssumingSec.push({
+        startMs: startMsAssumingSec,
+        endMs: endMsAssumingSec,
+        text: normalizedText
+      })
+    }
+
+    const linesMs = this.pickTranscriptLinesForRange(cuesAssumingMs, rangeStartMs, rangeEndMs)
+    const linesSec = this.pickTranscriptLinesForRange(cuesAssumingSec, rangeStartMs, rangeEndMs)
+
+    const selectedLinesByRange = linesMs.length >= linesSec.length ? linesMs : linesSec
+    if (selectedLinesByRange.length > 0) {
+      return selectedLinesByRange.join("\n").trim() || null
+    }
+
+    const targetMs = Math.round((rangeStartMs + rangeEndMs) / 2)
+    const distanceMs = this.nearestCueDistanceMs(cuesAssumingMs, targetMs)
+    const distanceSec = this.nearestCueDistanceMs(cuesAssumingSec, targetMs)
+    const nearestLines =
+      distanceMs <= distanceSec
+        ? this.pickNearestTranscriptLines(cuesAssumingMs, rangeStartMs, rangeEndMs)
+        : this.pickNearestTranscriptLines(cuesAssumingSec, rangeStartMs, rangeEndMs)
+
+    const mergedNearest = nearestLines.join("\n").trim()
+    return mergedNearest || null
+  }
+
+  private extractAllCaptionTextFromJson3(rawBody: string): string | null {
+    try {
+      const parsed = JSON.parse(rawBody) as { events?: Array<{ segs?: unknown[] }> }
+      if (!parsed || !Array.isArray(parsed.events)) {
+        return null
+      }
+
+      const lines = parsed.events
+        .map((event) => {
+          const segments = Array.isArray(event?.segs) ? event.segs : []
+          const rawText = segments
+            .map((segment) => {
+              if (!segment || typeof segment !== "object") {
+                return ""
+              }
+              return String((segment as { utf8?: unknown }).utf8 ?? "")
+            })
+            .join("")
+          return this.normalizeTranscriptText(rawText)
+        })
+        .filter(Boolean)
+
+      const merged = this.dedupeTranscriptLines(lines).join("\n").trim()
+      return merged || null
+    } catch {
+      return null
+    }
+  }
+
+  private extractAllCaptionTextFromVtt(rawBody: string): string | null {
+    const trimmed = String(rawBody ?? "").trim()
+    if (!/^WEBVTT/i.test(trimmed)) {
+      return null
+    }
+
+    const lines = trimmed
+      .split(/\r?\n/u)
+      .map((line) => line.trim())
+      .filter((line) => {
+        if (!line) return false
+        if (/^WEBVTT$/i.test(line)) return false
+        if (/^\d+$/u.test(line)) return false
+        if (/^\d{1,2}:\d{2}(?::\d{2})?\.\d{3}\s+-->\s+\d{1,2}:\d{2}(?::\d{2})?\.\d{3}$/u.test(line)) {
+          return false
+        }
+        return true
+      })
+      .map((line) => this.normalizeTranscriptText(line))
+      .filter(Boolean)
+
+    const merged = this.dedupeTranscriptLines(lines).join("\n").trim()
+    return merged || null
+  }
+
+  private parseVttTimestampToMs(rawValue: string): number {
+    const normalized = String(rawValue ?? "").trim()
+    const parts = normalized.split(":")
+    if (parts.length < 2 || parts.length > 3) {
+      return NaN
+    }
+
+    const hasHours = parts.length === 3
+    const hours = hasHours ? Number(parts[0]) : 0
+    const minutes = Number(parts[hasHours ? 1 : 0])
+    const secAndMs = String(parts[hasHours ? 2 : 1] ?? "")
+    const [secRaw, msRaw] = secAndMs.split(".")
+    const seconds = Number(secRaw)
+    const milliseconds = Number((msRaw ?? "0").padEnd(3, "0").slice(0, 3))
+
+    if (
+      !Number.isFinite(hours) ||
+      !Number.isFinite(minutes) ||
+      !Number.isFinite(seconds) ||
+      !Number.isFinite(milliseconds)
+    ) {
+      return NaN
+    }
+
+    return Math.round((((hours * 60 + minutes) * 60 + seconds) * 1000) + milliseconds)
+  }
+
+  private extractCaptionTextFromVttRange(
+    rawBody: string,
+    rangeStartMs: number,
+    rangeEndMs: number
+  ): string | null {
+    const trimmed = String(rawBody ?? "").trim()
+    if (!/^WEBVTT/i.test(trimmed)) {
+      return null
+    }
+
+    const blocks = trimmed.split(/\r?\n\r?\n/u)
+    const cues: Array<{ startMs: number; endMs: number; text: string }> = []
+
+    for (const block of blocks) {
+      const lines = block
+        .split(/\r?\n/u)
+        .map((line) => line.trim())
+        .filter(Boolean)
+      if (lines.length < 2) {
+        continue
+      }
+
+      const timeLineIndex = lines.findIndex((line) => line.includes("-->"))
+      if (timeLineIndex < 0) {
+        continue
+      }
+
+      const timeLine = lines[timeLineIndex]
+      const [startRaw, endRaw] = timeLine.split("-->").map((value) => String(value ?? "").trim())
+      const startMs = this.parseVttTimestampToMs(startRaw)
+      const endMs = this.parseVttTimestampToMs(endRaw)
+      if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) {
+        continue
+      }
+
+      const cueText = lines
+        .slice(timeLineIndex + 1)
+        .map((line) => this.normalizeTranscriptText(line))
+        .filter(Boolean)
+        .join(" ")
+        .trim()
+      if (!cueText) {
+        continue
+      }
+
+      cues.push({ startMs, endMs, text: cueText })
+    }
+
+    const lines = this.pickTranscriptLinesForRange(cues, rangeStartMs, rangeEndMs)
+    if (lines.length > 0) {
+      return lines.join("\n").trim() || null
+    }
+
+    const nearest = this.pickNearestTranscriptLines(cues, rangeStartMs, rangeEndMs)
+    const mergedNearest = nearest.join("\n").trim()
+    return mergedNearest || null
+  }
+
+  private extractAllCaptionTextFromXml(rawBody: string): string | null {
+    const lines: string[] = []
+    const nodeRegex = /<(text|p|s|span)\b[^>]*>([\s\S]*?)<\/\1>/giu
+    let match: RegExpExecArray | null
+
+    while ((match = nodeRegex.exec(rawBody)) !== null) {
+      const normalized = this.normalizeTranscriptText(String(match[2] ?? ""))
+      if (!normalized) {
+        continue
+      }
+      lines.push(normalized)
+    }
+
+    const merged = this.dedupeTranscriptLines(lines).join("\n").trim()
+    return merged || null
+  }
+
+  private extractAnyCaptionText(rawBody: string): string | null {
+    const fromJson = this.extractAllCaptionTextFromJson3(rawBody)
+    if (fromJson) {
+      return fromJson
+    }
+
+    const fromVtt = this.extractAllCaptionTextFromVtt(rawBody)
+    if (fromVtt) {
+      return fromVtt
+    }
+
+    return this.extractAllCaptionTextFromXml(rawBody)
+  }
+
+  private buildTimedTextFallbackUrls(videoId: string): string[] {
+    const normalizedVideoId = String(videoId ?? "").trim()
+    if (!normalizedVideoId) {
+      return []
+    }
+
+    const langCandidates = ["pt-BR", "pt", "en"]
+    const formatCandidates = ["json3", "vtt"]
+    const kindCandidates = ["", "asr"]
+    const urls = new Set<string>()
+
+    for (const lang of langCandidates) {
+      for (const fmt of formatCandidates) {
+        for (const kind of kindCandidates) {
+          const url = new URL("https://www.youtube.com/api/timedtext")
+          url.searchParams.set("v", normalizedVideoId)
+          url.searchParams.set("lang", lang)
+          url.searchParams.set("fmt", fmt)
+          if (kind) {
+            url.searchParams.set("kind", kind)
+          }
+          urls.add(url.toString())
+        }
+      }
+    }
+
+    return Array.from(urls)
+  }
+
+  private async fetchCaptionSliceFromTimedTextFallback(
+    videoId: string,
+    rangeStartMs: number,
+    rangeEndMs: number
+  ): Promise<string | null> {
+    const candidateUrls = this.buildTimedTextFallbackUrls(videoId)
+    let looseFallbackText: string | null = null
+
+    for (const candidateUrl of candidateUrls) {
+      try {
+        const response = await fetch(candidateUrl, {
+          method: "GET",
+          credentials: "include"
+        })
+        if (!response.ok) {
+          continue
+        }
+
+        const rawBody = await response.text()
+        const fromJson = this.extractCaptionTextFromJson3(rawBody, rangeStartMs, rangeEndMs)
+        if (fromJson) {
+          return fromJson
+        }
+
+        const fromXml = this.extractCaptionTextFromXml(rawBody, rangeStartMs, rangeEndMs)
+        if (fromXml) {
+          return fromXml
+        }
+
+        const fromVtt = this.extractCaptionTextFromVttRange(rawBody, rangeStartMs, rangeEndMs)
+        if (fromVtt) {
+          return fromVtt
+        }
+
+        const fromAny = this.extractAnyCaptionText(rawBody)
+        if (fromAny && !looseFallbackText) {
+          looseFallbackText = fromAny
+        }
+      } catch {
+        // ignore fallback URL errors and continue
+      }
+    }
+
+    return looseFallbackText
+  }
+
+  private async fetchCaptionSliceFromBaseUrl(
+    baseUrl: string,
+    startSec: number,
+    endSec: number
+  ): Promise<string | null> {
+    const rangeStartMs = Math.max(0, Math.round(startSec * 1000))
+    const rangeEndMs = Math.max(rangeStartMs, Math.round(endSec * 1000))
+    const normalizedBaseUrl = this.normalizeTranscriptBaseUrl(baseUrl)
+    if (!normalizedBaseUrl) {
+      return null
+    }
+
+    const jsonUrl = new URL(normalizedBaseUrl)
+    jsonUrl.searchParams.set("fmt", "json3")
+    const xmlUrl = new URL(normalizedBaseUrl)
+    xmlUrl.searchParams.delete("fmt")
+
+    const candidateUrls = [jsonUrl.toString(), xmlUrl.toString()]
+
+    let lastErrorMessage = ""
+    let fallbackTextWithoutTiming: string | null = null
+
+    for (const candidateUrl of candidateUrls) {
+      try {
+        const response = await fetch(candidateUrl, {
+          method: "GET",
+          credentials: "include"
+        })
+        if (!response.ok) {
+          lastErrorMessage = `HTTP ${response.status}`
+          continue
+        }
+
+        const rawBody = await response.text()
+        const fromJson = this.extractCaptionTextFromJson3(rawBody, rangeStartMs, rangeEndMs)
+        if (fromJson) {
+          return fromJson
+        }
+
+        const fromXml = this.extractCaptionTextFromXml(rawBody, rangeStartMs, rangeEndMs)
+        if (fromXml) {
+          return fromXml
+        }
+
+        const fromAnyFormat = this.extractAnyCaptionText(rawBody)
+        if (fromAnyFormat && !fallbackTextWithoutTiming) {
+          fallbackTextWithoutTiming = fromAnyFormat
+        }
+      } catch (error) {
+        lastErrorMessage =
+          error instanceof Error ? error.message : String(error ?? "Erro ao buscar transcricao")
+      }
+    }
+
+    if (fallbackTextWithoutTiming) {
+      return fallbackTextWithoutTiming
+    }
+
+    if (lastErrorMessage) {
+      throw new Error(lastErrorMessage)
+    }
+
+    return null
+  }
+
+  private extractJsonArrayAt(source: string, startIndex: number): string | null {
+    if (startIndex < 0 || startIndex >= source.length || source[startIndex] !== "[") {
+      return null
+    }
+
+    let depth = 0
+    let inString = false
+    let escaped = false
+
+    for (let index = startIndex; index < source.length; index += 1) {
+      const ch = source[index]
+
+      if (escaped) {
+        escaped = false
+        continue
+      }
+      if (ch === "\\") {
+        escaped = true
+        continue
+      }
+      if (ch === '"') {
+        inString = !inString
+        continue
+      }
+      if (inString) {
+        continue
+      }
+
+      if (ch === "[") {
+        depth += 1
+      } else if (ch === "]") {
+        depth -= 1
+        if (depth === 0) {
+          return source.slice(startIndex, index + 1)
+        }
+      }
+    }
+
+    return null
+  }
+
+  private extractCaptionTracksFromWatchHtml(
+    html: string
+  ): Array<{ baseUrl?: string; languageCode?: string; kind?: string; vssId?: string }> {
+    const marker = '"captionTracks":'
+    const markerIndex = html.indexOf(marker)
+    if (markerIndex < 0) {
+      return []
+    }
+
+    const arrayStart = html.indexOf("[", markerIndex + marker.length)
+    const arrayText = this.extractJsonArrayAt(html, arrayStart)
+    if (!arrayText) {
+      return []
+    }
+
+    try {
+      const parsed = JSON.parse(arrayText)
+      return Array.isArray(parsed)
+        ? (parsed as Array<{ baseUrl?: string; languageCode?: string; kind?: string; vssId?: string }>)
+        : []
+    } catch {
+      return []
+    }
+  }
+
+  private pickCaptionTrackBaseUrl(
+    tracks: Array<{ baseUrl?: string; languageCode?: string; kind?: string; vssId?: string }>
+  ): string | null {
+    if (!Array.isArray(tracks) || tracks.length === 0) {
+      return null
+    }
+
+    const asrTrack =
+      tracks.find((track) => String(track?.kind ?? "").toLowerCase() === "asr") ??
+      tracks.find((track) => String(track?.vssId ?? "").toLowerCase().includes(".pt")) ??
+      tracks.find((track) => String(track?.languageCode ?? "").toLowerCase().startsWith("pt")) ??
+      tracks[0]
+
+    return this.normalizeTranscriptBaseUrl(asrTrack?.baseUrl ?? "")
+  }
+
+  private async resolveCaptionBaseUrlForVideo(videoId: string): Promise<string | null> {
+    const normalizedVideoId = String(videoId ?? "").trim()
+    if (!normalizedVideoId) {
+      return null
+    }
+
+    const watchUrl = `https://www.youtube.com/watch?v=${encodeURIComponent(normalizedVideoId)}&hl=pt-BR`
+    const response = await fetch(watchUrl, {
+      method: "GET",
+      credentials: "include"
+    })
+    if (!response.ok) {
+      return null
+    }
+
+    const html = await response.text()
+    const tracks = this.extractCaptionTracksFromWatchHtml(html)
+    return this.pickCaptionTrackBaseUrl(tracks)
+  }
+
+  private async handleFetchSniperTranscript(payload: unknown): Promise<StandardResponse> {
+    const record = this.asRecord(payload)
+    if (!record) {
+      return this.fail("Payload invalido para FETCH_SNIPER_TRANSCRIPT.")
+    }
+
+    const videoId = this.normalizeBoundedString(record.videoId, 128)
+    if (!videoId) {
+      return this.fail("videoId ausente para extrair transcricao.")
+    }
+
+    const startSecRaw = Number(record.startSec)
+    const endSecRaw = Number(record.endSec)
+    if (!Number.isFinite(startSecRaw) || !Number.isFinite(endSecRaw)) {
+      return this.fail("Intervalo invalido para extrair transcricao.")
+    }
+
+    const startSec = Math.max(0, Math.min(startSecRaw, endSecRaw))
+    const endSec = Math.max(startSec, Math.max(startSecRaw, endSecRaw))
+
+    const fromPayloadBaseUrl = this.normalizeTranscriptBaseUrl(record.baseUrl)
+    let resolvedBaseUrl = fromPayloadBaseUrl
+    if (!resolvedBaseUrl) {
+      try {
+        resolvedBaseUrl = await this.resolveCaptionBaseUrlForVideo(videoId)
+      } catch {
+        resolvedBaseUrl = null
+      }
+    }
+
+    if (!resolvedBaseUrl) {
+      const fallbackWithoutBaseUrl = await this.fetchCaptionSliceFromTimedTextFallback(
+        videoId,
+        Math.max(0, Math.round(startSec * 1000)),
+        Math.max(0, Math.round(endSec * 1000))
+      )
+      if (fallbackWithoutBaseUrl) {
+        return this.ok({ text: fallbackWithoutBaseUrl })
+      }
+      return this.fail("No transcript available for this video.")
+    }
+
+    try {
+      const text = await this.fetchCaptionSliceFromBaseUrl(resolvedBaseUrl, startSec, endSec)
+      if (!text) {
+        const fallbackWithoutInterval = await this.fetchCaptionSliceFromTimedTextFallback(
+          videoId,
+          Math.max(0, Math.round(startSec * 1000)),
+          Math.max(0, Math.round(endSec * 1000))
+        )
+        if (fallbackWithoutInterval) {
+          return this.ok({ text: fallbackWithoutInterval })
+        }
+        return this.fail("Nenhum texto encontrado no intervalo selecionado.")
+      }
+      return this.ok({ text })
+    } catch (error) {
+      const fallbackAfterError = await this.fetchCaptionSliceFromTimedTextFallback(
+        videoId,
+        Math.max(0, Math.round(startSec * 1000)),
+        Math.max(0, Math.round(endSec * 1000))
+      )
+      if (fallbackAfterError) {
+        return this.ok({ text: fallbackAfterError })
+      }
+
+      const details = error instanceof Error ? error.message : String(error ?? "Erro desconhecido")
+      return this.fail(`Falha ao extrair transcricao: ${details}`)
+    }
+  }
+
+  private async handleCreateCheckout(payload: unknown): Promise<StandardResponse> {
+    const { priceId, openInTab } = (payload ?? {}) as { priceId?: string; openInTab?: boolean }
+    if (!priceId) {
+      return this.fail("priceId ausente.")
+    }
+
+    const currentUser = await authManager.initializeSession()
+    const isDevBypassUser =
+      String(currentUser?.id ?? "").trim() === "dev-thinker-test-user" ||
+      String(currentUser?.email ?? "")
+        .trim()
+        .toLowerCase()
+        .endsWith("@minddock.local")
+    if (isDevBypassUser) {
+      return this.fail(
+        "Checkout indisponivel sem login real. Faca login com Google para abrir Stripe Checkout."
+      )
+    }
+
+    const resolveTargetTierFromPriceId = (id: string): SubscriptionTier | null => {
+      const normalizedId = String(id ?? "").trim()
+      if (!normalizedId) {
+        return null
+      }
+
+      if (normalizedId === STRIPE_PRICES.pro_monthly || normalizedId === STRIPE_PRICES.pro_yearly) {
+        return "pro"
+      }
+
+      if (
+        normalizedId === STRIPE_PRICES.thinker_monthly ||
+        normalizedId === STRIPE_PRICES.thinker_yearly
+      ) {
+        return "thinker"
+      }
+
+      return null
+    }
+
+    const normalizeTier = (rawTier: unknown): SubscriptionTier => {
+      const candidate = String(rawTier ?? "")
+        .trim()
+        .toLowerCase()
+      if (candidate === "pro" || candidate === "thinker" || candidate === "thinker_pro") {
+        return candidate
+      }
+      return "free"
+    }
+
+    const targetTier = resolveTargetTierFromPriceId(priceId)
+    const tierRank: Record<SubscriptionTier, number> = {
+      free: 0,
+      pro: 1,
+      thinker: 2,
+      thinker_pro: 3
+    }
+
+    const sessionTier = normalizeTier(currentUser?.subscriptionTier)
+    const sessionStatus = String(currentUser?.subscriptionStatus ?? "")
+      .trim()
+      .toLowerCase()
+    const sessionHasActivePaidPlan =
+      (sessionStatus === "active" || sessionStatus === "trialing") && sessionTier !== "free"
+
+    // Server-side truth fallback: avoids stale profile cache in popup/auth session.
+    let resolvedTier = sessionTier
+    if (sessionHasActivePaidPlan !== true) {
+      try {
+        await subscriptionManager.invalidate()
+        resolvedTier = await subscriptionManager.getTier()
+      } catch {
+        resolvedTier = sessionTier
+      }
+    }
+
+    const hasActivePaidPlan = resolvedTier !== "free"
+
+    if (hasActivePaidPlan && resolvedTier === "thinker_pro") {
+      return this.fail(
+        "Sua conta ja esta no Thinker Pro ativo. Use Subscription para gerenciar alteracoes de plano."
+      )
+    }
+
+    if (hasActivePaidPlan && targetTier && tierRank[resolvedTier] >= tierRank[targetTier]) {
+      return this.fail(
+        "Sua conta ja possui um plano ativo igual ou superior. Use Subscription para gerenciar alteracoes."
+      )
+    }
+
+    let supabaseUrl = ""
+    let supabaseAnonKey = ""
+    try {
+      const config = await authManager.getSupabaseConfig()
+      supabaseUrl = String(config.url ?? "").trim()
+      supabaseAnonKey = String(config.anonKey ?? "").trim()
+    } catch (configError) {
+      return this.fail(
+        `Falha ao resolver configuracao do Supabase para checkout: ${String(
+          configError instanceof Error ? configError.message : configError
+        )}`
+      )
+    }
+
+    if (!supabaseUrl) {
+      return this.fail("Supabase URL nao configurada.")
+    }
+
+    const normalizeJwt = (rawToken: string | null | undefined): string | null => {
+      let normalized = String(rawToken ?? "").trim()
+      if (!normalized) return null
+      if (/^bearer\s+/i.test(normalized)) {
+        normalized = normalized.replace(/^bearer\s+/i, "").trim()
+      }
+      if (
+        (normalized.startsWith('"') && normalized.endsWith('"')) ||
+        (normalized.startsWith("'") && normalized.endsWith("'"))
+      ) {
+        normalized = normalized.slice(1, -1).trim()
+      }
+      const parts = normalized.split(".")
+      if (parts.length !== 3 || parts.some((part) => !part.trim())) {
+        return null
+      }
+      return normalized
+    }
+
+    const rawToken = await authManager.getVerifiedAccessToken()
+    const token = normalizeJwt(rawToken)
+    if (!token) {
+      return this.fail("Sessao de login invalida para billing. Faca login novamente.")
+    }
+
+    const extractJwtRef = (jwt: string | null | undefined): string | null => {
+      const raw = String(jwt ?? "").trim()
+      if (!raw) return null
+      const parts = raw.split(".")
+      if (parts.length < 2) return null
+      const payloadPart = parts[1].replace(/-/g, "+").replace(/_/g, "/")
+      const padded = payloadPart.padEnd(Math.ceil(payloadPart.length / 4) * 4, "=")
+
+      try {
+        const decoded = atob(padded)
+        const parsed = JSON.parse(decoded) as { ref?: unknown }
+        const ref = String(parsed?.ref ?? "").trim()
+        return ref || null
+      } catch {
+        return null
+      }
+    }
+
+    const extractProjectRefFromUrl = (url: string): string | null => {
+      try {
+        const host = new URL(url).hostname
+        const ref = String(host.split(".")[0] ?? "").trim()
+        return ref || null
+      } catch {
+        return null
+      }
+    }
+
+    const projectRef = extractProjectRefFromUrl(supabaseUrl)
+    const tokenRef = extractJwtRef(token)
+    const anonRef = extractJwtRef(supabaseAnonKey)
+    const shouldSendApiKey =
+      Boolean(supabaseAnonKey) && (!projectRef || !anonRef || anonRef === projectRef)
+
+    const fallbackUrlFromTokenRef =
+      tokenRef && tokenRef !== projectRef ? `https://${tokenRef}.supabase.co` : null
+
+    const requestTargets: Array<{ baseUrl: string; apiKey: string; label: string }> = []
+    if (fallbackUrlFromTokenRef) {
+      requestTargets.push({
+        baseUrl: fallbackUrlFromTokenRef,
+        apiKey: anonRef === tokenRef ? supabaseAnonKey : "",
+        label: "token-ref"
+      })
+    }
+
+    requestTargets.push({
+      baseUrl: supabaseUrl,
+      apiKey: shouldSendApiKey ? supabaseAnonKey : "",
+      label: "config"
+    })
+
+    const callCheckout = async (
+      baseUrl: string,
+      accessToken: string,
+      apiKey: string
+    ): Promise<{ res: Response; rawBody: string; json: { url?: string; error?: string } | null }> => {
+      const res = await fetch(`${baseUrl}/functions/v1/create-checkout`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${accessToken}`,
+          ...(apiKey ? { apikey: apiKey } : {})
+        },
+        body: JSON.stringify({ priceId })
+      })
+
+      const rawBody = await res.text()
+      let json: { url?: string; error?: string } | null = null
+      try {
+        json = JSON.parse(rawBody) as { url?: string; error?: string }
+      } catch {
+        json = null
+      }
+
+      return { res, rawBody, json }
+    }
+
+    const openCheckout = async (checkoutUrl: string): Promise<StandardResponse> => {
+      const shouldOpenInTab = openInTab !== false
+      if (shouldOpenInTab) {
+        try {
+          await this.openUrlInTab(checkoutUrl)
+        } catch (openError) {
+          return this.fail(
+            `Checkout criado, mas nao foi possivel abrir a aba: ${String(
+              openError instanceof Error ? openError.message : openError
+            )}`,
+            { url: checkoutUrl, opened: false }
+          )
+        }
+      }
+
+      return this.ok({ url: checkoutUrl, opened: shouldOpenInTab })
+    }
+
+    try {
+      let lastJwtError: string | null = null
+
+      for (const target of requestTargets) {
+        let tokenToUse = token
+
+        const firstAttempt = await callCheckout(target.baseUrl, tokenToUse, target.apiKey)
+        if (firstAttempt.res.ok) {
+          const checkoutUrl = String(firstAttempt.json?.url ?? "").trim()
+          if (!checkoutUrl) {
+            return this.fail("Checkout sem URL retornada pela funcao.")
+          }
+          return openCheckout(checkoutUrl)
+        }
+
+        const firstErrorMessage =
+          String(firstAttempt.json?.error ?? firstAttempt.rawBody ?? "").trim() ||
+          `Erro ao criar checkout (${firstAttempt.res.status})`
+        const firstIsJwtError = /invalid jwt|jwt/i.test(firstErrorMessage)
+
+        if (!firstIsJwtError) {
+          return this.fail(
+            `Checkout falhou (${target.label}, status ${firstAttempt.res.status}): ${firstErrorMessage}`
+          )
+        }
+
+        lastJwtError = firstErrorMessage
+
+        const refreshedToken = normalizeJwt(await authManager.refreshAccessToken(null))
+        if (!refreshedToken || refreshedToken === tokenToUse) {
+          continue
+        }
+
+        tokenToUse = refreshedToken
+        const retryAttempt = await callCheckout(target.baseUrl, tokenToUse, target.apiKey)
+        if (retryAttempt.res.ok) {
+          const checkoutUrl = String(retryAttempt.json?.url ?? "").trim()
+          if (!checkoutUrl) {
+            return this.fail("Checkout sem URL retornada pela funcao.")
+          }
+          return openCheckout(checkoutUrl)
+        }
+
+        const retryErrorMessage =
+          String(retryAttempt.json?.error ?? retryAttempt.rawBody ?? "").trim() ||
+          `Erro ao criar checkout (${retryAttempt.res.status})`
+        const retryIsJwtError = /invalid jwt|jwt/i.test(retryErrorMessage)
+
+        if (!retryIsJwtError) {
+          return this.fail(
+            `Checkout falhou (${target.label}, status ${retryAttempt.res.status}): ${retryErrorMessage}`
+          )
+        }
+
+        lastJwtError = retryErrorMessage
+      }
+
+      return this.fail(
+        `BILL-CHK-V4 Sessao invalida ou expirada para billing. Faca login novamente e tente o checkout. [project=${projectRef ?? "n/a"} token=${tokenRef ?? "n/a"} anon=${anonRef ?? "n/a"} apikey=${shouldSendApiKey ? "on" : "off"} targets=${requestTargets.map((target) => target.label).join(",")} detail=${lastJwtError ?? "n/a"}]`
+      )
+    } catch (err) {
+      return this.fail(`Falha ao criar sessao de checkout: ${String(err)}`)
+    }
+  }
+
+  private async handleBrainMerge(payload: unknown): Promise<StandardResponse> {
+    const data = (payload as {
+      notebookSources?: Array<{ notebookId: string; notebookTitle: string; sourceIds: string[] }>
+      goal?: string
+    }) ?? {}
+
+    const notebookSources = Array.isArray(data.notebookSources) ? data.notebookSources : []
+    const goal = String(data.goal ?? "").trim()
+
+    if (notebookSources.length === 0) {
+      return this.fail("Selecione pelo menos um notebook com fontes.")
+    }
+
+    if (!goal) {
+      return this.fail("Descreva o objetivo do Brain Merge.")
+    }
+
+    const authGuard = await this.ensureAuthenticatedForAi()
+    if (authGuard) {
+      return authGuard
+    }
+
+    const rateGuard = await this.enforceAiRateLimit()
+    if (rateGuard) {
+      return rateGuard
+    }
+
+    const canUseAI = await subscriptionManager.canUseFeature("ai_features")
+    if (!canUseAI) {
+      return this.fail("Brain Merge requer plano Thinker ou superior.", {
+        tier_required: "thinker",
+        upgrade_url: "https://minddocklm.digital/#pricing"
+      })
+    }
+
+    const limits = await subscriptionManager.getLimits()
+    const canCallAI = await storageManager.checkUsageLimit(
+      "aiCalls",
+      limits.ai_calls_per_day ?? "unlimited"
+    )
+    if (!canCallAI) {
+      return this.fail("Limite de chamadas de IA atingido para hoje.")
+    }
+
+    const canUseMonthlyBrainMerge = await storageManager.checkAiMonthlyLimit(
+      "brainMerges",
+      limits.brain_merges_per_month ?? "unlimited"
+    )
+    if (!canUseMonthlyBrainMerge) {
+      const brainMergeLimit = limits.brain_merges_per_month
+      return this.fail(
+        typeof brainMergeLimit === "number"
+          ? `Limite mensal do Brain Merge atingido (${brainMergeLimit}/mes).`
+          : "Limite mensal do Brain Merge atingido."
+      )
+    }
+
+    try {
+      const service = new NotebookLMService()
+      const flatSources: Array<{ notebookTitle: string; sourceTitle: string; content: string }> = []
+
+      for (const nb of notebookSources) {
+        const notebookId = String(nb.notebookId ?? "").trim()
+        const notebookTitle = String(nb.notebookTitle ?? "").trim()
+        const sourceIds = Array.isArray(nb.sourceIds)
+          ? nb.sourceIds.map((id) => String(id ?? "").trim()).filter(Boolean)
+          : []
+
+        if (!notebookId || sourceIds.length === 0) continue
+
+        const listedSources = await service.listSources(notebookId).catch(() => [])
+        const sourceTitleById = new Map<string, string>()
+
+        for (const source of listedSources) {
+          const sourceId = String(source.id ?? "").trim()
+          const sourceTitle = String(source.title ?? "").trim() || "Untitled"
+          if (!sourceId) {
+            continue
+          }
+          sourceTitleById.set(sourceId, sourceTitle)
+        }
+
+        const result = await service.getSourcesContent(notebookId, sourceIds)
+        const snippetsBySourceId = result.sourceSnippets
+
+        for (const sourceId of sourceIds) {
+          const snippets = Array.isArray(snippetsBySourceId[sourceId])
+            ? snippetsBySourceId[sourceId]
+            : []
+          if (snippets.length === 0) {
+            continue
+          }
+
+          const sourceTitle = sourceTitleById.get(sourceId) ?? "Untitled"
+          for (const snippet of snippets) {
+            const content = String(snippet ?? "").trim()
+            if (!content) {
+              continue
+            }
+
+            flatSources.push({
+              notebookTitle,
+              sourceTitle,
+              content
+            })
+          }
+        }
+      }
+
+      if (flatSources.length === 0) {
+        return this.fail("Nenhum conteudo encontrado nas fontes selecionadas.")
+      }
+
+      const document = await aiService.brainMerge(flatSources, goal, {
+        surface: "brain_merge_hub",
+        notebookCount: notebookSources.length,
+        sourceSnippetCount: flatSources.length
+      })
+      await storageManager.incrementUsage("aiCalls")
+      await storageManager.incrementAiMonthlyUsage("brainMerges")
+      return this.ok({ document })
+    } catch (error) {
+      return this.fail(error instanceof Error ? error.message : "Falha no Brain Merge.")
+    }
+  }
 }
 
 export const router = new MessageRouter()
+

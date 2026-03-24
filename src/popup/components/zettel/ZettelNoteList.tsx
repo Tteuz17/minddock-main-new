@@ -1,4 +1,4 @@
-import { useState } from "react"
+﻿import { useState } from "react"
 import { motion } from "framer-motion"
 import { Search, FileText, Link2, Plus } from "lucide-react"
 
@@ -24,7 +24,7 @@ export function ZettelNoteList({ onSelectNote }: ZettelNoteListProps) {
 
   const handleCreateNote = async () => {
     const note = await createNote({
-      title: "Nova nota",
+      title: "New note",
       content: "",
       tags: [],
       source: "manual" as const
@@ -41,7 +41,7 @@ export function ZettelNoteList({ onSelectNote }: ZettelNoteListProps) {
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Buscar notas..."
+            placeholder="Search notes..."
             className="flex-1 bg-transparent text-[11px] text-white placeholder:text-zinc-600 focus:outline-none"
           />
           {query && (
@@ -82,7 +82,7 @@ export function ZettelNoteList({ onSelectNote }: ZettelNoteListProps) {
                 <div className="liquid-glass-content">
                   <div className="flex items-start justify-between gap-2">
                     <h3 className="text-[11px] font-semibold leading-tight text-white group-hover:text-action">
-                      {note.title || "Sem titulo"}
+                      {note.title || "Untitled"}
                     </h3>
                     {(note.linkedNoteIds.length > 0 || note.backlinks.length > 0) && (
                       <div className="flex items-center gap-0.5 text-zinc-600">
@@ -150,14 +150,14 @@ function EmptyState({
         <FileText size={16} className="text-zinc-500" />
       </div>
       <p className="text-[11px] font-medium text-zinc-400">
-        {hasQuery ? "Nenhuma nota encontrada" : "Nenhuma nota ainda"}
+        {hasQuery ? "No notes found" : "No notes yet"}
       </p>
       {!hasQuery && (
         <button
           type="button"
           onClick={onCreate}
           className="mt-1 rounded-xl bg-action/90 px-3 py-1.5 text-[10px] font-semibold text-black transition hover:bg-action">
-          Criar primeira nota
+          Create first note
         </button>
       )}
     </div>
@@ -167,11 +167,12 @@ function EmptyState({
 function formatRelativeTime(dateStr: string): string {
   const diff = Date.now() - new Date(dateStr).getTime()
   const mins = Math.floor(diff / 60000)
-  if (mins < 1) return "agora"
+  if (mins < 1) return "now"
   if (mins < 60) return `${mins}m`
   const hours = Math.floor(mins / 60)
   if (hours < 24) return `${hours}h`
   const days = Math.floor(hours / 24)
   if (days < 7) return `${days}d`
-  return `${Math.floor(days / 7)}sem`
+  return `${Math.floor(days / 7)}w`
 }
+

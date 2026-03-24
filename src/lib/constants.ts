@@ -1,4 +1,9 @@
-import type { AgilePrompt, PlanLimits, SubscriptionTier } from "./types"
+import type {
+  AgilePrompt,
+  PlanLimits,
+  SubscriptionCycle,
+  SubscriptionTier
+} from "./types"
 
 // ─── NotebookLM RPC ─────────────────────────────────────────────────────────
 
@@ -33,6 +38,7 @@ export const STORAGE_KEYS = {
   NOTEBOOKS_CACHE: "minddock_notebooks_cache",
   SOURCES_CACHE: "minddock_sources_cache",
   DAILY_USAGE: "minddock_daily_usage",
+  AI_MONTHLY_USAGE: "minddock_ai_monthly_usage",
   SETTINGS: "minddock_settings",
   NOTEBOOKLM_UI_ENABLED: "minddock_ui_enabled"
 } as const
@@ -71,8 +77,8 @@ export const PLANS: Record<SubscriptionTier, { price_monthly?: number; price_yea
     }
   },
   thinker: {
-    price_monthly: 7.99,
-    price_yearly: 64.99,
+    price_monthly: 6,
+    price_yearly: 59.99,
     limits: {
       imports_per_day: "unlimited",
       exports_per_day: "unlimited",
@@ -86,8 +92,11 @@ export const PLANS: Record<SubscriptionTier, { price_monthly?: number; price_yea
       cloud_sync: true,
       agile_prompts_basic: true,
       agile_prompts_ai: true,
-      ai_calls_per_day: 50,
-      notes_limit: 500
+      ai_calls_per_day: "unlimited",
+      agile_prompts_per_month: 30,
+      docks_summaries_per_month: 6,
+      notes_limit: 500,
+      brain_merges_per_month: 2
     }
   },
   thinker_pro: {
@@ -107,11 +116,43 @@ export const PLANS: Record<SubscriptionTier, { price_monthly?: number; price_yea
       agile_prompts_basic: true,
       agile_prompts_ai: true,
       ai_calls_per_day: "unlimited",
+      agile_prompts_per_month: "unlimited",
+      docks_summaries_per_month: "unlimited",
       notes_limit: "unlimited",
+      brain_merges_per_month: "unlimited",
       priority_support: true,
       early_access: true
     }
   }
+}
+
+const THINKER_YEARLY_UPLIFT_LIMITS: Pick<
+  PlanLimits,
+  "agile_prompts_per_month" | "docks_summaries_per_month" | "brain_merges_per_month"
+> = {
+  agile_prompts_per_month: 50,
+  docks_summaries_per_month: 12,
+  brain_merges_per_month: 5
+}
+
+export function resolvePlanLimits(
+  tier: SubscriptionTier,
+  cycle: SubscriptionCycle = "none"
+): PlanLimits {
+  const base = PLANS[tier].limits
+
+  if (tier !== "thinker") {
+    return base
+  }
+
+  if (cycle === "yearly") {
+    return {
+      ...base,
+      ...THINKER_YEARLY_UPLIFT_LIMITS
+    }
+  }
+
+  return base
 }
 
 export const PLAN_NAMES: Record<SubscriptionTier, string> = {
@@ -261,8 +302,8 @@ Mantenha a mesma informação, mude a apresentação para máxima clareza.`
 // ─── Claude API Config ──────────────────────────────────────────────────────
 
 export const CLAUDE_CONFIG = {
-  MODEL_DEFAULT: "claude-haiku-4-5-20251001",  // Haiku para velocidade (thinker)
-  MODEL_PRO: "claude-sonnet-4-6",              // Sonnet para thinker_pro
+  MODEL_DEFAULT: "claude-sonnet-4-6",
+  MODEL_PRO: "claude-sonnet-4-6",
   MAX_TOKENS: 4096,
   TEMPERATURE: 0.7
 } as const
@@ -278,7 +319,7 @@ export const URLS = {
   PERPLEXITY: "https://perplexity.ai",
   PERPLEXITY_WWW: "https://www.perplexity.ai",
   GOOGLE_DOCS: "https://docs.google.com",
-  MINDDOCK_LANDING: "https://minddock.app",
+  MINDDOCK_LANDING: "https://minddocklm.digital",
   STRIPE_PORTAL: "https://billing.stripe.com"
 } as const
 
@@ -290,12 +331,10 @@ export const HANDSHAKE_TOKEN = "md-v1-secure"
 // ─── Stripe Price IDs ───────────────────────────────────────────────────────
 
 export const STRIPE_PRICES = {
-  pro_monthly: "price_pro_monthly",
-  pro_yearly: "price_pro_yearly",
-  thinker_monthly: "price_thinker_monthly",
-  thinker_yearly: "price_thinker_yearly",
-  thinker_pro_monthly: "price_thinker_pro_monthly",
-  thinker_pro_yearly: "price_thinker_pro_yearly"
+  pro_monthly: "price_1TAv5n06w3vci0PCA02t3l0p",
+  pro_yearly: "price_1TAv6i06w3vci0PCJ2xlFxFF",
+  thinker_monthly: "price_1TAv7O06w3vci0PCbNKbcuoy",
+  thinker_yearly: "price_1TAv8I06w3vci0PCCbqWzpvm",
 } as const
 
 // ─── Cache TTL ──────────────────────────────────────────────────────────────

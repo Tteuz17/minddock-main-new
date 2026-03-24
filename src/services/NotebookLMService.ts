@@ -1671,15 +1671,19 @@ export class NotebookLMService {
         continue
       }
 
-      if (notebookPathHints.size > 0 && !notebookPathHints.has(notebookCandidate.id)) {
-        continue
-      }
-
       this.upsertNotebookCandidate(notebooks, notebookCandidate)
     }
 
     if (notebooks.size > 0) {
-      return Array.from(notebooks.values())
+      const collected = Array.from(notebooks.values())
+      if (notebookPathHints.size > 0) {
+        collected.sort((left, right) => {
+          const leftHint = notebookPathHints.has(left.id) ? 1 : 0
+          const rightHint = notebookPathHints.has(right.id) ? 1 : 0
+          return rightHint - leftHint
+        })
+      }
+      return collected
     }
 
     const seenObjects = new WeakSet<object>()
@@ -1707,9 +1711,7 @@ export class NotebookLMService {
       if (Array.isArray(node)) {
         const notebookCandidate = this.extractNotebookFromArray(node)
         if (notebookCandidate) {
-          if (notebookPathHints.size === 0 || notebookPathHints.has(notebookCandidate.id)) {
-            this.upsertNotebookCandidate(notebooks, notebookCandidate)
-          }
+          this.upsertNotebookCandidate(notebooks, notebookCandidate)
         }
 
         for (const item of node) {
@@ -1724,7 +1726,15 @@ export class NotebookLMService {
     }
 
     visit(value)
-    return Array.from(notebooks.values())
+    const collected = Array.from(notebooks.values())
+    if (notebookPathHints.size > 0) {
+      collected.sort((left, right) => {
+        const leftHint = notebookPathHints.has(left.id) ? 1 : 0
+        const rightHint = notebookPathHints.has(right.id) ? 1 : 0
+        return rightHint - leftHint
+      })
+    }
+    return collected
   }
 
   private buildContentVerificationMarkers(content: string): string[] {

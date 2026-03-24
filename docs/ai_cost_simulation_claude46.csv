@@ -1,0 +1,5 @@
+Scenario,DaysPerMonth,AgileCallsPerDay,DocksSummarizerCallsPerDay,AgileInputTokensPerCall,AgileOutputTokensPerCall,DocksInputTokensPerCall,DocksOutputTokensPerCall,AgileCallsPerMonth,DocksCallsPerMonth,TotalInputTokens,TotalOutputTokens,TotalInputMTok,TotalOutputMTok,SonnetInputUSDPerMTok,SonnetOutputUSDPerMTok,OpusInputUSDPerMTok,OpusOutputUSDPerMTok,Sonnet46CostUSDPerMonth,Opus46CostUSDPerMonth,Sonnet46CostUSDPerYear,Opus46CostUSDPerYear
+Moderate,30,20,5,350,750,1600,1400,=B2*C2,=B2*D2,=I2*E2+J2*G2,=I2*F2+J2*H2,=K2/1000000,=L2/1000000,3,15,5,25,=M2*O2+N2*P2,=M2*Q2+N2*R2,=S2*12,=T2*12
+Heavy,30,40,10,400,850,1900,1700,=B3*C3,=B3*D3,=I3*E3+J3*G3,=I3*F3+J3*H3,=K3/1000000,=L3/1000000,3,15,5,25,=M3*O3+N3*P3,=M3*Q3+N3*R3,=S3*12,=T3*12
+Extreme,30,70,18,450,900,2400,2200,=B4*C4,=B4*D4,=I4*E4+J4*G4,=I4*F4+J4*H4,=K4/1000000,=L4/1000000,3,15,5,25,=M4*O4+N4*P4,=M4*Q4+N4*R4,=S4*12,=T4*12
+Custom_edit_me,30,50,12,420,900,2100,1800,=B5*C5,=B5*D5,=I5*E5+J5*G5,=I5*F5+J5*H5,=K5/1000000,=L5/1000000,3,15,5,25,=M5*O5+N5*P5,=M5*Q5+N5*R5,=S5*12,=T5*12

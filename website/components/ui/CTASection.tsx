@@ -1,23 +1,60 @@
 "use client"
 
-import { Sparkles } from "@/components/ui/sparkles"
+import { useEffect, useRef, useState } from "react"
+import dynamic from "next/dynamic"
+
+const Sparkles = dynamic(
+  () => import("@/components/ui/sparkles").then((mod) => mod.Sparkles),
+  { ssr: false }
+)
 
 export default function CTASection() {
+  const sectionRef = useRef<HTMLElement>(null)
+  const [effectsEnabled, setEffectsEnabled] = useState(false)
+  const [reduceMotion, setReduceMotion] = useState(false)
+
+  useEffect(() => {
+    if (typeof window === "undefined") return
+    const media = window.matchMedia("(prefers-reduced-motion: reduce)")
+    const update = () => setReduceMotion(media.matches)
+    update()
+    media.addEventListener("change", update)
+    return () => media.removeEventListener("change", update)
+  }, [])
+
+  useEffect(() => {
+    const section = sectionRef.current
+    if (!section || typeof IntersectionObserver === "undefined") {
+      setEffectsEnabled(true)
+      return
+    }
+
+    const observer = new IntersectionObserver(
+      (entries) => setEffectsEnabled(entries[0]?.isIntersecting ?? false),
+      { rootMargin: "120% 0px 120% 0px" }
+    )
+
+    observer.observe(section)
+    return () => observer.disconnect()
+  }, [])
+
   return (
-    <section className="relative overflow-hidden bg-[#050608] py-20 sm:py-32">
+    <section ref={sectionRef} className="relative overflow-hidden bg-[#050608] py-20 sm:py-32">
       {/* Sparkles layer */}
       <div className="pointer-events-none absolute inset-0">
-        <Sparkles
-          className="h-full w-full"
-          density={320}
-          size={0.9}
-          minSize={0.3}
-          speed={0.6}
-          opacity={0.55}
-          minOpacity={0.08}
-          color="#facc15"
-          background="transparent"
-        />
+        {effectsEnabled && !reduceMotion ? (
+          <Sparkles
+            className="h-full w-full"
+            density={320}
+            size={0.9}
+            minSize={0.3}
+            speed={0.6}
+            opacity={0.55}
+            minOpacity={0.08}
+            color="#facc15"
+            background="transparent"
+          />
+        ) : null}
       </div>
 
       {/* Glow orb */}

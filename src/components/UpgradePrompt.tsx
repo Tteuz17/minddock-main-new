@@ -7,11 +7,16 @@ interface UpgradePromptProps {
   feature: string
   requiredTier: SubscriptionTier
   compact?: boolean
+  onUpgrade?: () => void
 }
 
-export function UpgradePrompt({ feature, requiredTier, compact }: UpgradePromptProps) {
+export function UpgradePrompt({ feature, requiredTier, compact, onUpgrade }: UpgradePromptProps) {
   function openUpgrade() {
-    chrome.tabs.create({ url: "https://minddock.app/pricing" })
+    if (onUpgrade) {
+      onUpgrade()
+    } else {
+      chrome.tabs.create({ url: "https://minddocklm.digital/pricing" })
+    }
   }
 
   if (compact) {

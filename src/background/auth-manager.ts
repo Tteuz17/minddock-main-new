@@ -14,7 +14,7 @@ import {
   setInSecureStorage,
   setInStorage
 } from "~/lib/utils"
-import type { SubscriptionTier, UserProfile } from "~/lib/types"
+import type { SubscriptionCycle, SubscriptionTier, UserProfile } from "~/lib/types"
 
 interface SupabaseConfig {
   url: string
@@ -24,6 +24,7 @@ interface SupabaseConfig {
 interface DevAuthBypassState {
   enabled: boolean
   tier: SubscriptionTier
+  cycle: SubscriptionCycle
   token: string
 }
 
@@ -32,6 +33,18 @@ class AuthManager {
   private listeners: Array<(user: UserProfile | null) => void> = []
   private authListenerBound = false
 
+  private async purgeLocalAuthCache(notify = true): Promise<void> {
+    this.supabase = null
+    this.authListenerBound = false
+    await removeFromSecureStorage(FIXED_STORAGE_KEYS.SUPABASE_SESSION)
+    await removeFromStorage(STORAGE_KEYS.USER_PROFILE)
+    await removeFromStorage(STORAGE_KEYS.SUBSCRIPTION)
+    await removeFromStorage(STORAGE_KEYS.DEV_AUTH_BYPASS)
+    if (notify) {
+      this.notifyListeners(null)
+    }
+  }
+
   async initializeSession(): Promise<UserProfile | null> {
     const devBypassState = await this.getDevAuthBypassState()
     if (devBypassState) {
@@ -39,7 +52,7 @@ class AuthManager {
       if (cachedProfile && !this.isDevBypassProfile(cachedProfile)) {
         await removeFromStorage(STORAGE_KEYS.DEV_AUTH_BYPASS)
       } else {
-      const profile = cachedProfile ?? this.buildDevBypassProfile(devBypassState.tier)
+      const profile = cachedProfile ?? this.buildDevBypassProfile(devBypassState.tier, devBypassState.cycle)
       if (!cachedProfile) {
         await setInStorage(STORAGE_KEYS.USER_PROFILE, profile)
       }
@@ -95,12 +108,14 @@ class AuthManager {
   }
 
   // Legacy path kept for existing popup flow.
-  async signInWithGoogle(): Promise<{ url: string }> {
+  async signInWithGoogle(redirectToOverride?: string): Promise<{ url: string; redirectTo: string }> {
     const client = await this.getClient()
+    const redirectTo =
+      String(redirectToOverride ?? "").trim() || chrome.identity.getRedirectURL()
     const { data, error } = await client.auth.signInWithOAuth({
       provider: "google",
       options: {
-        redirectTo: chrome.identity.getRedirectURL("supabase"),
+        redirectTo,
         queryParams: { access_type: "offline", prompt: "consent" }
       }
     })
@@ -109,7 +124,7 @@ class AuthManager {
       throw new Error(`Falha ao iniciar login Google: ${error?.message ?? "sem URL de redirect"}`)
     }
 
-    return { url: data.url }
+    return { url: data.url, redirectTo }
   }
 
   async completeOAuthFlow(redirectUrl: string): Promise<UserProfile> {
@@ -165,27 +180,97 @@ class AuthManager {
       throw new Error(`Falha no logout Supabase: ${error.message}`)
     }
 
-    await removeFromSecureStorage(FIXED_STORAGE_KEYS.SUPABASE_SESSION)
-    await removeFromStorage(STORAGE_KEYS.USER_PROFILE)
-    await removeFromStorage(STORAGE_KEYS.SUBSCRIPTION)
-    await removeFromStorage(STORAGE_KEYS.DEV_AUTH_BYPASS)
-    this.notifyListeners(null)
+    await this.purgeLocalAuthCache(true)
+  }
+
+  async clearCachedAuthState(): Promise<void> {
+    await this.purgeLocalAuthCache(true)
   }
 
   async getAccessToken(): Promise<string | null> {
+    const client = await this.getClient()
+    const { data } = await client.auth.getSession()
+    const session = data.session
+    if (session?.access_token) {
+      const expiresAtMs = Number(session.expires_at ?? 0) * 1000
+      const shouldRefresh = !expiresAtMs || Date.now() >= expiresAtMs - 60_000
+      if (!shouldRefresh) {
+        return session.access_token
+      }
+
+      const refreshedToken = await this.refreshAccessToken(null)
+      if (refreshedToken) {
+        return refreshedToken
+      }
+
+      // If refresh failed but token has not expired yet, allow this request to proceed.
+      if (expiresAtMs > Date.now()) {
+        return session.access_token
+      }
+
+      return null
+    }
+
     const devBypassState = await this.getDevAuthBypassState()
     const cachedProfile = await getFromStorage<UserProfile>(STORAGE_KEYS.USER_PROFILE)
     if (devBypassState && this.isDevBypassProfile(cachedProfile)) {
       return devBypassState.token
     }
 
+    return null
+  }
+
+  async refreshAccessToken(fallbackToken: string | null = null): Promise<string | null> {
     const client = await this.getClient()
-    const { data } = await client.auth.getSession()
-    return data.session?.access_token ?? null
+    const { data, error } = await client.auth.refreshSession()
+
+    if (error || !data.session?.access_token) {
+      return fallbackToken
+    }
+
+    await this.persistSession(data.session)
+    await removeFromStorage(STORAGE_KEYS.DEV_AUTH_BYPASS)
+    const profile = await this.fetchProfile(data.session.user)
+    this.notifyListeners(profile)
+    return data.session.access_token
+  }
+
+  async getVerifiedAccessToken(): Promise<string | null> {
+    const client = await this.getClient()
+    const currentToken = await this.getAccessToken()
+    if (!currentToken) {
+      return null
+    }
+
+    const tokenLooksLikeJwt = currentToken.split(".").length === 3
+    if (!tokenLooksLikeJwt) {
+      return null
+    }
+
+    const { data: currentUserData, error: currentTokenError } = await client.auth.getUser(currentToken)
+    if (!currentTokenError && currentUserData.user) {
+      return currentToken
+    }
+
+    const refreshedToken = await this.refreshAccessToken(null)
+    if (!refreshedToken || refreshedToken.split(".").length !== 3) {
+      return null
+    }
+
+    const { data: refreshedUserData, error: refreshedTokenError } = await client.auth.getUser(refreshedToken)
+    if (!refreshedTokenError && refreshedUserData.user) {
+      return refreshedToken
+    }
+
+    return null
   }
 
   async getSupabaseClient(): Promise<SupabaseClient> {
     return this.getClient()
+  }
+
+  async getSupabaseConfig(): Promise<SupabaseConfig> {
+    return this.resolveSupabaseConfig()
   }
 
   async getCurrentUser(): Promise<UserProfile | null> {
@@ -195,7 +280,7 @@ class AuthManager {
       if (this.isDevBypassProfile(cachedProfile)) {
         return cachedProfile
       }
-      const profile = this.buildDevBypassProfile(devBypassState.tier)
+      const profile = this.buildDevBypassProfile(devBypassState.tier, devBypassState.cycle)
       await setInStorage(STORAGE_KEYS.USER_PROFILE, profile)
       return profile
     }
@@ -272,7 +357,8 @@ class AuthManager {
       const devBypassState = await this.getDevAuthBypassState()
       if (devBypassState) {
         const cachedProfile = await getFromStorage<UserProfile>(STORAGE_KEYS.USER_PROFILE)
-        const profile = cachedProfile ?? this.buildDevBypassProfile(devBypassState.tier)
+        const profile =
+          cachedProfile ?? this.buildDevBypassProfile(devBypassState.tier, devBypassState.cycle)
         if (!cachedProfile) {
           await setInStorage(STORAGE_KEYS.USER_PROFILE, profile)
         }
@@ -298,8 +384,25 @@ class AuthManager {
     const envUrl = process.env.PLASMO_PUBLIC_SUPABASE_URL
     const envAnonKey = process.env.PLASMO_PUBLIC_SUPABASE_ANON_KEY
 
-    const url = storedUrl ?? envUrl
-    const anonKey = storedAnonKey ?? envAnonKey
+    // Prefer current build env values to avoid stale project config cached in storage.
+    const url = envUrl ?? storedUrl
+    const anonKey = envAnonKey ?? storedAnonKey
+
+    const normalizedStoredUrl = String(storedUrl ?? "").trim()
+    const normalizedStoredAnonKey = String(storedAnonKey ?? "").trim()
+    const normalizedEnvUrl = String(envUrl ?? "").trim()
+    const normalizedEnvAnonKey = String(envAnonKey ?? "").trim()
+    const projectConfigChanged =
+      (normalizedStoredUrl &&
+        normalizedEnvUrl &&
+        normalizedStoredUrl !== normalizedEnvUrl) ||
+      (normalizedStoredAnonKey &&
+        normalizedEnvAnonKey &&
+        normalizedStoredAnonKey !== normalizedEnvAnonKey)
+
+    if (projectConfigChanged) {
+      await this.purgeLocalAuthCache(false)
+    }
 
     if (!url || !anonKey) {
       throw new Error(
@@ -334,6 +437,7 @@ class AuthManager {
       stripeCustomerId: profile?.stripe_customer_id,
       subscriptionTier: profile?.subscription_tier ?? "free",
       subscriptionStatus: profile?.subscription_status ?? "inactive",
+      subscriptionCycle: this.normalizeSubscriptionCycle(profile?.subscription_cycle),
       createdAt: profile?.created_at ?? new Date().toISOString(),
       updatedAt: profile?.updated_at ?? new Date().toISOString()
     }
@@ -360,15 +464,20 @@ class AuthManager {
 
     const tierRaw = String(raw.tier ?? "").trim().toLowerCase()
     const tier: SubscriptionTier = tierRaw === "thinker_pro" ? "thinker_pro" : "thinker"
+    const cycle = this.normalizeSubscriptionCycle(raw.cycle)
     const token = String(raw.token ?? "").trim() || "dev-bypass-token"
     return {
       enabled: true,
       tier,
+      cycle: cycle === "none" ? "monthly" : cycle,
       token
     }
   }
 
-  private buildDevBypassProfile(tier: SubscriptionTier): UserProfile {
+  private buildDevBypassProfile(
+    tier: SubscriptionTier,
+    cycle: SubscriptionCycle = "monthly"
+  ): UserProfile {
     const now = new Date().toISOString()
     return {
       id: "dev-thinker-test-user",
@@ -376,9 +485,20 @@ class AuthManager {
       displayName: "Thinker Test",
       subscriptionTier: tier,
       subscriptionStatus: "active",
+      subscriptionCycle: cycle,
       createdAt: now,
       updatedAt: now
     }
+  }
+
+  private normalizeSubscriptionCycle(raw: unknown): SubscriptionCycle {
+    const candidate = String(raw ?? "")
+      .trim()
+      .toLowerCase()
+    if (candidate === "monthly" || candidate === "yearly") {
+      return candidate
+    }
+    return "none"
   }
 
   private isDevBypassProfile(profile: UserProfile | null | undefined): boolean {

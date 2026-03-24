@@ -2,6 +2,8 @@ import { useState, useEffect } from "react"
 import { motion } from "framer-motion"
 import { ArrowLeft, Check, Copy, ExternalLink } from "lucide-react"
 import { AGILE_PROMPTS, STORAGE_KEYS, URLS } from "~/lib/constants"
+import { useSubscription } from "~/hooks/useSubscription"
+import { UpgradePrompt } from "~/components/UpgradePrompt"
 
 interface AgilePromptsHubProps {
   onBack: () => void
@@ -15,6 +17,8 @@ interface AgileSettings {
 const DEFAULT_SETTINGS: AgileSettings = { autoImprove: true, showBar: true }
 
 export function AgilePromptsHub({ onBack }: AgilePromptsHubProps) {
+  const { canUse } = useSubscription()
+  const hasAccess = canUse("ai_features")
   const [settings, setSettings] = useState<AgileSettings>(DEFAULT_SETTINGS)
   const [copiedKey, setCopiedKey] = useState<string | null>(null)
 
@@ -58,6 +62,30 @@ export function AgilePromptsHub({ onBack }: AgilePromptsHubProps) {
     } else {
       chrome.tabs.create({ url: URLS.NOTEBOOKLM })
     }
+  }
+
+  if (!hasAccess) {
+    return (
+      <div className="flex h-full flex-col">
+        <div className="flex items-center gap-2 px-3 pb-1 pt-2.5">
+          <button
+            type="button"
+            onClick={onBack}
+            className="liquid-glass-soft flex h-7 w-7 items-center justify-center rounded-xl text-zinc-400 transition hover:-translate-y-px hover:text-white">
+            <ArrowLeft size={14} strokeWidth={2} />
+          </button>
+          <div className="flex items-center gap-2">
+            <h1 className="text-[13px] font-bold tracking-[-0.03em] text-white">Agile Prompts</h1>
+            <span className="rounded-md bg-action/15 px-1.5 py-0.5 text-[8px] font-bold uppercase tracking-wider text-action">
+              AI
+            </span>
+          </div>
+        </div>
+        <div className="flex-1 px-3 py-3">
+          <UpgradePrompt feature="Agile Prompts" requiredTier="thinker" />
+        </div>
+      </div>
+    )
   }
 
   return (

@@ -1510,6 +1510,48 @@ bootstrap()
 window.addEventListener("pagehide", cleanup)
 window.addEventListener("beforeunload", cleanup)
 
+// ─── Prompt Injection ─────────────────────────────────────────────────────────
+
+function injectPromptIntoChat(text: string): boolean {
+  const selectors = [
+    'textarea[aria-label]',
+    'textarea',
+    'div[contenteditable="true"][role="textbox"]',
+    'div[contenteditable="true"]',
+  ]
+  for (const sel of selectors) {
+    const candidates = Array.from(document.querySelectorAll<HTMLElement>(sel))
+    // Only target the chat input in the bottom 60% of the viewport, not the search bar
+    const el = candidates.find((c) => {
+      if (!isVisible(c)) return false
+      const rect = c.getBoundingClientRect()
+      if (rect.height < 24) return false
+      if (rect.top < window.innerHeight * 0.4) return false
+      return true
+    })
+    if (!el) continue
+    el.focus()
+    if (el instanceof HTMLTextAreaElement) {
+      const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set
+      setter?.call(el, text)
+      el.dispatchEvent(new Event("input", { bubbles: true }))
+    } else {
+      document.execCommand("selectAll", false)
+      document.execCommand("insertText", false, text)
+    }
+    return true
+  }
+  return false
+}
+
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg?.command === "MINDDOCK_INJECT_PROMPT" && typeof msg.text === "string") {
+    const success = injectPromptIntoChat(msg.text as string)
+    sendResponse({ success })
+    return true
+  }
+})
+
 function NotebooklmInjectorEntrypoint() {
   return null
 }

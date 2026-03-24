@@ -1,104 +1,138 @@
 import { MESSAGE_ACTIONS } from "~/lib/contracts";
 
 const IS_DEV = process.env.NODE_ENV === "development";
+const MAX_BRIDGE_ATTEMPTS = 5;
+const BRIDGE_RETRY_MS = 2000;
+const TRANSCRIPT_TIMEOUT_MS = 30000;
 
-// Dados capturados pela bridge
-let sniperData: { videoId: string; baseUrl: string } | null = null;
+type SniperBridgePayload = { videoId: string; baseUrl: string };
 
-// Escuta os dados da bridge (Main World → Isolated World)
-window.addEventListener('message', (event) => {
-  if (event.data?.source !== 'yt-sniper-bridge') return;
-  if (event.data?.type !== 'SNIPER_DATA') return;
+let sniperData: SniperBridgePayload | null = null;
 
-  const { videoId, baseUrl } = event.data.payload;
+window.addEventListener("message", (event) => {
+  if (event.data?.source !== "yt-sniper-bridge") return;
+  if (event.data?.type !== "SNIPER_DATA") return;
+
+  const videoId = String(event.data?.payload?.videoId ?? "").trim();
+  const baseUrl = String(event.data?.payload?.baseUrl ?? "").trim();
   if (!videoId || !baseUrl) return;
 
   sniperData = { videoId, baseUrl };
 });
 
-// Solicita os dados sob demanda se ainda não chegaram
-function requestSniperData(): Promise<{ videoId: string; baseUrl: string }> {
+function requestSniperData(): Promise<SniperBridgePayload> {
+  if (sniperData) {
+    return Promise.resolve(sniperData);
+  }
+
   return new Promise((resolve, reject) => {
-    if (sniperData) {
-      resolve(sniperData);
-      return;
-    }
+    let attempts = 0;
+    let settled = false;
 
-    let tentativas = 0;
-    const MAX_TENTATIVAS = 5; // tenta 5 vezes
-    const INTERVALO = 2000; // a cada 2s
+    const cleanup = () => {
+      window.removeEventListener("message", onMessage);
+    };
 
-    function tentar() {
-      tentativas++;
+    const fail = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new Error("Bridge nao respondeu. Aguarde o video carregar e tente novamente."));
+    };
+
+    const succeed = (payload: SniperBridgePayload) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      sniperData = payload;
+      resolve(payload);
+    };
+
+    const onMessage = (event: MessageEvent) => {
+      if (event.data?.source !== "yt-sniper-bridge") return;
+      if (event.data?.type !== "SNIPER_DATA") return;
+
+      const videoId = String(event.data?.payload?.videoId ?? "").trim();
+      const baseUrl = String(event.data?.payload?.baseUrl ?? "").trim();
+      if (!videoId || !baseUrl) return;
+
+      succeed({ videoId, baseUrl });
+    };
+
+    const attempt = () => {
+      if (settled) return;
+      attempts += 1;
 
       window.postMessage(
         {
-          source: 'yt-sniper-isolated',
-          type: 'REQUEST_SNIPER_DATA',
+          source: "yt-sniper-isolated",
+          type: "REQUEST_SNIPER_DATA"
         },
-        '*'
+        "*"
       );
 
-      setTimeout(() => {
+      window.setTimeout(() => {
+        if (settled) return;
         if (sniperData) {
-          resolve(sniperData);
+          succeed(sniperData);
           return;
         }
-        if (tentativas < MAX_TENTATIVAS) {
-          tentar(); // tenta de novo
-        } else {
-          window.removeEventListener('message', handler);
-          reject(new Error('Bridge não respondeu. Aguarde o vídeo carregar e tente novamente.'));
+        if (attempts >= MAX_BRIDGE_ATTEMPTS) {
+          fail();
+          return;
         }
-      }, INTERVALO);
-    }
-
-    // Listener permanente durante as tentativas
-    const handler = (event: MessageEvent) => {
-      if (event.data?.source !== 'yt-sniper-bridge') return;
-      if (event.data?.type !== 'SNIPER_DATA') return;
-
-      const { videoId, baseUrl } = event.data.payload;
-      if (!videoId || !baseUrl) return;
-
-      window.removeEventListener('message', handler);
-      sniperData = { videoId, baseUrl };
-      resolve(sniperData);
+        attempt();
+      }, BRIDGE_RETRY_MS);
     };
-    window.addEventListener('message', handler);
 
-    tentar();
+    window.addEventListener("message", onMessage);
+    attempt();
   });
 }
 
-// Função principal — chamada pela UI
-export async function extractTranscriptSlice(
-  startSec: number,
-  endSec: number
-): Promise<string> {
+async function getVideoContext(): Promise<{ videoId: string; baseUrl?: string }> {
+  const urlMatch = location.href.match(/[?&]v=([^&]+)/);
+  const videoIdFromUrl = String(urlMatch?.[1] ?? "").trim();
+
+  let bridgePayload: SniperBridgePayload | null = null;
+  try {
+    bridgePayload = await requestSniperData();
+  } catch {
+    bridgePayload = sniperData;
+  }
+
+  const finalVideoId = videoIdFromUrl || String(bridgePayload?.videoId ?? "").trim();
+  if (!finalVideoId) {
+    throw new Error("VideoId nao encontrado na URL");
+  }
+
+  const finalBaseUrl = String(bridgePayload?.baseUrl ?? "").trim();
+  return finalBaseUrl
+    ? { videoId: finalVideoId, baseUrl: finalBaseUrl }
+    : { videoId: finalVideoId };
+}
+
+export async function extractTranscriptSlice(startSec: number, endSec: number): Promise<string> {
   const safeStart = Math.min(startSec, endSec);
   const safeEnd = Math.max(startSec, endSec);
+  const { videoId, baseUrl } = await getVideoContext();
 
-  // Pega só o videoId — baseUrl não é mais necessário
-  const videoId = await getVideoId();
-
-  // Envia para o background fazer o fetch com cookies
   return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      reject(new Error('Timeout ao buscar legenda. Tente novamente.'));
-    }, 30000);
+    const timeout = window.setTimeout(() => {
+      reject(new Error("Timeout ao buscar legenda. Tente novamente."));
+    }, TRANSCRIPT_TIMEOUT_MS);
 
     chrome.runtime.sendMessage(
       {
         command: MESSAGE_ACTIONS.FETCH_SNIPER_TRANSCRIPT,
-        payload: { videoId, startSec: safeStart, endSec: safeEnd },
+        payload: { videoId, baseUrl, startSec: safeStart, endSec: safeEnd }
       },
       (response) => {
-        clearTimeout(timeout);
+        window.clearTimeout(timeout);
 
         if (chrome.runtime.lastError) {
           if (IS_DEV) {
-            console.error('[YT-SNIPER][ENGINE] runtime error:', chrome.runtime.lastError.message);
+            console.error("[YT-SNIPER][ENGINE] runtime error:", chrome.runtime.lastError.message);
           }
           reject(new Error(chrome.runtime.lastError.message));
           return;
@@ -106,16 +140,18 @@ export async function extractTranscriptSlice(
 
         if (!response?.success) {
           if (IS_DEV) {
-            console.error('[YT-SNIPER][ENGINE] response error:', response?.error ?? 'Falha ao buscar legenda.');
+            console.error(
+              "[YT-SNIPER][ENGINE] response error:",
+              response?.error ?? "Falha ao buscar legenda."
+            );
           }
-          reject(new Error(response?.error ?? 'Falha ao buscar legenda.'));
+          reject(new Error(response?.error ?? "Falha ao buscar legenda."));
           return;
         }
 
-        const text = response?.payload?.text ?? response?.data?.text;
-
+        const text = String(response?.payload?.text ?? response?.data?.text ?? "").trim();
         if (!text) {
-          reject(new Error('Nenhum texto encontrado no intervalo selecionado'));
+          reject(new Error("Nenhum texto encontrado no intervalo selecionado"));
           return;
         }
 
@@ -125,26 +161,6 @@ export async function extractTranscriptSlice(
   });
 }
 
-// Pega o videoId direto da URL — sem depender da bridge
-function getVideoId(): Promise<string> {
-  return new Promise((resolve, reject) => {
-    // Tenta da URL primeiro
-    const urlMatch = location.href.match(/[?&]v=([^&]+)/);
-    if (urlMatch?.[1]) {
-      resolve(urlMatch[1]);
-      return;
-    }
-    // Fallback: usa o que a bridge já capturou
-    if (sniperData?.videoId) {
-      resolve(sniperData.videoId);
-      return;
-    }
-    reject(new Error('VideoId não encontrado na URL'));
-  });
-}
-
-// Limpa os dados ao trocar de vídeo
-window.addEventListener('yt-navigate-finish', () => {
+window.addEventListener("yt-navigate-finish", () => {
   sniperData = null;
-  // sem logs aqui
 });

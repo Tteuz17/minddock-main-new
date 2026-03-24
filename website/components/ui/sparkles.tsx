@@ -5,6 +5,17 @@ import Particles, { initParticlesEngine } from "@tsparticles/react"
 import { loadSlim } from "@tsparticles/slim"
 import type { IOptions, MoveDirection, RecursivePartial } from "@tsparticles/engine"
 
+let particlesEnginePromise: Promise<void> | null = null
+
+const ensureParticlesEngine = () => {
+  if (!particlesEnginePromise) {
+    particlesEnginePromise = initParticlesEngine(async (engine) => {
+      await loadSlim(engine)
+    })
+  }
+  return particlesEnginePromise
+}
+
 interface SparklesProps {
   className?: string
   size?: number
@@ -36,13 +47,39 @@ export function Sparkles({
   options = {},
 }: SparklesProps) {
   const [isReady, setIsReady] = useState(false)
+  const [reduceMotion, setReduceMotion] = useState(false)
 
   useEffect(() => {
-    initParticlesEngine(async (engine) => {
-      await loadSlim(engine)
-    }).then(() => {
-      setIsReady(true)
-    })
+    if (typeof window === "undefined") return
+
+    const media = window.matchMedia("(prefers-reduced-motion: reduce)")
+    const update = () => setReduceMotion(media.matches)
+    update()
+    media.addEventListener("change", update)
+    return () => media.removeEventListener("change", update)
+  }, [])
+
+  useEffect(() => {
+    let isMounted = true
+
+    void ensureParticlesEngine()
+      .then(() => {
+        if (isMounted) {
+          setIsReady(true)
+        }
+      })
+      .catch((error: unknown) => {
+        // Some browsers/ad blockers can block particle internals in dev.
+        // Avoid bubbling an unhandled rejection (`[object Event]`) to Next overlay.
+        console.warn("[Sparkles] Particle engine init failed.", error)
+        if (isMounted) {
+          setIsReady(false)
+        }
+      })
+
+    return () => {
+      isMounted = false
+    }
   }, [])
 
   const id = useId()
@@ -50,11 +87,13 @@ export function Sparkles({
   const defaultOptions: RecursivePartial<IOptions> = {
     background: { color: { value: background } },
     fullScreen: { enable: false, zIndex: 1 },
-    fpsLimit: 120,
+    fpsLimit: reduceMotion ? 30 : 60,
+    pauseOnBlur: true,
+    pauseOnOutsideViewport: true,
     particles: {
       color: { value: color },
       move: {
-        enable: true,
+        enable: !reduceMotion,
         direction: "none" as MoveDirection,
         speed: { min: minSpeed ?? speed / 10, max: speed },
         straight: false,
@@ -66,7 +105,7 @@ export function Sparkles({
       },
       size: { value: { min: minSize ?? size / 2.5, max: size } },
     },
-    detectRetina: true,
+    detectRetina: false,
   }
 
   if (!isReady) return null

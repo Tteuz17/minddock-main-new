@@ -8,7 +8,7 @@ const faqs = [
   {
     question: "Does MindDock replace NotebookLM?",
     answer:
-      "Not at all. MindDock is a Chrome extension that sits on top of NotebookLM and gives it the layers it's missing — structured prompts, Zettelkasten notes, AI capture, and advanced export. Everything you already do in NotebookLM stays exactly the same.",
+      "Not at all. MindDock is a Chrome extension that sits on top of NotebookLM and gives it the layers it's missing — structured prompts, atomic notes, AI capture, and advanced export. Everything you already do in NotebookLM stays exactly the same.",
     meta: "Product",
   },
   {
@@ -34,12 +34,6 @@ const faqs = [
     answer:
       "Absolutely. Cancel from your MindDock dashboard and your plan stays active through the end of the billing period you already paid for. No extra charges, no friction.",
     meta: "Billing",
-  },
-  {
-    question: "What's Zettelkasten and why does it matter?",
-    answer:
-      "Zettelkasten is a method of building atomic, linked notes — each idea gets its own note, and notes connect to each other. In MindDock, you can visualize those connections in an interactive graph, turning NotebookLM into a permanent, searchable second brain.",
-    meta: "Zettelkasten",
   },
 ];
 
@@ -174,6 +168,21 @@ export default function FAQSection() {
       }
       .faq1-fade--ready {
         animation: faq1-fade-up 860ms cubic-bezier(0.22, 0.68, 0, 1) forwards;
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .faq1-intro__beam,
+        .faq1-intro__pulse,
+        .faq1-intro__meter,
+        .faq1-intro__tick {
+          animation: none !important;
+        }
+        .faq1-fade,
+        .faq1-fade--ready {
+          animation: none !important;
+          opacity: 1;
+          transform: none;
+          filter: none;
+        }
       }
     `;
     document.head.appendChild(style);

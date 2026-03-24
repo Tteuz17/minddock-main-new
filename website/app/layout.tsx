@@ -17,7 +17,7 @@ const serifFont = Fraunces({
 export const metadata: Metadata = {
   title: "MindDock | NotebookLM for serious knowledge work",
   description:
-    "MindDock extends NotebookLM with Zettelkasten workflows, threads, graph view, smarter capture, and durable research structure."
+    "MindDock extends NotebookLM with AI-powered prompts, smart capture, durable research structure, and advanced export tools."
 }
 
 export default function RootLayout({
@@ -26,12 +26,12 @@ export default function RootLayout({
   children: React.ReactNode
 }>) {
   return (
-    <html lang="en">
+    <html lang="en" suppressHydrationWarning>
       <body className={`${sansFont.variable} ${serifFont.variable}`}>
-          <ThemeProvider attribute="class" defaultTheme="dark" enableSystem={false}>
-            {children}
-          </ThemeProvider>
-        </body>
+        <ThemeProvider attribute="class" defaultTheme="dark" enableSystem={false}>
+          {children}
+        </ThemeProvider>
+      </body>
     </html>
   )
 }
