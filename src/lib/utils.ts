@@ -233,11 +233,28 @@ export async function removeFromStorage(key: string): Promise<void> {
   })
 }
 
-function getSecureStorageArea(): chrome.storage.StorageArea {
+const LOCAL_PERSISTED_SECURE_KEYS = new Set<string>([
+  // Supabase session must survive extension reloads.
+  "minddock_supabase_session"
+])
+
+function getSessionStorageArea(): chrome.storage.StorageArea | null {
   const storageWithSession = chrome.storage as typeof chrome.storage & {
     session?: chrome.storage.StorageArea
   }
-  return storageWithSession.session ?? chrome.storage.local
+  return storageWithSession.session ?? null
+}
+
+function shouldPersistSecureKeyInLocal(key: string): boolean {
+  const normalizedKey = String(key ?? "").trim()
+  return LOCAL_PERSISTED_SECURE_KEYS.has(normalizedKey)
+}
+
+function getSecureStorageArea(key: string): chrome.storage.StorageArea {
+  if (shouldPersistSecureKeyInLocal(key)) {
+    return chrome.storage.local
+  }
+  return getSessionStorageArea() ?? chrome.storage.local
 }
 
 async function getFromArea<T>(
@@ -268,13 +285,31 @@ async function removeFromArea(area: chrome.storage.StorageArea, key: string): Pr
 }
 
 export async function getFromSecureStorage<T>(key: string): Promise<T | null> {
-  const secureArea = getSecureStorageArea()
+  const secureArea = getSecureStorageArea(key)
   const secureValue = await getFromArea<T>(secureArea, key)
   if (secureValue !== null) {
     return secureValue
   }
 
+  const sessionArea = getSessionStorageArea()
+
   if (secureArea === chrome.storage.local) {
+    if (!sessionArea) {
+      return null
+    }
+
+    const sessionValue = await getFromArea<T>(sessionArea, key)
+    if (sessionValue === null) {
+      return null
+    }
+
+    // One-time migration from session-backed storage to persisted local storage.
+    await setInArea(chrome.storage.local, key, sessionValue)
+    await removeFromArea(sessionArea, key)
+    return sessionValue
+  }
+
+  if (!sessionArea || secureArea !== sessionArea) {
     return null
   }
 
@@ -290,20 +325,34 @@ export async function getFromSecureStorage<T>(key: string): Promise<T | null> {
 }
 
 export async function setInSecureStorage<T>(key: string, value: T): Promise<void> {
-  const secureArea = getSecureStorageArea()
+  const secureArea = getSecureStorageArea(key)
   await setInArea(secureArea, key, value)
+  const sessionArea = getSessionStorageArea()
 
   if (secureArea !== chrome.storage.local) {
     // Ensure sensitive entries are not persisted in local storage.
     await removeFromArea(chrome.storage.local, key)
+    return
+  }
+
+  if (sessionArea) {
+    // Ensure persisted keys are not shadowed by stale session values.
+    await removeFromArea(sessionArea, key)
   }
 }
 
 export async function removeFromSecureStorage(key: string): Promise<void> {
-  const secureArea = getSecureStorageArea()
+  const secureArea = getSecureStorageArea(key)
   await removeFromArea(secureArea, key)
+  const sessionArea = getSessionStorageArea()
+
   if (secureArea !== chrome.storage.local) {
     await removeFromArea(chrome.storage.local, key)
+    return
+  }
+
+  if (sessionArea) {
+    await removeFromArea(sessionArea, key)
   }
 }
 

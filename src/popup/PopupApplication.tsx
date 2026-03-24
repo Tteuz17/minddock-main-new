@@ -20,7 +20,7 @@ import type { SidePanelLaunchTarget } from "~/lib/types"
 type PopupView = "home" | "imports" | "agile" | "docks" | "highlights" | "usage" | "plans" | "zettel" | "prompt-lab" | "brain-merge"
 
 export default function PopupApplication() {
-  const { isAuthenticated, isLoading } = useAuth()
+  const { isAuthenticated, isLoading, signIn, error } = useAuth()
   const [view, setView] = useState<PopupView>("home")
 
   const openSidePanel = async (target: SidePanelLaunchTarget) => {
@@ -37,7 +37,7 @@ export default function PopupApplication() {
   }
 
   if (!isAuthenticated) {
-    return <AuthScreen />
+    return <AuthScreen onSignIn={signIn} error={error} />
   }
 
   return (

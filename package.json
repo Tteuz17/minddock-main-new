@@ -85,6 +85,8 @@
       "sidePanel",
       "identity",
       "storage",
+      "contextMenus",
+      "notifications",
       "downloads",
       "tabs",
       "activeTab",

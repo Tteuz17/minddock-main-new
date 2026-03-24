@@ -1,11 +1,12 @@
 import { useEffect, useState } from "react"
 import { AnimatePresence, motion } from "framer-motion"
 import { ChevronRight, Chrome, Loader2 } from "lucide-react"
-import { useAuth } from "~/hooks/useAuth"
 import { Button } from "~/components/ui/button"
 
 interface AuthScreenProps {
   compact?: boolean
+  onSignIn: () => Promise<void>
+  error?: string | null
 }
 
 const MINDDOCK_LOGO_SRC = new URL(
@@ -32,8 +33,7 @@ const FEATURE_CAROUSEL = [
   }
 ] as const
 
-export function AuthScreen({ compact }: AuthScreenProps) {
-  const { signIn, error } = useAuth()
+export function AuthScreen({ compact, onSignIn, error }: AuthScreenProps) {
   const [isLoading, setIsLoading] = useState(false)
   const [activeSlide, setActiveSlide] = useState(0)
 
@@ -52,7 +52,7 @@ export function AuthScreen({ compact }: AuthScreenProps) {
   async function handleSignIn() {
     setIsLoading(true)
     try {
-      await signIn()
+      await onSignIn()
     } catch {
       // The hook already surfaces auth errors.
     } finally {
