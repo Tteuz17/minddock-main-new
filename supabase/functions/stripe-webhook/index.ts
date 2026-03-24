@@ -32,6 +32,8 @@ type ProfileUpdateResult = {
   userId: string | null
 }
 
+type WebhookEventRegistrationResult = "inserted" | "duplicate"
+
 const PRICE_TO_TIER: Record<string, SubscriptionTier> = {
   [Deno.env.get("STRIPE_PRICE_PRO_MONTHLY") ?? "MISSING_pro_monthly"]: "pro",
   [Deno.env.get("STRIPE_PRICE_PRO_YEARLY") ?? "MISSING_pro_yearly"]: "pro",
@@ -61,6 +63,37 @@ function buildEffectiveCycle(tier: SubscriptionTier, status: string, cycle: Subs
     return cycle === "yearly" ? "yearly" : "monthly"
   }
   return "none"
+}
+
+function isUniqueViolation(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false
+  }
+
+  const code = String((error as { code?: unknown }).code ?? "").trim()
+  const message = String((error as { message?: unknown }).message ?? "").toLowerCase()
+  return code === "23505" || message.includes("duplicate key")
+}
+
+async function registerWebhookEvent(
+  supabase: ReturnType<typeof createClient>,
+  eventId: string,
+  eventType: string
+): Promise<WebhookEventRegistrationResult> {
+  const { error } = await supabase.from("stripe_webhook_events").insert({
+    event_id: eventId,
+    event_type: eventType
+  })
+
+  if (!error) {
+    return "inserted"
+  }
+
+  if (isUniqueViolation(error)) {
+    return "duplicate"
+  }
+
+  throw new Error(`WEBHOOK_EVENT_REGISTER_FAILED: ${String(error.message ?? error)}`)
 }
 
 async function applySubscriptionToProfile(
@@ -162,6 +195,14 @@ Deno.serve(async (req: Request) => {
   const supabase = createClient(supabaseUrl, supabaseServiceKey)
 
   try {
+    const registrationResult = await registerWebhookEvent(supabase, event.id, event.type)
+    if (registrationResult === "duplicate") {
+      return new Response(JSON.stringify({ received: true, duplicate: true }), {
+        status: 200,
+        headers: { ...CORS_HEADERS, "Content-Type": "application/json" }
+      })
+    }
+
     switch (event.type) {
       case "customer.subscription.created":
       case "customer.subscription.updated": {

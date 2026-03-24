@@ -1,6 +1,10 @@
 /**
  * MindDock AI Proxy Edge Function
- * Validates auth/subscription server-side, then routes AI actions.
+ * Validates auth/subscription server-side, enforces monthly quota,
+ * then routes AI actions.
+ *
+ * Optional secret:
+ *   ALLOWED_ORIGINS
  */
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2"
@@ -12,6 +16,10 @@ const CORS_HEADERS = {
   "Access-Control-Allow-Methods": "POST, OPTIONS"
 }
 
+const CHROME_EXTENSION_ORIGIN_REGEX = /^chrome-extension:\/\/[a-z]{32}$/i
+const MOZ_EXTENSION_ORIGIN_REGEX = /^moz-extension:\/\/[a-z0-9-]+$/i
+const LOCALHOST_ORIGIN_REGEX = /^https?:\/\/localhost(?::\d{1,5})?$/i
+
 const AI_ACTIONS = [
   "improvePrompt",
   "atomizeContent",
@@ -22,8 +30,30 @@ const AI_ACTIONS = [
 
 type AIAction = (typeof AI_ACTIONS)[number]
 type JsonMap = Record<string, unknown>
+type SubscriptionTier = "free" | "pro" | "thinker" | "thinker_pro"
+type SubscriptionStatus = "active" | "trialing" | "past_due" | "inactive" | "canceled"
+type SubscriptionCycle = "none" | "monthly" | "yearly"
+type AiMonthlyUsageMetric = "agile_prompts" | "docks_summaries" | "brain_merges"
+type AiQuotaLimit = number | "unlimited"
 
-const AI_ALLOWED_TIERS = new Set(["thinker", "thinker_pro"])
+const AI_ALLOWED_TIERS = new Set<SubscriptionTier>(["thinker", "thinker_pro"])
+const THINKER_MONTHLY_LIMITS: Record<AiMonthlyUsageMetric, number> = {
+  agile_prompts: 30,
+  docks_summaries: 6,
+  brain_merges: 2
+}
+const THINKER_YEARLY_LIMITS: Record<AiMonthlyUsageMetric, number> = {
+  agile_prompts: 50,
+  docks_summaries: 12,
+  brain_merges: 5
+}
+const ACTION_TO_AI_MONTHLY_METRIC: Record<AIAction, AiMonthlyUsageMetric> = {
+  improvePrompt: "agile_prompts",
+  generatePromptOptions: "agile_prompts",
+  atomizeContent: "docks_summaries",
+  suggestLinks: "docks_summaries",
+  brainMerge: "brain_merges"
+}
 
 const SHARED_SYSTEM_RULES = `You are MindDock AI, used in Focus Docks, Agile Prompts, and Brain Merge.
 General rules:
@@ -40,12 +70,242 @@ function jsonResponse(body: unknown, status = 200): Response {
   })
 }
 
+function parseCsvSet(value: string | null | undefined): Set<string> {
+  return new Set(
+    String(value ?? "")
+      .split(",")
+      .map((item) => item.trim().toLowerCase())
+      .filter(Boolean)
+  )
+}
+
+const allowedOrigins = parseCsvSet(Deno.env.get("ALLOWED_ORIGINS"))
+
+function isAllowedOrigin(origin: string): boolean {
+  const normalized = String(origin ?? "").trim()
+  if (!normalized) {
+    return true
+  }
+
+  if (
+    CHROME_EXTENSION_ORIGIN_REGEX.test(normalized) ||
+    MOZ_EXTENSION_ORIGIN_REGEX.test(normalized) ||
+    LOCALHOST_ORIGIN_REGEX.test(normalized)
+  ) {
+    return true
+  }
+
+  return allowedOrigins.has(normalized.toLowerCase())
+}
+
+function isBrowserOriginAllowed(req: Request): boolean {
+  const origin = String(req.headers.get("origin") ?? "").trim()
+  if (!origin) {
+    return true
+  }
+  return isAllowedOrigin(origin)
+}
+
 function isRecord(value: unknown): value is JsonMap {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value)
 }
 
 function normalizeString(value: unknown, maxLength: number): string {
   return String(value ?? "").trim().slice(0, maxLength)
+}
+
+function normalizeSubscriptionTier(value: unknown): SubscriptionTier {
+  const normalized = String(value ?? "")
+    .trim()
+    .toLowerCase()
+  if (normalized === "pro" || normalized === "thinker" || normalized === "thinker_pro") {
+    return normalized
+  }
+  return "free"
+}
+
+function normalizeSubscriptionStatus(value: unknown): SubscriptionStatus {
+  const normalized = String(value ?? "")
+    .trim()
+    .toLowerCase()
+  if (
+    normalized === "active" ||
+    normalized === "trialing" ||
+    normalized === "past_due" ||
+    normalized === "canceled"
+  ) {
+    return normalized
+  }
+  return "inactive"
+}
+
+function normalizeSubscriptionCycle(value: unknown): SubscriptionCycle {
+  const normalized = String(value ?? "")
+    .trim()
+    .toLowerCase()
+  if (normalized === "monthly" || normalized === "yearly") {
+    return normalized
+  }
+  return "none"
+}
+
+function normalizeNonNegativeInteger(value: unknown): number {
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric)) {
+    return 0
+  }
+  return Math.max(0, Math.floor(numeric))
+}
+
+function resolveAiMonthlyLimit(
+  tier: SubscriptionTier,
+  cycle: SubscriptionCycle,
+  metric: AiMonthlyUsageMetric
+): AiQuotaLimit {
+  if (tier === "thinker_pro") {
+    return "unlimited"
+  }
+
+  if (tier !== "thinker") {
+    return 0
+  }
+
+  if (cycle === "yearly") {
+    return THINKER_YEARLY_LIMITS[metric]
+  }
+
+  return THINKER_MONTHLY_LIMITS[metric]
+}
+
+function resolveQuotaExceededMessage(metric: AiMonthlyUsageMetric, limit: number): string {
+  if (metric === "agile_prompts") {
+    return `Limite mensal do Agile Prompts atingido (${limit}/mes).`
+  }
+  if (metric === "docks_summaries") {
+    return `Limite mensal de resumos do Docks atingido (${limit}/mes).`
+  }
+  return `Limite mensal do Brain Merge atingido (${limit}/mes).`
+}
+
+class HttpError extends Error {
+  readonly status: number
+  readonly body: JsonMap
+
+  constructor(status: number, body: JsonMap) {
+    super(String(body.error ?? "Request failed"))
+    this.status = status
+    this.body = body
+  }
+}
+
+function validateActionPayload(action: AIAction, payload: JsonMap): void {
+  switch (action) {
+    case "improvePrompt": {
+      const userPrompt = normalizeString(payload.userPrompt, 4000)
+      if (!userPrompt) {
+        throw new HttpError(400, { error: "Missing prompt content for improvePrompt" })
+      }
+      return
+    }
+
+    case "generatePromptOptions": {
+      const userPrompt = normalizeString(payload.userPrompt, 2200)
+      if (!userPrompt) {
+        throw new HttpError(400, { error: "Missing prompt content for generatePromptOptions" })
+      }
+      return
+    }
+
+    case "atomizeContent": {
+      const content = normalizeString(payload.content, 16000)
+      if (!content) {
+        throw new HttpError(400, { error: "Missing content for atomizeContent" })
+      }
+      return
+    }
+
+    case "brainMerge": {
+      const goal = normalizeString(payload.goal, 1200)
+      if (!goal) {
+        throw new HttpError(400, { error: "Missing goal for brainMerge" })
+      }
+
+      const sources = Array.isArray(payload.sources) ? payload.sources : []
+      const hasValidSource = sources.some((item) => {
+        if (!isRecord(item)) {
+          return false
+        }
+        const notebookTitle = normalizeString(item.notebookTitle, 120)
+        const sourceTitle = normalizeString(item.sourceTitle, 120)
+        const content = normalizeString(item.content, 7000)
+        return Boolean(notebookTitle && sourceTitle && content)
+      })
+
+      if (!hasValidSource) {
+        throw new HttpError(400, { error: "No valid sources for brainMerge" })
+      }
+      return
+    }
+
+    case "suggestLinks":
+      return
+  }
+}
+
+async function enforceAiMonthlyQuota(
+  supabase: ReturnType<typeof createClient>,
+  params: {
+    userId: string
+    action: AIAction
+    tier: SubscriptionTier
+    cycle: SubscriptionCycle
+  }
+): Promise<void> {
+  const metric = ACTION_TO_AI_MONTHLY_METRIC[params.action]
+  const limit = resolveAiMonthlyLimit(params.tier, params.cycle, metric)
+  if (limit === "unlimited") {
+    return
+  }
+
+  if (!Number.isFinite(limit) || limit <= 0) {
+    throw new HttpError(403, { error: "AI plan quota unavailable for current subscription tier." })
+  }
+
+  const { data, error } = await supabase.rpc("consume_ai_monthly_usage", {
+    p_user_id: params.userId,
+    p_metric: metric,
+    p_limit: limit
+  })
+
+  if (error) {
+    throw new HttpError(503, {
+      error: "AI quota service unavailable",
+      code: "AI_QUOTA_SERVICE_UNAVAILABLE"
+    })
+  }
+
+  const row = Array.isArray(data) ? data[0] : data
+  const allowed = Boolean(
+    row &&
+      typeof row === "object" &&
+      "allowed" in row &&
+      ((row as { allowed?: unknown }).allowed === true ||
+        String((row as { allowed?: unknown }).allowed ?? "").toLowerCase() === "true")
+  )
+  const currentCount =
+    row && typeof row === "object"
+      ? normalizeNonNegativeInteger((row as { current_count?: unknown }).current_count)
+      : 0
+
+  if (!allowed) {
+    throw new HttpError(429, {
+      error: resolveQuotaExceededMessage(metric, limit),
+      code: "AI_MONTHLY_LIMIT_REACHED",
+      limit,
+      currentCount,
+      metric
+    })
+  }
 }
 
 function buildContextHints(payload: JsonMap): string {
@@ -405,6 +665,10 @@ async function callClaude(
 }
 
 Deno.serve(async (req: Request) => {
+  if (!isBrowserOriginAllowed(req)) {
+    return jsonResponse({ error: "Origin not allowed" }, 403)
+  }
+
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: CORS_HEADERS })
   }
@@ -418,11 +682,11 @@ Deno.serve(async (req: Request) => {
     return jsonResponse({ error: "Missing authorization" }, 401)
   }
 
-  const supabaseUrl = Deno.env.get("SUPABASE_URL")!
-  const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
-  const claudeApiKey = Deno.env.get("CLAUDE_API_KEY")
+  const supabaseUrl = String(Deno.env.get("SUPABASE_URL") ?? "").trim()
+  const supabaseServiceKey = String(Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "").trim()
+  const claudeApiKey = String(Deno.env.get("CLAUDE_API_KEY") ?? "").trim()
 
-  if (!claudeApiKey) {
+  if (!supabaseUrl || !supabaseServiceKey || !claudeApiKey) {
     return jsonResponse({ error: "AI service not configured" }, 503)
   }
 
@@ -439,7 +703,7 @@ Deno.serve(async (req: Request) => {
 
   const { data: profile, error: profileError } = await supabase
     .from("profiles")
-    .select("subscription_tier, subscription_status")
+    .select("subscription_tier, subscription_status, subscription_cycle")
     .eq("id", user.id)
     .single()
 
@@ -447,16 +711,20 @@ Deno.serve(async (req: Request) => {
     return jsonResponse({ error: "Profile not found" }, 403)
   }
 
-  if (!AI_ALLOWED_TIERS.has(profile.subscription_tier)) {
+  const profileTier = normalizeSubscriptionTier(profile.subscription_tier)
+  const profileStatus = normalizeSubscriptionStatus(profile.subscription_status)
+  const profileCycle = normalizeSubscriptionCycle(profile.subscription_cycle)
+
+  if (!AI_ALLOWED_TIERS.has(profileTier)) {
     return jsonResponse(
-      { error: "AI features require Thinker plan or above", tier: profile.subscription_tier },
+      { error: "AI features require Thinker plan or above", tier: profileTier },
       403
     )
   }
 
-  if (profile.subscription_status !== "active") {
+  if (profileStatus !== "active" && profileStatus !== "trialing") {
     return jsonResponse(
-      { error: "Subscription is not active", status: profile.subscription_status },
+      { error: "Subscription is not active", status: profileStatus },
       403
     )
   }
@@ -482,12 +750,24 @@ Deno.serve(async (req: Request) => {
   const model = "claude-sonnet-4-6"
 
   try {
+    validateActionPayload(action, payload)
+
+    await enforceAiMonthlyQuota(supabase, {
+      userId: user.id,
+      action,
+      tier: profileTier,
+      cycle: profileCycle
+    })
+
     const result = await dispatchAction(claude, model, action, payload)
     return jsonResponse({ success: true, result })
   } catch (err) {
+    if (err instanceof HttpError) {
+      return jsonResponse(err.body, err.status)
+    }
+
     console.error("[ai-proxy] AI call failed:", err)
-    const message = err instanceof Error ? err.message : "AI call failed"
-    return jsonResponse({ error: message }, 502)
+    return jsonResponse({ error: "AI call failed" }, 502)
   }
 })
 

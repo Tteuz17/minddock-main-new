@@ -1,3 +1,5 @@
+import { authManager } from "../auth-manager"
+
 const NOTION_CLIENT_ID = "321d872b-594c-81e6-b469-00375ccd1eac"
 const NOTION_OAUTH_EXCHANGE_ENDPOINT = process.env.PLASMO_PUBLIC_NOTION_OAUTH_EXCHANGE_ENDPOINT
 const SUPABASE_URL = process.env.PLASMO_PUBLIC_SUPABASE_URL
@@ -33,6 +35,32 @@ function parseCodeFromRedirectUrl(redirectUrl: string): string {
   return String(redirect.searchParams.get("code") ?? "").trim()
 }
 
+function normalizeJwt(token: string | null | undefined): string | null {
+  let normalized = String(token ?? "").trim()
+  if (!normalized) {
+    return null
+  }
+
+  if (/^bearer\s+/i.test(normalized)) {
+    normalized = normalized.replace(/^bearer\s+/i, "").trim()
+  }
+
+  const parts = normalized.split(".")
+  if (parts.length !== 3 || parts.some((part) => !part.trim())) {
+    return null
+  }
+
+  return normalized
+}
+
+async function resolveNotionExchangeAccessToken(): Promise<string> {
+  const token = normalizeJwt(await authManager.getVerifiedAccessToken())
+  if (!token || token === "dev-bypass-token") {
+    throw new Error("Login real no MindDock e obrigatorio para conectar com Notion.")
+  }
+  return token
+}
+
 function launchAuthFlow(authUrl: string): Promise<string> {
   return new Promise((resolve, reject) => {
     chrome.identity.launchWebAuthFlow({ url: authUrl, interactive: true }, (redirectUrl) => {
@@ -59,15 +87,20 @@ export async function exchangeAuthCodeForToken(authCode: string): Promise<string
     throw new Error("Notion authorization code is empty.")
   }
 
+  const accessToken = await resolveNotionExchangeAccessToken()
+  const redirectUri = chrome.identity.getRedirectURL()
+
   const oauthResponse = await fetch(resolveExchangeEndpoint(), {
     method: "POST",
     headers: {
-      "Content-Type": "application/json"
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${accessToken}`
     },
     body: JSON.stringify({
       provider: "notion",
       code: normalizedCode,
-      redirectUri: chrome.identity.getRedirectURL()
+      redirectUri,
+      extensionId: chrome.runtime.id
     })
   })
 
