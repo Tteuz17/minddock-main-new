@@ -31,6 +31,7 @@ import {
   extractUrlFromSnippets,
   formatTitleList,
   inferSourceType,
+  isStudioExportModalOpen,
   resolveNotebookIdFromRoute,
   resolveSourceActionsHost,
   resolveSourceRows,
@@ -544,6 +545,9 @@ export function SourceDownloadPanel() {
 
   useEffect(() => {
     const onExport = () => {
+      if (isStudioExportModalOpen()) {
+        return
+      }
       void openModal()
     }
 

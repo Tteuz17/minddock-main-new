@@ -763,7 +763,15 @@ export function dispatchSourcePanelReset(): void {
   window.dispatchEvent(new CustomEvent(SOURCE_PANEL_RESET_EVENT))
 }
 
+export function isStudioExportModalOpen(): boolean {
+  const host = document.querySelector<HTMLElement>('[data-minddock-shadow-host="studio-export-modal"]')
+  const shadowRoot = host?.shadowRoot
+  if (!shadowRoot) return false
+  return Boolean(shadowRoot.querySelector('[data-minddock-studio-export-overlay="true"]'))
+}
+
 export function dispatchSourcePanelExport(): void {
+  if (isStudioExportModalOpen()) return
   window.dispatchEvent(new CustomEvent(SOURCE_PANEL_EXPORT_EVENT))
 }
 
@@ -2708,6 +2716,13 @@ function resolveStudioLabel(): HTMLElement | null {
   }
 
   return pickClosest(strictMatches) ?? pickClosest(relaxedMatches)
+}
+
+export function resolveStudioLabelText(): string | null {
+  const label = resolveStudioLabel()
+  if (!label) return null
+  const text = String(label.innerText || label.textContent || "").replace(/\s+/g, " ").trim()
+  return text.length > 0 ? text : null
 }
 
 function isStudioLabelCollapsed(studioLabel: HTMLElement): boolean {

@@ -85,6 +85,7 @@
       "sidePanel",
       "identity",
       "storage",
+      "downloads",
       "tabs",
       "activeTab",
       "offscreen",

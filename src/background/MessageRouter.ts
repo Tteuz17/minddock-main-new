@@ -995,6 +995,18 @@ export function initializeMessageRouter(): void {
           return true
         }
 
+        case STUDIO_BINARY_FETCH_MESSAGE: {
+          Promise.resolve(handleStudioBinaryFetch(message))
+            .then((result) => sendResponse(result))
+            .catch((error) =>
+              sendResponse({
+                success: false,
+                error: resolveErrorMessage(error)
+              })
+            )
+          return true
+        }
+
         case "BG_LOG": {
           sendResponse?.({ ok: true })
           return true
@@ -1022,6 +1034,8 @@ export function initializeMessageRouter(): void {
 }
 
 const STUDIO_FETCH_MESSAGE = "MINDDOCK_FETCH_STUDIO_ARTIFACTS"
+const STUDIO_BINARY_FETCH_MESSAGE = "MINDDOCK_FETCH_BINARY_ASSET"
+const MAX_RAW_BYTES_FOR_MESSAGE = 46 * 1024 * 1024
 
 function normalizeStudioArtifactRequest(message: IncomingMessage): {
   ids: string[]
@@ -1045,5 +1059,418 @@ function normalizeStudioArtifactRequest(message: IncomingMessage): {
     notebookId,
     forceRefresh,
     rpcContext
+  }
+}
+
+function normalizeStudioBinaryFetchRequest(message: IncomingMessage): {
+  url: string
+  atToken?: string
+  authUser?: string | number | null
+  mode?: "buffer" | "download"
+  filename?: string
+} {
+  const payload = message?.payload && typeof message.payload === "object" ? message.payload : undefined
+  const data = message?.data && typeof message.data === "object" ? message.data : undefined
+  const source = (payload ?? data ?? {}) as Record<string, unknown>
+
+  const url = String(source.url ?? "").trim()
+  const atTokenRaw = String(source.atToken ?? "").trim()
+  const authUser = source.authUser as string | number | null | undefined
+  const modeRaw = String(source.mode ?? "").trim().toLowerCase()
+  const filenameRaw = String(source.filename ?? "").trim()
+
+  return {
+    url,
+    atToken: atTokenRaw || undefined,
+    authUser,
+    mode: modeRaw === "download" ? "download" : undefined,
+    filename: filenameRaw || undefined
+  }
+}
+
+function normalizeBinaryAssetUrl(value: string): string {
+  const trimmed = String(value ?? "").trim().replace(/\\\//g, "/")
+  if (!trimmed) return ""
+  if (trimmed.startsWith("//")) return `https:${trimmed}`
+  return trimmed
+}
+
+function withAuthUserIfGoogle(url: string, authUser?: string | number | null): string {
+  try {
+    const parsed = new URL(url)
+    const host = parsed.hostname.toLowerCase()
+    const isGoogle = host.endsWith("google.com") || host.endsWith("googleusercontent.com")
+    if (!isGoogle || parsed.searchParams.has("authuser")) return url
+    if (authUser === null || authUser === undefined || String(authUser).trim() === "") return url
+    parsed.searchParams.set("authuser", String(authUser))
+    return parsed.toString()
+  } catch {
+    return url
+  }
+}
+
+function appendAtToken(url: string, atToken: string): string {
+  try {
+    const parsed = new URL(url)
+    parsed.searchParams.set("at", atToken)
+    return parsed.toString()
+  } catch {
+    return url
+  }
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = ""
+  const chunkSize = 0x8000
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize))
+  }
+  return btoa(binary)
+}
+
+function extensionFromMimeType(mimeType?: string): string | undefined {
+  const normalized = String(mimeType ?? "").toLowerCase().split(";")[0].trim()
+  const mapping: Record<string, string> = {
+    "video/mp4": "mp4",
+    "video/webm": "webm",
+    "video/quicktime": "mov",
+    "audio/mpeg": "mp3",
+    "audio/mp4": "mp4",
+    "audio/wav": "wav",
+    "audio/ogg": "ogg",
+    "image/png": "png",
+    "image/jpeg": "jpg",
+    "image/webp": "webp",
+    "application/pdf": "pdf"
+  }
+  return mapping[normalized]
+}
+
+function normalizeBackgroundDownloadFilename(filename?: string, mimeType?: string): string {
+  const clean = String(filename ?? "")
+    .trim()
+    .replace(/[<>:"/\\|?*\u0000-\u001f]+/g, "_")
+    .replace(/\s+/g, " ")
+    .replace(/^_+|_+$/g, "")
+
+  const fallbackBase = "MindDock-Studio-Asset"
+  const base = clean || fallbackBase
+  const hasExtension = /\.[a-z0-9]{2,8}$/i.test(base)
+  if (hasExtension) return base
+
+  const ext = extensionFromMimeType(mimeType) ?? "bin"
+  return `${base}.${ext}`
+}
+
+async function handleStudioBinaryFetch(
+  message: IncomingMessage
+): Promise<
+  ChromeMessageResponse<{
+    bytesBase64?: string
+    downloaded?: boolean
+    downloadId?: number
+    mimeType?: string
+    size?: number
+    filename?: string
+  }>
+> {
+  const { url, atToken, authUser, mode, filename } = normalizeStudioBinaryFetchRequest(message)
+  const baseUrl = normalizeBinaryAssetUrl(url)
+
+  if (!baseUrl) {
+    return { success: false, error: "URL do asset ausente." }
+  }
+
+  console.log("[MindDock][BG][StudioBinaryFetch] start", {
+    url: baseUrl,
+    hasToken: Boolean(atToken),
+    authUser: authUser ?? null,
+    mode: mode ?? "buffer",
+    filename: filename ?? null
+  })
+
+  const candidateUrl = withAuthUserIfGoogle(baseUrl, authUser)
+  const urls = Array.from(new Set([baseUrl, candidateUrl]))
+
+  let lastStatus: number | null = null
+  let lastError = ""
+
+  const buildDownloadCandidates = (seedUrls: string[]): string[] => {
+    const out = new Set<string>()
+    for (const raw of seedUrls) {
+      const normalized = normalizeBinaryAssetUrl(raw)
+      if (!normalized) continue
+      out.add(normalized)
+      out.add(withAuthUserIfGoogle(normalized, authUser))
+      if (atToken) {
+        out.add(appendAtToken(normalized, atToken))
+        out.add(appendAtToken(withAuthUserIfGoogle(normalized, authUser), atToken))
+      }
+    }
+    return Array.from(out).filter(Boolean)
+  }
+
+  const tryDirectDownload = async (candidateUrls: string[], resolvedFilename: string): Promise<number | null> => {
+    if (!chrome?.downloads?.download) {
+      console.warn("[MindDock][BG][StudioBinaryFetch] downloads-api-unavailable", {
+        filename: resolvedFilename
+      })
+      return null
+    }
+
+    for (const targetUrl of candidateUrls) {
+      const downloadId = await new Promise<number | null>((resolve) => {
+        try {
+          chrome.downloads.download(
+            { url: targetUrl, filename: resolvedFilename, saveAs: false },
+            (id) => {
+              const runtimeError = chrome.runtime.lastError
+              if (runtimeError || typeof id !== "number") {
+                console.warn("[MindDock][BG][StudioBinaryFetch] direct-url-download-fail", {
+                  url: targetUrl,
+                  filename: resolvedFilename,
+                  error: runtimeError?.message ?? "unknown"
+                })
+                resolve(null)
+                return
+              }
+              resolve(id)
+            }
+          )
+        } catch (error) {
+          console.warn("[MindDock][BG][StudioBinaryFetch] direct-url-download-throw", {
+            url: targetUrl,
+            filename: resolvedFilename,
+            error: error instanceof Error ? error.message : String(error)
+          })
+          resolve(null)
+        }
+      })
+
+      if (downloadId !== null) {
+        console.log("[MindDock][BG][StudioBinaryFetch] direct-url-download-success", {
+          url: targetUrl,
+          filename: resolvedFilename,
+          downloadId
+        })
+        return downloadId
+      }
+    }
+
+    return null
+  }
+
+  const respondSuccess = async (
+    bytes: Uint8Array,
+    mimeType?: string,
+    sourceUrl?: string
+  ): Promise<
+    ChromeMessageResponse<{
+      bytesBase64?: string
+      downloaded?: boolean
+      downloadId?: number
+      mimeType?: string
+      size?: number
+      filename?: string
+    }>
+  > => {
+    const shouldDirectDownload = mode === "download" || bytes.byteLength > MAX_RAW_BYTES_FOR_MESSAGE
+
+    if (shouldDirectDownload) {
+      const resolvedFilename = normalizeBackgroundDownloadFilename(filename, mimeType)
+      const directCandidates = buildDownloadCandidates([sourceUrl ?? baseUrl, ...urls])
+      const directDownloadId = await tryDirectDownload(directCandidates, resolvedFilename)
+      if (directDownloadId !== null) {
+        return {
+          success: true,
+          payload: {
+            downloaded: true,
+            downloadId: directDownloadId,
+            mimeType,
+            size: bytes.byteLength,
+            filename: resolvedFilename
+          },
+          data: {
+            downloaded: true,
+            downloadId: directDownloadId,
+            mimeType,
+            size: bytes.byteLength,
+            filename: resolvedFilename
+          }
+        }
+      }
+
+      if (typeof URL.createObjectURL !== "function") {
+        throw new Error("Direct download failed and URL.createObjectURL is unavailable in service worker.")
+      }
+
+      const blob = new Blob([bytes], { type: mimeType || "application/octet-stream" })
+      const objectUrl = URL.createObjectURL(blob)
+      try {
+        const downloadId = await new Promise<number>((resolve, reject) => {
+          chrome.downloads.download({ url: objectUrl, filename: resolvedFilename, saveAs: false }, (id) => {
+            const runtimeError = chrome.runtime.lastError
+            if (runtimeError || typeof id !== "number") {
+              reject(new Error(runtimeError?.message || "download failed"))
+              return
+            }
+            resolve(id)
+          })
+        })
+        console.log("[MindDock][BG][StudioBinaryFetch] direct-download-success", {
+          url: baseUrl,
+          downloadId,
+          filename: resolvedFilename,
+          size: bytes.byteLength,
+          mimeType: mimeType ?? null
+        })
+
+        setTimeout(() => URL.revokeObjectURL(objectUrl), 120_000)
+        return {
+          success: true,
+          payload: {
+            downloaded: true,
+            downloadId,
+            mimeType,
+            size: bytes.byteLength,
+            filename: resolvedFilename
+          },
+          data: {
+            downloaded: true,
+            downloadId,
+            mimeType,
+            size: bytes.byteLength,
+            filename: resolvedFilename
+          }
+        }
+      } catch (error) {
+        try {
+          URL.revokeObjectURL(objectUrl)
+        } catch {
+          // ignore revoke failures
+        }
+        throw error
+      }
+    }
+
+    const bytesBase64 = bytesToBase64(bytes)
+    return {
+      success: true,
+      payload: {
+        bytesBase64,
+        mimeType,
+        size: bytes.byteLength
+      },
+      data: {
+        bytesBase64,
+        mimeType,
+        size: bytes.byteLength
+      }
+    }
+  }
+
+  if (mode === "download") {
+    const resolvedFilename = normalizeBackgroundDownloadFilename(filename)
+    const directCandidates = buildDownloadCandidates(urls)
+    const directDownloadId = await tryDirectDownload(directCandidates, resolvedFilename)
+    if (directDownloadId !== null) {
+      return {
+        success: true,
+        payload: {
+          downloaded: true,
+          downloadId: directDownloadId,
+          filename: resolvedFilename
+        },
+        data: {
+          downloaded: true,
+          downloadId: directDownloadId,
+          filename: resolvedFilename
+        }
+      }
+    }
+    console.warn("[MindDock][BG][StudioBinaryFetch] direct-mode-download-failed-continue-fetch", {
+      filename: resolvedFilename,
+      candidates: directCandidates.length
+    })
+  }
+
+  const runFetch = async (
+    targetUrl: string,
+    strategy: string,
+    init?: RequestInit
+  ): Promise<{ ok: true; bytes: Uint8Array; mimeType?: string } | { ok: false }> => {
+    try {
+      const response = await fetch(targetUrl, { redirect: "follow", ...init })
+      if (!response.ok) {
+        lastStatus = response.status
+        console.warn("[MindDock][BG][StudioBinaryFetch] http-fail", {
+          strategy,
+          status: response.status,
+          url: targetUrl
+        })
+        return { ok: false }
+      }
+      const ab = await response.arrayBuffer()
+      const mimeType = response.headers.get("content-type") ?? undefined
+      console.log("[MindDock][BG][StudioBinaryFetch] success", {
+        strategy,
+        url: targetUrl,
+        size: ab.byteLength,
+        mimeType: mimeType ?? null
+      })
+      return {
+        ok: true,
+        bytes: new Uint8Array(ab),
+        mimeType
+      }
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err)
+      console.warn("[MindDock][BG][StudioBinaryFetch] network-fail", {
+        strategy,
+        url: targetUrl,
+        error: lastError
+      })
+      return { ok: false }
+    }
+  }
+
+  for (const target of urls) {
+    const includeAttempt = await runFetch(target, "include", { credentials: "include" })
+    if (includeAttempt.ok) {
+      return respondSuccess(includeAttempt.bytes, includeAttempt.mimeType, target)
+    }
+
+    if (atToken) {
+      const authAttempt = await runFetch(target, "include+auth", {
+        credentials: "include",
+        headers: { Authorization: `Bearer ${atToken}` }
+      })
+      if (authAttempt.ok) {
+        return respondSuccess(authAttempt.bytes, authAttempt.mimeType, target)
+      }
+    }
+
+    if (atToken) {
+      const withAt = appendAtToken(target, atToken)
+      const atAttempt = await runFetch(withAt, "include+at", { credentials: "include" })
+      if (atAttempt.ok) {
+        return respondSuccess(atAttempt.bytes, atAttempt.mimeType, withAt)
+      }
+    }
+
+    const anonymousAttempt = await runFetch(target, "anonymous")
+    if (anonymousAttempt.ok) {
+      return respondSuccess(anonymousAttempt.bytes, anonymousAttempt.mimeType, target)
+    }
+  }
+
+  console.warn("[MindDock][BG][StudioBinaryFetch] failed", {
+    url: baseUrl,
+    lastStatus,
+    lastError: lastError || null
+  })
+  return {
+    success: false,
+    error: lastStatus !== null ? `Binary fetch failed (${lastStatus})` : lastError || "Binary fetch failed"
   }
 }

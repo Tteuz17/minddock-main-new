@@ -261,7 +261,16 @@ function mountTargets(): void {
   }
 
   for (const target of TARGETS) {
-    const host = target.resolveHost()
+    const currentMounted = mountedRoots.get(target.key)
+    const stickyStudioHost =
+      target.key === "studio-export" &&
+      currentMounted?.host instanceof HTMLElement &&
+      currentMounted.host.isConnected &&
+      isVisible(currentMounted.host)
+        ? currentMounted.host
+        : null
+
+    const host = stickyStudioHost ?? target.resolveHost()
     if (!(host instanceof HTMLElement) || !isVisible(host)) {
       if (target.key === "studio-export") {
         const mounted = mountedRoots.get(target.key)
