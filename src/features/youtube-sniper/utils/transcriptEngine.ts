@@ -1,6 +1,4 @@
 import { MESSAGE_ACTIONS } from "~/lib/contracts";
-
-const IS_DEV = process.env.NODE_ENV === "development";
 const MAX_BRIDGE_ATTEMPTS = 5;
 const BRIDGE_RETRY_MS = 2000;
 const TRANSCRIPT_TIMEOUT_MS = 30000;
@@ -9,19 +7,48 @@ type SniperBridgePayload = { videoId: string; baseUrl: string };
 
 let sniperData: SniperBridgePayload | null = null;
 
+function previewBaseUrl(rawBaseUrl: string): string {
+  const normalized = String(rawBaseUrl ?? "").trim();
+  if (!normalized) return "(empty)";
+  if (normalized.length <= 140) return normalized;
+  return `${normalized.slice(0, 120)}...[${normalized.length} chars]`;
+}
+
+function logSniperEngine(message: string, details?: Record<string, unknown>): void {
+  if (details) {
+    console.info(`[YT-SNIPER][ENGINE] ${message}`, details);
+    return;
+  }
+  console.info(`[YT-SNIPER][ENGINE] ${message}`);
+}
+
 window.addEventListener("message", (event) => {
   if (event.data?.source !== "yt-sniper-bridge") return;
   if (event.data?.type !== "SNIPER_DATA") return;
 
   const videoId = String(event.data?.payload?.videoId ?? "").trim();
   const baseUrl = String(event.data?.payload?.baseUrl ?? "").trim();
-  if (!videoId || !baseUrl) return;
+  if (!videoId || !baseUrl) {
+    logSniperEngine("Bridge event ignored: missing videoId or baseUrl.", {
+      hasVideoId: Boolean(videoId),
+      hasBaseUrl: Boolean(baseUrl)
+    });
+    return;
+  }
 
   sniperData = { videoId, baseUrl };
+  logSniperEngine("Bridge data updated from main world.", {
+    videoId,
+    baseUrlPreview: previewBaseUrl(baseUrl)
+  });
 });
 
 function requestSniperData(): Promise<SniperBridgePayload> {
   if (sniperData) {
+    logSniperEngine("Using cached bridge data.", {
+      videoId: sniperData.videoId,
+      baseUrlPreview: previewBaseUrl(sniperData.baseUrl)
+    });
     return Promise.resolve(sniperData);
   }
 
@@ -37,6 +64,7 @@ function requestSniperData(): Promise<SniperBridgePayload> {
       if (settled) return;
       settled = true;
       cleanup();
+      logSniperEngine("Bridge request failed after max attempts.", { attempts: MAX_BRIDGE_ATTEMPTS });
       reject(new Error("Bridge nao respondeu. Aguarde o video carregar e tente novamente."));
     };
 
@@ -45,6 +73,11 @@ function requestSniperData(): Promise<SniperBridgePayload> {
       settled = true;
       cleanup();
       sniperData = payload;
+      logSniperEngine("Bridge request succeeded.", {
+        attempts,
+        videoId: payload.videoId,
+        baseUrlPreview: previewBaseUrl(payload.baseUrl)
+      });
       resolve(payload);
     };
 
@@ -62,6 +95,7 @@ function requestSniperData(): Promise<SniperBridgePayload> {
     const attempt = () => {
       if (settled) return;
       attempts += 1;
+      logSniperEngine("Requesting sniper data from main world.", { attempt: attempts });
 
       window.postMessage(
         {
@@ -99,14 +133,26 @@ async function getVideoContext(): Promise<{ videoId: string; baseUrl?: string }>
     bridgePayload = await requestSniperData();
   } catch {
     bridgePayload = sniperData;
+    logSniperEngine("Bridge request threw error. Using last cached bridge data if available.");
   }
 
   const finalVideoId = videoIdFromUrl || String(bridgePayload?.videoId ?? "").trim();
   if (!finalVideoId) {
+    logSniperEngine("Failed to resolve final videoId.", {
+      videoIdFromUrl,
+      hasBridgePayload: Boolean(bridgePayload)
+    });
     throw new Error("VideoId nao encontrado na URL");
   }
 
   const finalBaseUrl = String(bridgePayload?.baseUrl ?? "").trim();
+  logSniperEngine("Resolved video context.", {
+    videoIdFromUrl,
+    bridgeVideoId: bridgePayload?.videoId ?? "",
+    finalVideoId,
+    hasBaseUrl: Boolean(finalBaseUrl),
+    baseUrlPreview: previewBaseUrl(finalBaseUrl)
+  });
   return finalBaseUrl
     ? { videoId: finalVideoId, baseUrl: finalBaseUrl }
     : { videoId: finalVideoId };
@@ -116,9 +162,24 @@ export async function extractTranscriptSlice(startSec: number, endSec: number): 
   const safeStart = Math.min(startSec, endSec);
   const safeEnd = Math.max(startSec, endSec);
   const { videoId, baseUrl } = await getVideoContext();
+  logSniperEngine("Starting transcript extraction request.", {
+    requestedStartSec: startSec,
+    requestedEndSec: endSec,
+    safeStartSec: safeStart,
+    safeEndSec: safeEnd,
+    videoId,
+    hasBaseUrl: Boolean(baseUrl),
+    baseUrlPreview: previewBaseUrl(baseUrl ?? "")
+  });
 
   return new Promise((resolve, reject) => {
     const timeout = window.setTimeout(() => {
+      logSniperEngine("Transcript request timed out.", {
+        timeoutMs: TRANSCRIPT_TIMEOUT_MS,
+        videoId,
+        safeStartSec: safeStart,
+        safeEndSec: safeEnd
+      });
       reject(new Error("Timeout ao buscar legenda. Tente novamente."));
     }, TRANSCRIPT_TIMEOUT_MS);
 
@@ -131,30 +192,32 @@ export async function extractTranscriptSlice(startSec: number, endSec: number): 
         window.clearTimeout(timeout);
 
         if (chrome.runtime.lastError) {
-          if (IS_DEV) {
-            console.error("[YT-SNIPER][ENGINE] runtime error:", chrome.runtime.lastError.message);
-          }
+          logSniperEngine("Runtime error returned by chrome.runtime.sendMessage.", {
+            message: chrome.runtime.lastError.message
+          });
           reject(new Error(chrome.runtime.lastError.message));
           return;
         }
 
         if (!response?.success) {
-          if (IS_DEV) {
-            console.error(
-              "[YT-SNIPER][ENGINE] response error:",
-              response?.error ?? "Falha ao buscar legenda."
-            );
-          }
+          logSniperEngine("Background responded with failure.", {
+            error: response?.error ?? "Falha ao buscar legenda."
+          });
           reject(new Error(response?.error ?? "Falha ao buscar legenda."));
           return;
         }
 
         const text = String(response?.payload?.text ?? response?.data?.text ?? "").trim();
         if (!text) {
+          logSniperEngine("Background success response came without transcript text.");
           reject(new Error("Nenhum texto encontrado no intervalo selecionado"));
           return;
         }
 
+        logSniperEngine("Transcript extraction succeeded.", {
+          textLength: text.length,
+          wordCount: text.split(/\s+/u).filter(Boolean).length
+        });
         resolve(text);
       }
     );

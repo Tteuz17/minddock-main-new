@@ -5,6 +5,14 @@ const MAX_INTERVALO = 3600;
 const SNIPER_BUTTON_ID = 'minddock-youtube-sniper-button';
 const PANEL_WIDTH = 352;
 
+function logSniperUi(message: string, details?: Record<string, unknown>): void {
+  if (details) {
+    console.info(`[YT-SNIPER][UI] ${message}`, details);
+    return;
+  }
+  console.info(`[YT-SNIPER][UI] ${message}`);
+}
+
 type SniperUIProps = {
   onClose: () => void;
   defaultNotebookId: string;
@@ -282,37 +290,70 @@ export function SniperUI({ onClose, defaultNotebookId }: SniperUIProps) {
   };
 
   async function handleExtract() {
+    logSniperUi('Extract clicked.', {
+      startSec,
+      endSec,
+      duration,
+      hasDefaultNotebookId: Boolean(defaultNotebookId?.trim()),
+      currentUrl: window.location.href,
+    });
+
     if (startSec >= endSec) {
       setStatus('error');
       setMessage('Start time must be before end time.');
+      logSniperUi('Blocked: startSec must be lower than endSec.', { startSec, endSec });
       return;
     }
     const notebookId = defaultNotebookId?.trim();
     if (!notebookId) {
       setStatus('error');
       setMessage('Select a default notebook in the popup first.');
+      logSniperUi('Blocked: default notebook not configured.');
       return;
     }
     if (endSec - startSec > MAX_INTERVALO) {
       setStatus('error');
       setMessage('Max interval is 1 hour. Adjust the sliders.');
+      logSniperUi('Blocked: interval exceeds max allowed.', {
+        startSec,
+        endSec,
+        intervalSec: endSec - startSec,
+        maxIntervalSec: MAX_INTERVALO,
+      });
       return;
     }
 
     const MAX_ATTEMPTS = 3;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      logSniperUi('Starting extract attempt.', {
+        attempt,
+        maxAttempts: MAX_ATTEMPTS,
+        startSec,
+        endSec,
+      });
       setStatus('loading');
       setMessage(attempt === 1 ? 'Extracting transcript...' : `Retrying (${attempt}/${MAX_ATTEMPTS})...`);
       setExtractedText('');
 
       try {
         const text = await extractTranscriptSlice(startSec, endSec);
+        logSniperUi('Transcript slice received.', {
+          attempt,
+          textLength: text.length,
+          words: text.split(/\s+/u).filter(Boolean).length,
+        });
         setExtractedText(text);
         setMessage('Saving to notebook...');
 
         const intervalLabel = `${formatTime(startSec)} → ${formatTime(endSec)}`;
         const sourceTitle = `${resolveYouTubeTitle()}\nURL: ${window.location.href}\nInterval: ${intervalLabel}`;
         const currentHash = await hashContent(text);
+        logSniperUi('Sending transcript to notebook.', {
+          attempt,
+          notebookId,
+          currentHash,
+          intervalLabel,
+        });
         const response = await sendRuntimeMessage('PROTOCOL_APPEND_SOURCE', {
           notebookId,
           sourceTitle,
@@ -324,12 +365,27 @@ export function SniperUI({ onClose, defaultNotebookId }: SniperUIProps) {
           currentHash,
         }, 20000);
 
-        if (!response.success) throw new Error(response.error ?? 'Failed to save.');
+        if (!response.success) {
+          logSniperUi('Notebook save failed.', {
+            attempt,
+            error: response.error ?? 'Failed to save.',
+          });
+          throw new Error(response.error ?? 'Failed to save.');
+        }
 
         setStatus('success');
         setMessage(`${text.split(' ').length} words extracted and saved.`);
+        logSniperUi('Extract and save flow finished successfully.', {
+          attempt,
+          words: text.split(/\s+/u).filter(Boolean).length,
+        });
         return;
       } catch (err: any) {
+        logSniperUi('Extract attempt failed.', {
+          attempt,
+          maxAttempts: MAX_ATTEMPTS,
+          error: err?.message ?? String(err ?? 'Unknown error'),
+        });
         if (attempt === MAX_ATTEMPTS) {
           setStatus('error');
           const msg = err.message ?? '';
