@@ -4486,6 +4486,88 @@ class MessageRouter {
 
     const safeStart = Math.max(0, Math.min(startSecRaw, endSecRaw))
     const safeEnd = Math.max(safeStart, Math.max(startSecRaw, endSecRaw))
+    const allowDomTranscriptFallback = true
+    const rangeStartMs = Math.max(0, Math.round(safeStart * 1000))
+    const rangeEndMs = Math.max(rangeStartMs, Math.round(safeEnd * 1000))
+    const payloadBaseUrl = this.normalizeTranscriptBaseUrl(record.baseUrl)
+
+    this.logSniperRouter("Starting transcript extraction (network-first).", {
+      videoId,
+      safeStart,
+      safeEnd,
+      hasPayloadBaseUrl: Boolean(payloadBaseUrl)
+    })
+
+    try {
+      const tabs = await chrome.tabs.query({ active: true, currentWindow: true })
+      const tabId = tabs.find((tab) => tab.url?.includes("youtube.com/watch"))?.id ?? null
+      if (tabId) {
+        await chrome.scripting.executeScript({
+          target: { tabId },
+          world: "MAIN",
+          func: () => {
+            const selectors = [
+              'ytd-engagement-panel-section-list-renderer[target-id="PAmodern_transcript_view"]',
+              'ytd-engagement-panel-section-list-renderer[target-id="engagement-panel-searchable-transcript"]'
+            ]
+            for (const selector of selectors) {
+              for (const panel of document.querySelectorAll<HTMLElement>(selector)) {
+                panel.style.position = "fixed"
+                panel.style.top = "-10000px"
+                panel.style.left = "-10000px"
+                panel.style.opacity = "0"
+                panel.style.pointerEvents = "none"
+                panel.style.zIndex = "-1"
+              }
+            }
+          }
+        })
+      }
+    } catch {
+      // no-op
+    }
+
+    const baseUrlCandidates: string[] = []
+    if (payloadBaseUrl) {
+      baseUrlCandidates.push(payloadBaseUrl)
+    }
+
+    const watchHtmlBaseUrl = await this.resolveCaptionBaseUrlForVideo(videoId)
+    if (watchHtmlBaseUrl && !baseUrlCandidates.includes(watchHtmlBaseUrl)) {
+      baseUrlCandidates.push(watchHtmlBaseUrl)
+    }
+
+    for (const [candidateIndex, baseUrlCandidate] of baseUrlCandidates.entries()) {
+      try {
+        const textFromBaseUrl = await this.fetchCaptionSliceFromBaseUrl(baseUrlCandidate, safeStart, safeEnd)
+        if (textFromBaseUrl) {
+          this.logSniperRouter("Transcript resolved via baseUrl.", {
+            candidateIndex,
+            textLength: textFromBaseUrl.length,
+            baseUrlPreview: this.previewTranscriptUrl(baseUrlCandidate)
+          })
+          return this.ok({ text: textFromBaseUrl.trim(), eventsCount: 0 })
+        }
+      } catch (error) {
+        this.logSniperRouter("BaseUrl candidate failed.", {
+          candidateIndex,
+          baseUrlPreview: this.previewTranscriptUrl(baseUrlCandidate),
+          error: error instanceof Error ? error.message : String(error ?? "unknown")
+        })
+      }
+    }
+
+    const textFromTimedtext = await this.fetchCaptionSliceFromTimedTextFallback(videoId, rangeStartMs, rangeEndMs)
+    if (textFromTimedtext) {
+      this.logSniperRouter("Transcript resolved via timedtext fallback.", {
+        textLength: textFromTimedtext.length
+      })
+      return this.ok({ text: textFromTimedtext.trim(), eventsCount: 0 })
+    }
+
+    if (!allowDomTranscriptFallback) {
+      return this.fail("Nao foi possivel extrair a legenda sem abrir o painel de transcript do YouTube.")
+    }
 
     this.logSniperRouter("Starting transcript extraction via DOM (Plano B).", { videoId, safeStart, safeEnd })
 
@@ -4600,9 +4682,13 @@ class MessageRouter {
             })
           }
 
-          Array.from(document.querySelectorAll("ytd-engagement-panel-section-list-renderer")).forEach((el) => {
-            if (el.getAttribute("visibility") === "ENGAGEMENT_PANEL_VISIBILITY_EXPANDED")
-              el.setAttribute("visibility", "ENGAGEMENT_PANEL_VISIBILITY_HIDDEN")
+          Array.from(document.querySelectorAll<HTMLElement>("ytd-engagement-panel-section-list-renderer")).forEach((el) => {
+            el.style.position = "fixed"
+            el.style.top = "-10000px"
+            el.style.left = "-10000px"
+            el.style.opacity = "0"
+            el.style.pointerEvents = "none"
+            el.style.zIndex = "-1"
           })
           await new Promise((r) => setTimeout(r, 300))
 
@@ -4684,24 +4770,14 @@ class MessageRouter {
           }
           console.log("[SNIPER][FUNC] segmentos no intervalo:", lines.length)
 
-          let closeBtn: HTMLElement | null = null
-          for (const label of CLOSE_LABELS) {
-            const all = Array.from(
-              document.querySelectorAll<HTMLElement>(`button[aria-label="${label}"]`)
-            ).filter((b) => !b.closest("ytd-engagement-panel-section-list-renderer") && !b.closest(".ytp-chrome-controls"))
-            if (all.length > 0) {
-              closeBtn = all[0]
-              break
-            }
-          }
-          if (closeBtn) {
-            closeBtn.click()
-          } else {
-            document.querySelectorAll("ytd-engagement-panel-section-list-renderer").forEach((el) => {
-              if (el.getAttribute("visibility") === "ENGAGEMENT_PANEL_VISIBILITY_EXPANDED")
-                el.setAttribute("visibility", "ENGAGEMENT_PANEL_VISIBILITY_HIDDEN")
-            })
-          }
+          Array.from(document.querySelectorAll<HTMLElement>("ytd-engagement-panel-section-list-renderer")).forEach((el) => {
+            el.style.position = "fixed"
+            el.style.top = "-10000px"
+            el.style.left = "-10000px"
+            el.style.opacity = "0"
+            el.style.pointerEvents = "none"
+            el.style.zIndex = "-1"
+          })
           removeHideStyle()
 
           const text =

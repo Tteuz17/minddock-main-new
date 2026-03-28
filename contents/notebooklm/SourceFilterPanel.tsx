@@ -629,6 +629,7 @@ export function SourceFilterPanel() {
 
   return (
     <section
+      data-tour-id="source-filters-panel"
       onMouseDown={stopPanelEventPropagation}
       onClick={stopPanelEventPropagation}
       className="relative mt-2 w-full overflow-visible rounded-[22px] border border-white/[0.06] bg-[#08090b] p-3.5 shadow-[0_12px_28px_rgba(0,0,0,0.18)]">
@@ -660,14 +661,18 @@ export function SourceFilterPanel() {
 
           <div className="inline-flex shrink-0 items-center gap-1 rounded-[16px] border border-white/[0.06] bg-[#0d0f12] p-1">
             <DownloadSourcesButton onClick={openExportPanel} />
-            <PanelActionButton title={uiCopy.refreshGoogleDocsTitle} onClick={refreshSources}>
+            <PanelActionButton
+              title={uiCopy.refreshGoogleDocsTitle}
+              onClick={refreshSources}
+              tourId="source-filters-refresh-gdocs-btn">
               <RefreshCw size={15} strokeWidth={1.8} />
             </PanelActionButton>
             <div ref={groupsMenuRef} className="relative">
               <PanelActionButton
                 title={uiCopy.sourceGroupsTitle}
                 onClick={toggleSavedSourceGroupsMenu}
-                active={isGroupsMenuOpen}>
+                active={isGroupsMenuOpen}
+                tourId="source-filters-groups-btn">
                 <Folder size={15} strokeWidth={1.8} />
               </PanelActionButton>
               {isGroupsMenuOpen ? (
@@ -723,6 +728,7 @@ export function SourceFilterPanel() {
               onClick={() => {
                 requestDeleteSelectedSources()
               }}
+              tourId="source-filters-delete-selected-btn"
               disabled={isDeletingSources}>
               <Trash2 size={15} strokeWidth={1.8} />
             </PanelActionButton>
@@ -738,6 +744,7 @@ export function SourceFilterPanel() {
                 <button
                   key={filter.type}
                   type="button"
+                  data-tour-id={`source-filter-chip-${String(filter.type).toLowerCase()}`}
                   onClick={() => handleToggleFilter(filter.type)}
                   className={[
                     "inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-[11px] font-medium tracking-[0.01em] transition-colors",
@@ -753,6 +760,7 @@ export function SourceFilterPanel() {
 
             <button
               type="button"
+              data-tour-id="source-filters-save-group-btn"
               onClick={openSaveSelectionDialog}
               className={[
                 "ml-auto mt-0 ml-6 inline-flex items-center gap-1.5 rounded-full border px-3.5 py-1.5 text-[11px] font-semibold transition-colors",
@@ -2027,12 +2035,14 @@ function PanelActionButton(props: {
   children: ReactNode
   active?: boolean
   disabled?: boolean
+  tourId?: string
 }) {
-  const { title, onClick, children, active = false, disabled = false } = props
+  const { title, onClick, children, active = false, disabled = false, tourId } = props
 
   return (
     <button
       type="button"
+      data-tour-id={tourId}
       title={title}
       aria-label={title}
       aria-pressed={active}

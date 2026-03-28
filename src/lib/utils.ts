@@ -163,6 +163,37 @@ export function formatChatAsReadableMarkdown(
   return `${header}${meta}${body}`
 }
 
+function stripMarkdownBoldMarkers(value: string): string {
+  const normalizedValue = String(value ?? "").replace(/\r/g, "")
+  if (!normalizedValue) {
+    return ""
+  }
+
+  let output = normalizedValue
+
+  for (let pass = 0; pass < 3; pass += 1) {
+    const next = output
+      .replace(/\*\*\*([^\n*][^*\n]*?)\*\*\*/g, "$1")
+      .replace(/\*\*([^\n*][^*\n]*?)\*\*/g, "$1")
+      .replace(/__([^\n_][^_\n]*?)__/g, "$1")
+      .replace(/\*\*\*/g, "")
+      .replace(/__(?=\S)|(?<=\S)__/g, "")
+      .replace(/\*\*(?=\S)|(?<=\S)\*\*/g, "")
+      .replace(/^\s*\*+\s+/gm, "• ")
+      .replace(/(?<=\S)\*(?=\S)/g, "")
+      .replace(/(?<=\S)_(?=\S)/g, "")
+      .replace(/~~/g, "")
+
+    if (next === output) {
+      break
+    }
+
+    output = next
+  }
+
+  return output.replace(/\n{3,}/g, "\n\n").trim()
+}
+
 export function formatChatAsReadableMarkdownV2(
   platform: string,
   messages: Array<{ role: string; content: string }>,
@@ -170,6 +201,7 @@ export function formatChatAsReadableMarkdownV2(
 ): string {
   const normalizedPlatform = normalizeChatPlatformLabel(platform)
   const normalizedTitle = String(title ?? "").trim()
+  const isReddit = normalizedPlatform.toLowerCase() === "reddit"
   const divider = "------------------------------------------------------------"
   const header = normalizedTitle
     ? `# ${normalizedTitle}\n\n`
@@ -178,7 +210,9 @@ export function formatChatAsReadableMarkdownV2(
   const body = messages
     .map((message) => {
       const roleLabel = message.role === "user" ? "Usuario:" : `${normalizedPlatform}:`
-      return `${roleLabel}\n\n${String(message.content ?? "").trim()}`
+      const content = String(message.content ?? "").trim()
+      const normalizedContent = isReddit ? stripMarkdownBoldMarkers(content) : content
+      return `${roleLabel}\n\n${normalizedContent}`
     })
     .join(`\n\n${divider}\n\n`)
 

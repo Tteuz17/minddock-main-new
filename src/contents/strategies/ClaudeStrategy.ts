@@ -1,129 +1,61 @@
 import type { CSSProperties } from "react"
 
 import type { ContentStrategy, StrategyMenuAlign } from "./types"
-import {
-  INLINE_CONTAINER_STYLE,
-  clampNumber,
-  queryFirstVisibleElement,
-  resolveFallbackPlacement,
-  tryMountAfterElement,
-  tryMountInToolbar
-} from "./dom-utils"
+import { clampNumber, queryFirstVisibleElement, resolveFallbackPlacement } from "./dom-utils"
 
-const CLAUDE_TOP_ACTION_ANCHOR_SELECTORS = [
-  "header button[aria-label*='copy' i]",
-  "header button[aria-label*='share' i]",
-  "header button[aria-label*='compart' i]",
-  "header button[title*='copy' i]",
-  "header button[title*='share' i]",
-  "header button[title*='compart' i]",
-  "header [data-testid*='copy' i] button",
-  "header [data-testid*='share' i] button",
-  "header button[data-testid*='copy' i]",
-  "header button[data-testid*='share' i]",
-  "header button[aria-haspopup='menu']",
-  "header button[aria-expanded]"
-] as const
+const CLAUDE_BLOCKED_ROUTES = /^\/(new|projects|settings|login|upgrade|billing|team|referral|oauth)(?:\/|$)/i
 
-const CLAUDE_TOP_ACTION_CONTAINER_SELECTORS = [
-  "header .right-3",
-  "header [class*='right']",
-  "header [class*='actions']",
-  "header [class*='controls']",
-  "header [class*='buttons']",
-  "header nav",
-  "header"
+const CLAUDE_TITLE_SELECTORS = [
+  // Conversation title in header
+  "header button[id^='radix-'][class*='inline-flex']",
+  "header button[id^='radix-']",
+  "header h1",
+  "header [class*='font-semibold'][class*='truncate']",
+  "header [class*='conversation-title']",
+  "header [class*='chat-title']"
 ] as const
 
 const FLOATING_BUTTON_SIZE_PX = 32
-const FLOATING_BUTTON_GAP_PX = 6
+const FLOATING_BUTTON_GAP_PX = 30
 
-function resolveClaudeHeaderActionAnchor(): HTMLElement | null {
-  const preferredAnchor = queryFirstVisibleElement(CLAUDE_TOP_ACTION_ANCHOR_SELECTORS)
-  if (preferredAnchor) {
-    return preferredAnchor
-  }
+function isClaudeChatRoute(): boolean {
+  const pathname = window.location.pathname
+  if (CLAUDE_BLOCKED_ROUTES.test(pathname)) return false
+  return /^\/(chat|c)\/[a-zA-Z0-9-]+/i.test(pathname) || pathname === "/"
+}
 
-  const header = document.querySelector("header")
-  if (header instanceof HTMLElement) {
-    const controls = Array.from(
-      header.querySelectorAll<HTMLElement>("button, [role='button'], a[role='button'], a")
-    ).filter((control) => {
-      const rect = control.getBoundingClientRect()
-      return (
-        rect.width >= 16 &&
-        rect.height >= 16 &&
-        rect.bottom > 0 &&
-        rect.top < Math.min(window.innerHeight, 220) &&
-        rect.right > window.innerWidth * 0.55
-      )
-    })
+function resolveClaudeTitleAnchor(): HTMLElement | null {
+  if (!isClaudeChatRoute()) return null
 
-    if (controls.length > 0) {
-      let rightMostControl = controls[0]
-      let rightMost = rightMostControl.getBoundingClientRect().right
-      for (const control of controls) {
-        const rectRight = control.getBoundingClientRect().right
-        if (rectRight > rightMost) {
-          rightMost = rectRight
-          rightMostControl = control
-        }
-      }
+  for (const selector of CLAUDE_TITLE_SELECTORS) {
+    let candidates: Element[] = []
+    try {
+      candidates = Array.from(document.querySelectorAll(selector))
+    } catch {
+      continue
+    }
 
-      const rowTop = rightMostControl.getBoundingClientRect().top
-      let rowLeftMostControl = rightMostControl
-      let rowLeftMost = rightMostControl.getBoundingClientRect().left
-      for (const control of controls) {
-        const rect = control.getBoundingClientRect()
-        if (Math.abs(rect.top - rowTop) <= 14 && rect.left < rowLeftMost) {
-          rowLeftMost = rect.left
-          rowLeftMostControl = control
-        }
-      }
-
-      return rowLeftMostControl
+    for (const candidate of candidates) {
+      if (!(candidate instanceof HTMLElement)) continue
+      if (!candidate.isConnected) continue
+      const style = window.getComputedStyle(candidate)
+      if (style.display === "none" || style.visibility === "hidden") continue
+      const rect = candidate.getBoundingClientRect()
+      if (rect.width < 20 || rect.height < 16) continue
+      if (rect.top < 0 || rect.top > 100) continue
+      return candidate
     }
   }
 
-  return queryFirstVisibleElement(CLAUDE_TOP_ACTION_CONTAINER_SELECTORS)
-}
-
-function resolveClaudeFloatingPlacement(anchor: HTMLElement): CSSProperties {
-  const rect = anchor.getBoundingClientRect()
-  const minTop = 8
-  const maxTop = Math.max(minTop, window.innerHeight - FLOATING_BUTTON_SIZE_PX - 8)
-  const top = clampNumber(
-    Math.round(rect.top + (rect.height - FLOATING_BUTTON_SIZE_PX) / 2),
-    minTop,
-    maxTop
-  )
-
-  const minLeft = 8
-  const maxLeft = Math.max(minLeft, window.innerWidth - FLOATING_BUTTON_SIZE_PX - 8)
-  const preferredLeft = Math.round(rect.left - FLOATING_BUTTON_SIZE_PX - FLOATING_BUTTON_GAP_PX)
-  const left =
-    preferredLeft >= minLeft
-      ? clampNumber(preferredLeft, minLeft, maxLeft)
-      : clampNumber(Math.round(rect.right + FLOATING_BUTTON_GAP_PX), minLeft, maxLeft)
-
-  return {
-    position: "fixed",
-    top: `${top}px`,
-    left: `${left}px`,
-    zIndex: 2147483646,
-    pointerEvents: "auto"
-  }
+  return null
 }
 
 export class ClaudeStrategy implements ContentStrategy {
   readonly id = "claude"
 
-  private mountedInline = false
-
   matches(url: string): boolean {
     try {
-      const host = new URL(url).hostname.toLowerCase()
-      return host.includes("claude.ai")
+      return new URL(url).hostname.toLowerCase().includes("claude.ai")
     } catch {
       return false
     }
@@ -133,27 +65,46 @@ export class ClaudeStrategy implements ContentStrategy {
     return document.body
   }
 
-  mountHost(host: HTMLElement): boolean {
-    this.mountedInline =
-      tryMountAfterElement(host, CLAUDE_TOP_ACTION_ANCHOR_SELECTORS, CLAUDE_TOP_ACTION_CONTAINER_SELECTORS) ||
-      tryMountInToolbar(host, CLAUDE_TOP_ACTION_CONTAINER_SELECTORS)
-    return this.mountedInline
+  // Never mount inline to avoid React conflicts
+  mountHost(_host: HTMLElement): boolean {
+    return false
   }
 
   getStyles(): CSSProperties {
-    if (this.mountedInline) {
-      return INLINE_CONTAINER_STYLE
+    const hidden: CSSProperties = {
+      position: "fixed",
+      top: "-9999px",
+      left: "-9999px",
+      pointerEvents: "none"
     }
 
-    const anchor = resolveClaudeHeaderActionAnchor()
-    if (anchor) {
-      const rect = anchor.getBoundingClientRect()
-      if (rect.width > 0 && rect.height > 0) {
-        return resolveClaudeFloatingPlacement(anchor)
-      }
-    }
+    if (!isClaudeChatRoute()) return hidden
 
-    return resolveFallbackPlacement().style
+    const anchor = resolveClaudeTitleAnchor()
+    if (!anchor) return hidden
+
+    const rect = anchor.getBoundingClientRect()
+    if (rect.width === 0 || rect.height === 0) return hidden
+
+    const top = clampNumber(
+      Math.round(rect.top + (rect.height - FLOATING_BUTTON_SIZE_PX) / 2),
+      8,
+      Math.max(8, window.innerHeight - FLOATING_BUTTON_SIZE_PX - 8)
+    )
+
+    const left = clampNumber(
+      Math.round(rect.right + FLOATING_BUTTON_GAP_PX),
+      8,
+      Math.max(8, window.innerWidth - FLOATING_BUTTON_SIZE_PX - 8)
+    )
+
+    return {
+      position: "fixed",
+      top: `${top}px`,
+      left: `${left}px`,
+      zIndex: 2147483646,
+      pointerEvents: "auto"
+    }
   }
 
   getMenuAlign(): StrategyMenuAlign {

@@ -135,6 +135,27 @@ function foldNoiseKey(value: unknown): string {
     .trim()
 }
 
+function stripRedditMarkdownEmphasis(value: string): string {
+  if (!value) {
+    return ""
+  }
+
+  let output = value
+  for (let pass = 0; pass < 3; pass += 1) {
+    const next = output
+      .replace(/\*\*([^\n*][^*\n]*?)\*\*/g, "$1")
+      .replace(/__([^\n_][^_\n]*?)__/g, "$1")
+      .replace(/~~([^\n~][^~\n]*?)~~/g, "$1")
+
+    if (next === output) {
+      break
+    }
+    output = next
+  }
+
+  return output
+}
+
 function asAbsoluteUrl(raw: string): string {
   const value = tidy(raw)
   if (!value) {
@@ -306,7 +327,7 @@ function choosePrimaryPost(seed?: Element | null): Element | null {
 }
 
 function sanitizePostBody(raw: string): string {
-  const rows = tidy(raw)
+  const rows = tidy(stripRedditMarkdownEmphasis(raw))
     .split("\n")
     .map((line) => tidy(line))
     .filter(Boolean)
@@ -426,7 +447,7 @@ function extractPost(root: Element): PostSnapshot | null {
 }
 
 function sanitizeComment(raw: string): string {
-  const lines = tidy(raw).split("\n")
+  const lines = tidy(stripRedditMarkdownEmphasis(raw)).split("\n")
   const filtered = lines.filter((line) => {
     const normalized = fold(line)
     if (!normalized) {
@@ -872,7 +893,7 @@ function makeCommentMessages(comments: CommentSnapshot[], options: Required<Redd
   }
 
   const lines = comments.map((comment, index) => {
-    const block = [`Comentario ${index + 1}`, `Usuario: u/${comment.author}`, comment.body, "----------------------------------------"]
+    const block = [`Comentario ${index + 1}`, `Usuario: u/${comment.author}`, comment.body]
     return tidy(block.join("\n"))
   })
 

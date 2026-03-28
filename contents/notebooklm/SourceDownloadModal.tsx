@@ -630,6 +630,7 @@ function ModalInner(props: SourceDownloadModalProps) {
           aria-modal="true"
           aria-label={uiCopy.modalAriaLabel}
           className="panel"
+          data-tour-id="source-vault-panel"
           ref={panelRef}
           onClick={stopProp}
           onMouseDown={stopProp}>
@@ -645,7 +646,13 @@ function ModalInner(props: SourceDownloadModalProps) {
                 <p className="modal-title">{uiCopy.modalTitle}</p>
                 <p className="modal-subtitle">{uiCopy.modalSubtitleSelection}</p>
               </div>
-              <button className="close-btn" type="button" onClick={onClose}>✕</button>
+              <button
+                className="close-btn"
+                type="button"
+                data-tour-id="source-vault-close-btn"
+                onClick={onClose}>
+                ✕
+              </button>
             </header>
 
             {/* Body */}
@@ -662,7 +669,7 @@ function ModalInner(props: SourceDownloadModalProps) {
               </div>
 
               {/* Format buttons */}
-              <div className="format-grid">
+              <div className="format-grid" data-tour-id="source-vault-format-grid">
                 {downloadFormatOptions.map((item) => {
                   const meta = downloadFormatMeta[item]
                   return (
@@ -735,6 +742,7 @@ function ModalInner(props: SourceDownloadModalProps) {
               <button
                 type="button"
                 className="btn-ghost"
+                data-tour-id="source-vault-preview-btn"
                 disabled={isLoadingSources || isRunningDownload || isPreparingPreview || displayTotalCount === 0 || displaySelectedCount === 0 || isPreviewMode}
                 onClick={onPreparePreview}>
                 <Eye width={16} height={16} />
@@ -743,6 +751,7 @@ function ModalInner(props: SourceDownloadModalProps) {
               <button
                 type="button"
                 className="btn-primary"
+                data-tour-id="source-vault-download-btn"
                 disabled={isRunningDownload || isPreparingPreview || downloadCount === 0}
                 onClick={onDownloadSelected}>
                 <Download width={16} height={16} />

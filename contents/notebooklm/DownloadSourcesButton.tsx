@@ -13,6 +13,7 @@ export function DownloadSourcesButton(props: DownloadSourcesButtonProps) {
   return (
     <button
       type="button"
+      data-tour-id="source-filters-download-btn"
       title={title}
       aria-label={title}
       onMouseDown={swallowClick}

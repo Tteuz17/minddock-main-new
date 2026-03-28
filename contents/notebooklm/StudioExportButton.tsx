@@ -1,6 +1,6 @@
 ﻿import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 import { createRoot, type Root } from "react-dom/client"
-import { ChevronDown, Download, Eye, FileText, Loader2, Search } from "lucide-react"
+import { AlertTriangle, CheckCircle2, ChevronDown, Download, Eye, FileText, Loader2, Search } from "lucide-react"
 import { jsPDF } from "jspdf"
 import { MESSAGE_ACTIONS, type StandardResponse } from "~/lib/contracts"
 import { base64ToBytes } from "~/lib/base64-bytes"
@@ -29,8 +29,58 @@ const NATIVE_SLIDES_CAPTURE_ONLY_EVENT = "MINDDOCK_NATIVE_SLIDES_CAPTURE_ONLY"
 const NATIVE_SLIDES_DOWNLOAD_RE = /^https:\/\/contribution\.usercontent\.google\.com\/download\?/i
 
 const SLIDES_PDF_CACHE_TTL = 25_000
-const SLIDES_NATIVE_WAIT_TIMEOUT_MS = 3_500
+const SLIDES_NATIVE_WAIT_TIMEOUT_MS = 12_000
 const TOAST_MIN_VISIBLE_MS = 650
+const STUDIO_GLOBAL_TOAST_CSS = `
+  .minddock-global-toast-root { font-family: 'Inter', 'Segoe UI', system-ui, sans-serif; }
+  .minddock-global-toast-root .toast {
+    position: fixed;
+    bottom: 16px; right: 16px;
+    z-index: 2147483647;
+    width: min(390px, calc(100vw - 24px));
+    overflow: hidden;
+    border-radius: 12px;
+    border: 1px solid rgba(255,255,255,0.18);
+    background: #000; color: #d6dae0;
+    box-shadow: 0 18px 48px rgba(0,0,0,0.56);
+    pointer-events: auto;
+  }
+  .minddock-global-toast-root .toast-top-bar {
+    position: absolute; inset-inline: 0; top: 0;
+    height: 2px; background: #facc15;
+  }
+  .minddock-global-toast-root .toast-inner { position: relative; z-index: 1; padding: 16px; }
+  .minddock-global-toast-root .toast-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+  .minddock-global-toast-root .toast-badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    border-radius: 6px; border: 1px solid rgba(255,255,255,0.2);
+    background: #111; padding: 2px 8px;
+    font-size: 10px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.08em; color: #b5becc; margin-bottom: 4px;
+  }
+  .minddock-global-toast-root .toast-title { font-size: 18px; font-weight: 600; color: #fff; line-height: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .minddock-global-toast-root .toast-close {
+    flex-shrink: 0;
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 28px; height: 28px;
+    border-radius: 7px; border: 1px solid rgba(255,255,255,0.2);
+    background: #111; color: #8f98a6; cursor: pointer; font-size: 14px;
+    transition: border-color 150ms, background 150ms, color 150ms;
+  }
+  .minddock-global-toast-root .toast-close:hover { border-color: rgba(250,204,21,0.45); background: #171717; color: #facc15; }
+  .minddock-global-toast-root .toast-close:disabled { opacity: 0.55; cursor: not-allowed; }
+  .minddock-global-toast-root .toast-close:disabled:hover { border-color: rgba(255,255,255,0.2); background: #111; color: #8f98a6; }
+  .minddock-global-toast-root .toast-message { font-size: 14px; color: #b9c2d0; line-height: 1.6; margin-bottom: 12px; min-height: 44px; }
+  .minddock-global-toast-root .toast-progress-row { display: flex; justify-content: space-between; font-size: 11px; color: #8b97ab; margin-bottom: 4px; }
+  .minddock-global-toast-root .toast-bar-track {
+    height: 10px; border-radius: 6px;
+    border: 1px solid rgba(255,255,255,0.18); background: #111; overflow: hidden;
+  }
+  .minddock-global-toast-root .toast-bar-fill { height: 100%; border-radius: 9999px; background: #facc15; transition: width 300ms; }
+  .minddock-global-toast-root .icon-yellow { color: #facc15; }
+  .minddock-global-toast-root .icon-red    { color: #f87171; }
+  .minddock-global-toast-root .icon-green  { color: #34d399; }
+`
 
 interface NativePdfEntry {
   url: string
@@ -644,6 +694,10 @@ interface StudioExportToastState {
   progress: number
 }
 
+type SetStudioExportToast = (
+  value: StudioExportToastState | ((current: StudioExportToastState) => StudioExportToastState)
+) => void
+
 interface StudioCacheItem {
   id?: string
   title?: string
@@ -899,6 +953,7 @@ async function requestBackgroundBinaryAsset(
   | { downloaded: true; downloadId: number; mimeType?: string; size?: number; filename?: string }
   | null
 > {
+  const startedAt = performance.now()
   console.log("[MindDock][StudioBinaryFetch][CS] request", {
     url,
     hasToken: Boolean(options?.atToken),
@@ -933,7 +988,8 @@ async function requestBackgroundBinaryAsset(
   if (!response?.success) {
     console.warn("[MindDock][StudioBinaryFetch][CS] response-fail", {
       url,
-      error: response?.error ?? null
+      error: response?.error ?? null,
+      elapsedMs: Math.round(performance.now() - startedAt)
     })
     return null
   }
@@ -946,7 +1002,8 @@ async function requestBackgroundBinaryAsset(
         downloadId,
         size: typeof payload?.size === "number" ? payload.size : undefined,
         mimeType: typeof payload?.mimeType === "string" ? payload.mimeType : undefined,
-        filename: typeof payload?.filename === "string" ? payload.filename : undefined
+        filename: typeof payload?.filename === "string" ? payload.filename : undefined,
+        elapsedMs: Math.round(performance.now() - startedAt)
       })
       return {
         downloaded: true,
@@ -960,7 +1017,10 @@ async function requestBackgroundBinaryAsset(
 
   const base64 = String(payload?.bytesBase64 ?? "").trim()
   if (!base64) {
-    console.warn("[MindDock][StudioBinaryFetch][CS] empty-bytes", { url })
+    console.warn("[MindDock][StudioBinaryFetch][CS] empty-bytes", {
+      url,
+      elapsedMs: Math.round(performance.now() - startedAt)
+    })
     return null
   }
 
@@ -969,7 +1029,8 @@ async function requestBackgroundBinaryAsset(
   console.log("[MindDock][StudioBinaryFetch][CS] success", {
     url,
     size: bytes.byteLength,
-    mimeType: mimeType ?? null
+    mimeType: mimeType ?? null,
+    elapsedMs: Math.round(performance.now() - startedAt)
   })
 
   return {
@@ -1837,7 +1898,7 @@ function readStudioTitlesFromDom(): StudioEntry[] {
         (typeof crypto !== "undefined" && "randomUUID" in crypto
           ? crypto.randomUUID()
           : `studio-dom-${hashString(key)}`),
-      title: hasTitle ? title : "Carregando resultado do Estudio...",
+      title: hasTitle ? title : "Carregando resultado do Estúdio...",
       meta,
       type: iconType ?? meta,
       content: "",
@@ -2705,15 +2766,6 @@ async function captureNativeSlidesPdfUrlForEntry(entry: StudioEntry, timeoutMs =
     }
 
     enableNativeSlidesCaptureOnlyMode(timeoutMs + 1200)
-    pdfButton.addEventListener(
-      "click",
-      (event) => {
-        event.preventDefault()
-        event.stopPropagation()
-        event.stopImmediatePropagation()
-      },
-      { once: true, capture: true }
-    )
     clickElementBestEffort(pdfButton)
     await sleep(220)
     return true
@@ -3976,8 +4028,45 @@ async function fetchBinaryFile(
 > {
   const baseUrl = normalizeAssetUrl(url)
   if (!looksLikeUrl(baseUrl)) throw new Error("URL invalida para asset.")
+  const startedAt = performance.now()
+  const ms = () => Math.round(performance.now() - startedAt)
+  const shortUrl = (value: string) => (value.length > 80 ? `${value.slice(0, 80)}...` : value)
+
+  const logAttempt = (
+    strategy: string,
+    candidate: string,
+    outcome: { ok: boolean; status?: number; mimeType?: string | null; size?: number; error?: string }
+  ) => {
+    const elapsedMs = Math.round(performance.now() - startedAt)
+    if (outcome.ok) {
+      console.log("[MindDock][StudioBinaryFetch][CS] attempt-success", {
+        strategy,
+        candidate,
+        status: outcome.status ?? null,
+        mimeType: outcome.mimeType ?? null,
+        size: outcome.size ?? null,
+        elapsedMs
+      })
+      return
+    }
+    console.warn("[MindDock][StudioBinaryFetch][CS] attempt-fail", {
+      strategy,
+      candidate,
+      status: outcome.status ?? null,
+      error: outcome.error ?? null,
+      elapsedMs
+    })
+  }
+
+  console.log("[MindDock][BinaryFetch] START", {
+    url: shortUrl(baseUrl),
+    mode: opts?.mode ?? "buffer",
+    hasToken: Boolean(opts?.atToken),
+    authUser: opts?.authUser ?? null
+  })
 
   try {
+    console.log("[MindDock][BinaryFetch] tentando background...", { ms: ms() })
     const bgResult = await requestBackgroundBinaryAsset(baseUrl, {
       atToken: opts?.atToken,
       authUser: opts?.authUser,
@@ -3985,23 +4074,46 @@ async function fetchBinaryFile(
       filename: opts?.filename
     })
     if (bgResult && "downloaded" in bgResult && bgResult.downloaded) {
+      console.log("[MindDock][BinaryFetch] background -> direct-download OK", {
+        ms: ms(),
+        downloadId: bgResult.downloadId,
+        size: bgResult.size ?? null,
+        mimeType: bgResult.mimeType ?? null
+      })
       console.log("[MindDock][StudioBinaryFetch][CS] background-direct-download-success", {
         url: baseUrl,
         downloadId: bgResult.downloadId,
         size: bgResult.size,
-        mimeType: bgResult.mimeType ?? null
+        mimeType: bgResult.mimeType ?? null,
+        elapsedMs: Math.round(performance.now() - startedAt)
       })
       return bgResult
     }
     if (bgResult) {
-      console.log("[MindDock][StudioBinaryFetch][CS] using-background-result", {
-        url: baseUrl,
+      console.log("[MindDock][BinaryFetch] background -> buffer OK", {
+        ms: ms(),
         size: bgResult.bytes.byteLength,
         mimeType: bgResult.mimeType ?? null
       })
+      console.log("[MindDock][StudioBinaryFetch][CS] using-background-result", {
+        url: baseUrl,
+        size: bgResult.bytes.byteLength,
+        mimeType: bgResult.mimeType ?? null,
+        elapsedMs: Math.round(performance.now() - startedAt)
+      })
       return bgResult
     }
-  } catch {
+    console.warn("[MindDock][BinaryFetch] background -> null (sem resultado)", { ms: ms() })
+  } catch (bgErr) {
+    console.warn("[MindDock][BinaryFetch] background -> ERRO", {
+      ms: ms(),
+      error: getErrorMessage(bgErr)
+    })
+    console.warn("[MindDock][StudioBinaryFetch][CS] background-call-error", {
+      url: baseUrl,
+      error: getErrorMessage(bgErr),
+      elapsedMs: Math.round(performance.now() - startedAt)
+    })
     // fallback para tentativas locais já existentes
   }
 
@@ -4016,36 +4128,116 @@ async function fetchBinaryFile(
   for (const candidate of candidates) {
     if (opts?.atToken) {
       try {
+        console.log("[MindDock][BinaryFetch] tentando include+auth...", {
+          ms: ms(),
+          candidate: shortUrl(candidate)
+        })
+        const localStart = performance.now()
         const r = await fetch(candidate, {
           credentials: "include",
           headers: { Authorization: `Bearer ${opts.atToken}` }
         })
         if (r.ok) {
           const ab = await r.arrayBuffer()
+          console.log("[MindDock][BinaryFetch] include+auth -> OK", {
+            ms: ms(),
+            ok: true,
+            status: r.status,
+            size: ab.byteLength,
+            mimeType: r.headers.get("content-type") ?? null,
+            candidate: shortUrl(candidate)
+          })
+          logAttempt("include+auth", candidate, {
+            ok: true,
+            status: r.status,
+            mimeType: r.headers.get("content-type") ?? null,
+            size: ab.byteLength
+          })
           return {
             bytes: new Uint8Array(ab),
             mimeType: r.headers.get("content-type") ?? undefined,
             size: ab.byteLength
           }
         }
+        const stepElapsed = Math.round(performance.now() - localStart)
+        console.warn("[MindDock][BinaryFetch] include+auth -> FAIL", {
+          ms: ms(),
+          ok: false,
+          status: r.status,
+          candidate: shortUrl(candidate)
+        })
+        logAttempt("include+auth", candidate, {
+          ok: false,
+          status: r.status,
+          error: `http ${r.status} (${stepElapsed}ms)`
+        })
         lastStatus = r.status
       } catch (e) {
+        console.warn("[MindDock][BinaryFetch] include+auth -> ERRO", {
+          ms: ms(),
+          candidate: shortUrl(candidate),
+          error: getErrorMessage(e)
+        })
+        logAttempt("include+auth", candidate, {
+          ok: false,
+          error: getErrorMessage(e)
+        })
         lastErr = e
       }
     }
 
     try {
+      console.log("[MindDock][BinaryFetch] tentando include...", {
+        ms: ms(),
+        candidate: shortUrl(candidate)
+      })
+      const localStart = performance.now()
       const r = await fetch(candidate, { credentials: "include" })
       if (r.ok) {
         const ab = await r.arrayBuffer()
+        console.log("[MindDock][BinaryFetch] include -> OK", {
+          ms: ms(),
+          ok: true,
+          status: r.status,
+          size: ab.byteLength,
+          mimeType: r.headers.get("content-type") ?? null,
+          candidate: shortUrl(candidate)
+        })
+        logAttempt("include", candidate, {
+          ok: true,
+          status: r.status,
+          mimeType: r.headers.get("content-type") ?? null,
+          size: ab.byteLength
+        })
         return {
           bytes: new Uint8Array(ab),
           mimeType: r.headers.get("content-type") ?? undefined,
           size: ab.byteLength
         }
       }
+      const stepElapsed = Math.round(performance.now() - localStart)
+      console.warn("[MindDock][BinaryFetch] include -> FAIL", {
+        ms: ms(),
+        ok: false,
+        status: r.status,
+        candidate: shortUrl(candidate)
+      })
+      logAttempt("include", candidate, {
+        ok: false,
+        status: r.status,
+        error: `http ${r.status} (${stepElapsed}ms)`
+      })
       lastStatus = r.status
     } catch (e) {
+      console.warn("[MindDock][BinaryFetch] include -> ERRO", {
+        ms: ms(),
+        candidate: shortUrl(candidate),
+        error: getErrorMessage(e)
+      })
+      logAttempt("include", candidate, {
+        ok: false,
+        error: getErrorMessage(e)
+      })
       lastErr = e
     }
 
@@ -4053,37 +4245,123 @@ async function fetchBinaryFile(
       try {
         const u = new URL(candidate)
         u.searchParams.set("at", opts.atToken)
-        const r = await fetch(u.toString(), { credentials: "include" })
+        const targetWithAt = u.toString()
+        console.log("[MindDock][BinaryFetch] tentando include+at...", {
+          ms: ms(),
+          candidate: shortUrl(targetWithAt)
+        })
+        const localStart = performance.now()
+        const r = await fetch(targetWithAt, { credentials: "include" })
         if (r.ok) {
           const ab = await r.arrayBuffer()
+          console.log("[MindDock][BinaryFetch] include+at -> OK", {
+            ms: ms(),
+            ok: true,
+            status: r.status,
+            size: ab.byteLength,
+            mimeType: r.headers.get("content-type") ?? null,
+            candidate: shortUrl(targetWithAt)
+          })
+          logAttempt("include+at", targetWithAt, {
+            ok: true,
+            status: r.status,
+            mimeType: r.headers.get("content-type") ?? null,
+            size: ab.byteLength
+          })
           return {
             bytes: new Uint8Array(ab),
             mimeType: r.headers.get("content-type") ?? undefined,
             size: ab.byteLength
           }
         }
+        const stepElapsed = Math.round(performance.now() - localStart)
+        console.warn("[MindDock][BinaryFetch] include+at -> FAIL", {
+          ms: ms(),
+          ok: false,
+          status: r.status,
+          candidate: shortUrl(targetWithAt)
+        })
+        logAttempt("include+at", targetWithAt, {
+          ok: false,
+          status: r.status,
+          error: `http ${r.status} (${stepElapsed}ms)`
+        })
         lastStatus = r.status
       } catch (e) {
+        console.warn("[MindDock][BinaryFetch] include+at -> ERRO", {
+          ms: ms(),
+          candidate: shortUrl(candidate),
+          error: getErrorMessage(e)
+        })
+        logAttempt("include+at", candidate, {
+          ok: false,
+          error: getErrorMessage(e)
+        })
         lastErr = e
       }
     }
 
     try {
+      console.log("[MindDock][BinaryFetch] tentando anonymous...", {
+        ms: ms(),
+        candidate: shortUrl(candidate)
+      })
+      const localStart = performance.now()
       const r = await fetch(candidate)
       if (r.ok) {
         const ab = await r.arrayBuffer()
+        console.log("[MindDock][BinaryFetch] anonymous -> OK", {
+          ms: ms(),
+          ok: true,
+          status: r.status,
+          size: ab.byteLength,
+          mimeType: r.headers.get("content-type") ?? null,
+          candidate: shortUrl(candidate)
+        })
+        logAttempt("anonymous", candidate, {
+          ok: true,
+          status: r.status,
+          mimeType: r.headers.get("content-type") ?? null,
+          size: ab.byteLength
+        })
         return {
           bytes: new Uint8Array(ab),
           mimeType: r.headers.get("content-type") ?? undefined,
           size: ab.byteLength
         }
       }
+      const stepElapsed = Math.round(performance.now() - localStart)
+      console.warn("[MindDock][BinaryFetch] anonymous -> FAIL", {
+        ms: ms(),
+        ok: false,
+        status: r.status,
+        candidate: shortUrl(candidate)
+      })
+      logAttempt("anonymous", candidate, {
+        ok: false,
+        status: r.status,
+        error: `http ${r.status} (${stepElapsed}ms)`
+      })
       lastStatus = r.status
     } catch (e) {
+      console.warn("[MindDock][BinaryFetch] anonymous -> ERRO", {
+        ms: ms(),
+        candidate: shortUrl(candidate),
+        error: getErrorMessage(e)
+      })
+      logAttempt("anonymous", candidate, {
+        ok: false,
+        error: getErrorMessage(e)
+      })
       lastErr = e
     }
   }
 
+  console.warn("[MindDock][BinaryFetch] TODAS FALHARAM", {
+    ms: ms(),
+    lastStatus,
+    lastError: lastErr ? getErrorMessage(lastErr) : null
+  })
   if (lastStatus !== null) throw new Error(`All fetch attempts failed. Last status: ${lastStatus}`)
   if (lastErr instanceof Error) throw lastErr
   throw new Error("Falha ao baixar asset visual.")
@@ -4165,6 +4443,36 @@ function getErrorMessage(error: unknown): string {
   }
 }
 
+type StudioBuildPerfEntry = {
+  id: string
+  title: string
+  mode: "binary" | "text"
+  type?: string | null
+  kind?: string | null
+  reason?: string | null
+  outcome: string
+  elapsedMs: number
+  fetchMs?: number
+  waitMs?: number
+  size?: number
+  extension?: string
+  error?: string
+}
+
+type StudioBuildPerfSummary = {
+  totalMs: number
+  entries: StudioBuildPerfEntry[]
+  counters: Record<string, number>
+}
+
+type StudioBuildProgressEvent = {
+  phase: "start" | "done"
+  index: number
+  total: number
+  entry: Pick<StudioEntry, "id" | "title" | "type" | "kind">
+  outcome?: string
+}
+
 function mergeEntriesWithRefreshedArtifacts(
   baseEntries: StudioEntry[],
   rawItems: StudioCacheItem[]
@@ -4222,16 +4530,72 @@ async function buildStudioExportFiles(
   entries: StudioEntry[],
   format: StudioFormat,
   draftMap: Record<string, string>,
-  diagnostics?: { traceId?: string }
-): Promise<{ files: Array<{ filename: string; bytes: Uint8Array; isAsset?: boolean }>; directDownloads: number }> {
+  diagnostics?: { traceId?: string; onProgress?: (event: StudioBuildProgressEvent) => void }
+): Promise<{
+  files: Array<{ filename: string; bytes: Uint8Array; isAsset?: boolean }>
+  directDownloads: number
+  perfSummary: StudioBuildPerfSummary
+}> {
   const usedNames = new Set<string>()
   const encoder = new TextEncoder()
   const files: Array<{ filename: string; bytes: Uint8Array; isAsset?: boolean }> = []
   let directDownloads = 0
   const traceId = diagnostics?.traceId
+  const reportProgress = diagnostics?.onProgress
+  const totalEntries = entries.length
+  const perfStartedAt = performance.now()
+  const perfEntries: StudioBuildPerfEntry[] = []
+  const perfCounters: Record<string, number> = {}
+
+  const bumpPerfCounter = (outcome: string) => {
+    perfCounters[outcome] = (perfCounters[outcome] ?? 0) + 1
+  }
 
   for (const [index, entry] of entries.entries()) {
+    const entryStartedAt = performance.now()
+    reportProgress?.({
+      phase: "start",
+      index,
+      total: totalEntries,
+      entry: {
+        id: entry.id,
+        title: entry.title,
+        type: entry.type,
+        kind: entry.kind
+      }
+    })
     const binary = shouldExportAsBinaryAsset(entry)
+    const finalizePerf = (data: Omit<StudioBuildPerfEntry, "id" | "title" | "mode" | "type" | "kind" | "reason" | "elapsedMs"> & { mode: "binary" | "text" }) => {
+      const row: StudioBuildPerfEntry = {
+        id: String(entry.id ?? ""),
+        title: String(entry.title ?? ""),
+        mode: data.mode,
+        type: entry.type ?? null,
+        kind: entry.kind ?? null,
+        reason: binary.reason ?? null,
+        outcome: data.outcome,
+        elapsedMs: Math.round(performance.now() - entryStartedAt),
+        fetchMs: data.fetchMs,
+        waitMs: data.waitMs,
+        size: data.size,
+        extension: data.extension,
+        error: data.error
+      }
+      perfEntries.push(row)
+      bumpPerfCounter(row.outcome)
+      reportProgress?.({
+        phase: "done",
+        index,
+        total: totalEntries,
+        entry: {
+          id: entry.id,
+          title: entry.title,
+          type: entry.type,
+          kind: entry.kind
+        },
+        outcome: row.outcome
+      })
+    }
 
     if (binary.ok && binary.assetUrl) {
       logStudioExportDecision(entry, "binary", binary.reason)
@@ -4258,6 +4622,7 @@ async function buildStudioExportFiles(
         const filenameHint = `${sanitizeFilename(base)}.${resolveAssetExtension(entry, finalUrl, entry.mimeType)}`
         const notebookIdForSlides = isSlidesLike ? (resolveNotebookIdFromUrl() ?? undefined) : undefined
         const nativeSlidesUrl = isSlidesLike ? consumeNativeSlidesPdfUrl(notebookIdForSlides) : null
+        let waitMs: number | undefined
 
         if (traceId) {
             console.log(`[MindDock][StudioExportTrace][${traceId}] binary-fetch-start`, {
@@ -4274,6 +4639,7 @@ async function buildStudioExportFiles(
           }
 
         if (isSlidesLike) {
+          const slideWaitStartedAt = performance.now()
           let effectiveNativeSlidesUrl = nativeSlidesUrl
           if (!effectiveNativeSlidesUrl) {
             if (traceId) {
@@ -4282,7 +4648,7 @@ async function buildStudioExportFiles(
                 title: entry.title
               })
             }
-            const triggered = await captureNativeSlidesPdfUrlForEntry(entry, 2200)
+            const triggered = await captureNativeSlidesPdfUrlForEntry(entry, 5600)
             if (triggered) {
               console.log("[MindDock][Slides] trigger disparado, aguardando URL nativa...", {
                 id: entry.id,
@@ -4300,6 +4666,7 @@ async function buildStudioExportFiles(
               })
             }
           }
+          waitMs = Math.round(performance.now() - slideWaitStartedAt)
 
           if (!effectiveNativeSlidesUrl) {
             throw new Error("URL nativa de download do Slides nao foi capturada a tempo.")
@@ -4324,6 +4691,14 @@ async function buildStudioExportFiles(
           }
           const nativeFilename = buildUniqueStudioFilename(base, "pdf", usedNames)
           files.push({ filename: nativeFilename, bytes: nativePdfResult.bytes, isAsset: true })
+          finalizePerf({
+            mode: "binary",
+            outcome: "slides-native-pdf",
+            fetchMs: Math.round(performance.now() - fetchStartedAt),
+            waitMs,
+            size: nativePdfResult.bytes.byteLength,
+            extension: "pdf"
+          })
           console.log("[MindDock][Slides] saved native multi-page pdf", {
             id: entry.id,
             title: entry.title,
@@ -4352,6 +4727,13 @@ async function buildStudioExportFiles(
 
         if ("downloaded" in fetchResult && fetchResult.downloaded) {
           directDownloads += 1
+          finalizePerf({
+            mode: "binary",
+            outcome: "binary-direct-download",
+            fetchMs: Math.round(performance.now() - fetchStartedAt),
+            size: fetchResult.size,
+            extension: extensionFromMime(fetchResult.mimeType) ?? resolveAssetExtension(entry, finalUrl, fetchResult.mimeType)
+          })
           console.log("[MindDock][StudioExportDecision] binary-direct-background-download", {
             title: entry.title,
             downloadId: fetchResult.downloadId,
@@ -4376,6 +4758,13 @@ async function buildStudioExportFiles(
         const extension = resolveAssetExtension(entry, finalUrl, effectiveMimeType)
         const filename = buildUniqueStudioFilename(base, extension, usedNames)
         files.push({ filename, bytes, isAsset: true })
+        finalizePerf({
+          mode: "binary",
+          outcome: "binary-buffer-file",
+          fetchMs: Math.round(performance.now() - fetchStartedAt),
+          size: bytes.byteLength,
+          extension
+        })
         if (traceId) {
           console.log(`[MindDock][StudioExportTrace][${traceId}] binary-fetch-buffer-success`, {
             id: entry.id,
@@ -4390,6 +4779,13 @@ async function buildStudioExportFiles(
       } catch (err) {
         if (isSlidesLike) {
           const message = getErrorMessage(err)
+          finalizePerf({
+            mode: "binary",
+            outcome: "slides-error",
+            fetchMs: Math.round(performance.now() - fetchStartedAt),
+            error: message,
+            extension: "pdf"
+          })
           console.error("[MindDock][StudioExportDecision] slides-pdf-required-no-fallback", {
             id: entry.id,
             title: entry.title,
@@ -4397,12 +4793,19 @@ async function buildStudioExportFiles(
             url: finalUrl,
             error: message
           })
-          throw new Error(`Slides deve ser exportado em PDF. ${message}`)
+          continue
         }
 
         const urlFilename = buildUniqueStudioFilename(base, "url", usedNames)
         const shortcut = `[InternetShortcut]\nURL=${finalUrl}\n`
         files.push({ filename: urlFilename, bytes: encoder.encode(shortcut), isAsset: true })
+        finalizePerf({
+          mode: "binary",
+          outcome: "binary-fallback-url",
+          fetchMs: Math.round(performance.now() - fetchStartedAt),
+          extension: "url",
+          error: getErrorMessage(err)
+        })
         console.warn("[MindDock][StudioExportDecision] binary-fallback-url", entry.title, err)
         if (traceId) {
           console.warn(`[MindDock][StudioExportTrace][${traceId}] binary-fetch-fallback-url`, {
@@ -4428,12 +4831,14 @@ async function buildStudioExportFiles(
     if (format === "markdown") {
       const filename = buildUniqueStudioFilename(base, "md", usedNames)
       files.push({ filename, bytes: encoder.encode(body) })
+      finalizePerf({ mode: "text", outcome: "text-markdown", extension: "md", size: body.length })
       continue
     }
 
     if (format === "text") {
       const filename = buildUniqueStudioFilename(base, "txt", usedNames)
       files.push({ filename, bytes: encoder.encode(body) })
+      finalizePerf({ mode: "text", outcome: "text-plain", extension: "txt", size: body.length })
       continue
     }
 
@@ -4441,18 +4846,36 @@ async function buildStudioExportFiles(
       const filename = buildUniqueStudioFilename(base, "docx", usedNames)
       const bytes = await buildDocxBytesFromText(body)
       files.push({ filename, bytes })
+      finalizePerf({ mode: "text", outcome: "text-docx", extension: "docx", size: bytes.byteLength })
       continue
     }
 
     const filename = buildUniqueStudioFilename(base, "pdf", usedNames)
     const pdfBytes = await buildPdfBytesViaBackground(body)
     files.push({ filename, bytes: pdfBytes })
+    finalizePerf({ mode: "text", outcome: "text-pdf", extension: "pdf", size: pdfBytes.byteLength })
   }
 
-  return { files, directDownloads }
+  return {
+    files,
+    directDownloads,
+    perfSummary: {
+      totalMs: Math.round(performance.now() - perfStartedAt),
+      entries: perfEntries,
+      counters: perfCounters
+    }
+  }
 }
 
-function StudioModal({ onClose }: { onClose: () => void }) {
+function StudioModal({
+  onClose,
+  exportToast,
+  setExportToast
+}: {
+  onClose: () => void
+  exportToast: StudioExportToastState
+  setExportToast: SetStudioExportToast
+}) {
   const stopProp = (e: React.MouseEvent) => e.stopPropagation()
   const modalTitle = resolveStudioLabelText() ?? "Studio"
   const [format, setFormat] = useState<StudioFormat>("markdown")
@@ -4466,11 +4889,6 @@ function StudioModal({ onClose }: { onClose: () => void }) {
   const [isExporting, setIsExporting] = useState(false)
   const [isHydrating, setIsHydrating] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [exportToast, setExportToast] = useState<StudioExportToastState>({
-    status: "idle",
-    message: "",
-    progress: 0
-  })
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [isLoading, setIsLoading] = useState(true)
   const selectAllCheckboxRef = useRef<HTMLInputElement | null>(null)
@@ -4647,30 +5065,6 @@ function StudioModal({ onClose }: { onClose: () => void }) {
     window.addEventListener(EXPORT_PREVIEW_CLOSE_EVENT, handlePreviewClose)
     return () => window.removeEventListener(EXPORT_PREVIEW_CLOSE_EVENT, handlePreviewClose)
   }, [])
-
-  useEffect(() => {
-    if (exportToast.status !== "running") {
-      return
-    }
-    const timer = window.setInterval(() => {
-      setExportToast((current) => {
-        if (current.status !== "running") return current
-        const nextProgress = Math.min(92, current.progress + (current.progress < 60 ? 8 : 4))
-        return { ...current, progress: nextProgress }
-      })
-    }, 240)
-    return () => window.clearInterval(timer)
-  }, [exportToast.status])
-
-  useEffect(() => {
-    if (exportToast.status === "idle" || exportToast.status === "running") {
-      return
-    }
-    const timer = window.setTimeout(() => {
-      setExportToast({ status: "idle", message: "", progress: 0 })
-    }, exportToast.status === "error" ? 5200 : 3000)
-    return () => window.clearTimeout(timer)
-  }, [exportToast.status])
 
   useEffect(() => {
     let active = true
@@ -5421,7 +5815,7 @@ function StudioModal({ onClose }: { onClose: () => void }) {
       return {
         id: entry.id,
         title: entry.title,
-        subtitle: entry.meta ?? "Resultado do Estudio",
+        subtitle: entry.meta ?? "Resultado do Estúdio",
         content
       }
     })
@@ -5664,7 +6058,7 @@ function StudioModal({ onClose }: { onClose: () => void }) {
       })
       .catch((refreshError) => {
         const message =
-          refreshError instanceof Error ? refreshError.message : "Falha ao atualizar o Estudio."
+          refreshError instanceof Error ? refreshError.message : "Falha ao atualizar o Estúdio."
         setError(message)
       })
       .finally(() => {
@@ -5794,8 +6188,8 @@ function StudioModal({ onClose }: { onClose: () => void }) {
     setError(null)
     setExportToast({
       status: "running",
-      message: "Preparando exportacao do Estudio...",
-      progress: 8
+      message: "Iniciando exportação do Estúdio...",
+      progress: 6
     })
 
     try {
@@ -5803,6 +6197,54 @@ function StudioModal({ onClose }: { onClose: () => void }) {
       const traceId = `studio-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
       const trace = (stage: string, details?: Record<string, unknown>) => {
         console.log(`[MindDock][StudioExportTrace][${traceId}] ${stage}`, details ?? {})
+      }
+      const phaseRows: Array<{ phase: string; elapsedMs: number; details?: string }> = []
+      let buildPerfSummary: StudioBuildPerfSummary | null = null
+      const compactTitle = (value: string, max = 42) => {
+        const clean = String(value ?? "").trim().replace(/\s+/g, " ")
+        if (!clean) return "arquivo sem nome"
+        return clean.length > max ? `${clean.slice(0, max)}...` : clean
+      }
+      const recordPhase = (phase: string, elapsedMs: number, details?: Record<string, unknown>) => {
+        phaseRows.push({
+          phase,
+          elapsedMs,
+          details: details ? JSON.stringify(details).slice(0, 220) : undefined
+        })
+      }
+      const printExportDiagnostics = (finalStage: string, errorMessage?: string) => {
+        const elapsedTotalMs = Math.round(performance.now() - stageStart)
+        recordPhase("total", elapsedTotalMs, { finalStage, error: errorMessage ?? null })
+        const slowestEntries = buildPerfSummary
+          ? [...buildPerfSummary.entries]
+              .sort((a, b) => b.elapsedMs - a.elapsedMs)
+              .slice(0, 8)
+              .map((entry) => ({
+                title: entry.title,
+                outcome: entry.outcome,
+                elapsedMs: entry.elapsedMs,
+                fetchMs: entry.fetchMs ?? null,
+                waitMs: entry.waitMs ?? null,
+                extension: entry.extension ?? null,
+                error: entry.error ?? null
+              }))
+          : []
+
+        console.groupCollapsed(
+          `[MindDock][StudioExportDiag][${traceId}] final=${finalStage} total=${elapsedTotalMs}ms`
+        )
+        console.table(phaseRows)
+        if (buildPerfSummary) {
+          console.log("[MindDock][StudioExportDiag] build-counters", buildPerfSummary.counters)
+          console.log("[MindDock][StudioExportDiag] build-total-ms", buildPerfSummary.totalMs)
+          if (slowestEntries.length > 0) {
+            console.table(slowestEntries)
+          }
+        }
+        if (errorMessage) {
+          console.warn("[MindDock][StudioExportDiag] error", errorMessage)
+        }
+        console.groupEnd()
       }
 
       trace("start", {
@@ -5812,8 +6254,8 @@ function StudioModal({ onClose }: { onClose: () => void }) {
       })
       setExportToast({
         status: "running",
-        message: `Exportando ${selectedEntries.length} item(ns) do Estudio...`,
-        progress: 14
+        message: `Preparando ${selectedEntries.length} item(ns) selecionado(s)...`,
+        progress: 12
       })
       await flushUiFrame()
 
@@ -5844,19 +6286,23 @@ function StudioModal({ onClose }: { onClose: () => void }) {
         const hydrationStart = performance.now()
         const hydrated = await withTimeout(hydrateEntriesWithViewerContent(selectedEntries), 1200)
         if (hydrated && Array.isArray(hydrated)) {
+          const hydrationElapsed = Math.round(performance.now() - hydrationStart)
           exportEntries = hydrated
           trace("hydrate-success", {
-            elapsedMs: Math.round(performance.now() - hydrationStart),
+            elapsedMs: hydrationElapsed,
             entries: hydrated.length
           })
+          recordPhase("hydrate-success", hydrationElapsed, { entries: hydrated.length })
         } else {
           console.warn("[MindDock][StudioExport] hydration-timeout-skip", {
             selected: selectedEntries.length
           })
+          const hydrationElapsed = Math.round(performance.now() - hydrationStart)
           trace("hydrate-timeout", {
-            elapsedMs: Math.round(performance.now() - hydrationStart),
+            elapsedMs: hydrationElapsed,
             timeoutMs: 1200
           })
+          recordPhase("hydrate-timeout", hydrationElapsed, { timeoutMs: 1200 })
         }
 
         console.log("[MindDock][StudioExport] hydration-finished", {
@@ -5865,9 +6311,12 @@ function StudioModal({ onClose }: { onClose: () => void }) {
         })
         setExportToast((current) =>
           current.status === "running"
-            ? { ...current, message: "Conteudo preparado. Montando arquivos...", progress: Math.max(current.progress, 28) }
+            ? { ...current, message: "Conteúdo preparado. Iniciando exportação...", progress: Math.max(current.progress, 18) }
             : current
         )
+      }
+      if (!needsHydration) {
+        recordPhase("hydrate-skipped", 0, { reason: "all-selected-have-content-or-asset" })
       }
 
       const needsRefreshByEntry = (entry: StudioEntry): boolean => {
@@ -5926,15 +6375,35 @@ function StudioModal({ onClose }: { onClose: () => void }) {
             console.warn("[MindDock][StudioExport] refresh-timeout-or-empty-continue", {
               pendingIds: idsNeedingRefresh.length
             })
+            const refreshElapsed = Math.round(performance.now() - refreshStart)
             trace("refresh-empty-or-timeout", {
-              elapsedMs: Math.round(performance.now() - refreshStart),
+              elapsedMs: refreshElapsed,
               timeoutMs: 1200
             })
+            recordPhase("refresh-empty-or-timeout", refreshElapsed, {
+              timeoutMs: 1200,
+              ids: idsNeedingRefresh.length
+            })
+            setExportToast((current) =>
+              current.status === "running"
+                ? { ...current, progress: Math.max(current.progress, 22), message: "Atualizacao concluida. Gerando arquivos..." }
+                : current
+            )
           } else {
+            const refreshElapsed = Math.round(performance.now() - refreshStart)
             trace("refresh-success", {
-              elapsedMs: Math.round(performance.now() - refreshStart),
+              elapsedMs: refreshElapsed,
               refreshedItems: refreshedItems.length
             })
+            recordPhase("refresh-success", refreshElapsed, {
+              refreshedItems: refreshedItems.length,
+              ids: idsNeedingRefresh.length
+            })
+            setExportToast((current) =>
+              current.status === "running"
+                ? { ...current, progress: Math.max(current.progress, 26), message: "Itens atualizados. Gerando arquivos..." }
+                : current
+            )
           }
 
           if (refreshedItems.length > 0) {
@@ -5943,7 +6412,11 @@ function StudioModal({ onClose }: { onClose: () => void }) {
         } catch (refreshErr) {
           console.warn("[MindDock][StudioExportDecision] refresh-before-export-failed", refreshErr)
           trace("refresh-error", { error: getErrorMessage(refreshErr) })
+          recordPhase("refresh-error", 0, { error: getErrorMessage(refreshErr) })
         }
+      }
+      if (idsNeedingRefresh.length === 0) {
+        recordPhase("refresh-skipped", 0, { reason: "all-selected-already-resolved" })
       }
 
       if (exportEntries.length > 0) {
@@ -5954,28 +6427,81 @@ function StudioModal({ onClose }: { onClose: () => void }) {
       const buildStart = performance.now()
       setExportToast((current) =>
         current.status === "running"
-          ? { ...current, message: "Gerando arquivos de exportacao...", progress: Math.max(current.progress, 48) }
+          ? { ...current, message: "Preparando arquivos para download...", progress: Math.max(current.progress, 30) }
           : current
       )
-      const { files, directDownloads } = await buildStudioExportFiles(exportEntries, exportFormat, exportDraftMap, {
-        traceId
+      const { files, directDownloads, perfSummary } = await buildStudioExportFiles(exportEntries, exportFormat, exportDraftMap, {
+        traceId,
+        onProgress: (event) => {
+          setExportToast((current) => {
+            if (current.status === "success" || current.status === "error") return current
+            const total = Math.max(event.total, 1)
+            const ratio = event.phase === "done" ? (event.index + 1) / total : (event.index + 0.18) / total
+            const nextProgress = Math.max(30, Math.min(92, Math.round(30 + ratio * 62)))
+            const title = compactTitle(event.entry.title)
+            const message =
+              event.phase === "done"
+                ? `Exportado: ${title}`
+                : `Exportando arquivo: ${title}`
+            return {
+              status: "running",
+              message,
+              progress: nextProgress
+            }
+          })
+        }
       })
+      buildPerfSummary = perfSummary
       const fallbackUrlFiles = files.filter((file) => file.isAsset && file.filename.toLowerCase().endsWith(".url"))
+      const ignoredFailures = buildPerfSummary.entries.filter((entry) => entry.outcome === "slides-error")
+      const ignoredFailureCount = ignoredFailures.length
+      const ignoredFailureSuffix =
+        ignoredFailureCount > 0 ? ` ${ignoredFailureCount} item(ns) falharam e foram ignorados.` : ""
+      const buildElapsed = Math.round(performance.now() - buildStart)
       trace("build-files-finished", {
-        elapsedMs: Math.round(performance.now() - buildStart),
+        elapsedMs: buildElapsed,
         files: files.length,
         directDownloads,
         fallbackUrlFiles: fallbackUrlFiles.length,
-        fallbackNames: fallbackUrlFiles.map((file) => file.filename)
+        fallbackNames: fallbackUrlFiles.map((file) => file.filename),
+        ignoredFailures: ignoredFailureCount
       })
+      recordPhase("build-files", buildElapsed, {
+        files: files.length,
+        directDownloads,
+        fallbackUrlFiles: fallbackUrlFiles.length,
+        ignoredFailures: ignoredFailureCount
+      })
+      if (ignoredFailureCount > 0) {
+        console.warn("[MindDock][StudioExportDecision] ignored-entry-failures", {
+          count: ignoredFailureCount,
+          entries: ignoredFailures.map((entry) => ({ title: entry.title, error: entry.error ?? null }))
+        })
+      }
+      if (buildPerfSummary.entries.length > 0) {
+        const compactRows = buildPerfSummary.entries.map((entry) => ({
+          title: entry.title,
+          mode: entry.mode,
+          outcome: entry.outcome,
+          elapsedMs: entry.elapsedMs,
+          fetchMs: entry.fetchMs ?? null,
+          waitMs: entry.waitMs ?? null,
+          extension: entry.extension ?? null,
+          error: entry.error ?? null
+        }))
+        console.table(compactRows)
+      }
 
       if (files.length === 0 && directDownloads === 0) {
-        throw new Error("Nenhum arquivo do Studio foi gerado para exportacao.")
+        if (ignoredFailureCount > 0) {
+          throw new Error(`Nenhum arquivo foi gerado. ${ignoredFailureCount} item(ns) falharam na exportação.`)
+        }
+        throw new Error("Nenhum arquivo do Studio foi gerado para exportação.")
       }
       if (files.length === 0 && directDownloads > 0) {
         setExportToast({
           status: "success",
-          message: `Exportacao concluida (${directDownloads} download(s) direto(s)).`,
+          message: `Exportação concluída (${directDownloads} download(s) direto(s)).${ignoredFailureSuffix}`,
           progress: 100
         })
         console.log("[MindDock][StudioExportDecision] export-completed-via-direct-download", {
@@ -5985,6 +6511,10 @@ function StudioModal({ onClose }: { onClose: () => void }) {
           elapsedTotalMs: Math.round(performance.now() - stageStart),
           directDownloads
         })
+        recordPhase("finish-direct-download-only", Math.round(performance.now() - stageStart), {
+          directDownloads
+        })
+        printExportDiagnostics("finish-direct-download-only")
         await sleep(TOAST_MIN_VISIBLE_MS)
         return
       }
@@ -6013,7 +6543,7 @@ function StudioModal({ onClose }: { onClose: () => void }) {
           if (ok) {
             setExportToast({
               status: "success",
-              message: "Exportacao concluida via download direto.",
+              message: `Exportação concluída via download direto.${ignoredFailureSuffix}`,
               progress: 100
             })
             console.log("[MindDock][StudioExportDecision] direct-download-fallback-success", {
@@ -6024,6 +6554,10 @@ function StudioModal({ onClose }: { onClose: () => void }) {
               elapsedTotalMs: Math.round(performance.now() - stageStart),
               filename: directName
             })
+            recordPhase("finish-direct-download-fallback-success", Math.round(performance.now() - stageStart), {
+              filename: directName
+            })
+            printExportDiagnostics("finish-direct-download-fallback-success")
             await sleep(TOAST_MIN_VISIBLE_MS)
             return
           }
@@ -6041,8 +6575,10 @@ function StudioModal({ onClose }: { onClose: () => void }) {
       const shouldZip = files.length > 1
       const filenameBase = buildMindDockZipBase("Estudio")
       trace("download-plan", { shouldZip, files: files.length })
+      recordPhase("download-plan", 0, { shouldZip, files: files.length })
 
       if (shouldZip) {
+        const zipStart = performance.now()
         setExportToast({
           status: "running",
           message: `Compactando ${files.length} arquivo(s)...`,
@@ -6052,7 +6588,7 @@ function StudioModal({ onClose }: { onClose: () => void }) {
         const zipBytes = await buildZip(files.map((file) => ({ filename: file.filename, bytes: file.bytes })))
         setExportToast({
           status: "success",
-          message: `Exportacao concluida: ${filenameBase}.zip`,
+          message: `Exportação concluída: ${filenameBase}.zip${ignoredFailureSuffix}`,
           progress: 100
         })
         triggerDownload(
@@ -6063,14 +6599,20 @@ function StudioModal({ onClose }: { onClose: () => void }) {
           elapsedTotalMs: Math.round(performance.now() - stageStart),
           filename: `${filenameBase}.zip`
         })
+        recordPhase("zip-build", Math.round(performance.now() - zipStart), {
+          output: `${filenameBase}.zip`,
+          files: files.length
+        })
+        printExportDiagnostics("finish-zip")
         await sleep(TOAST_MIN_VISIBLE_MS)
         return
       }
 
       const [file] = files
+      const singleStart = performance.now()
       setExportToast({
         status: "success",
-        message: `Exportacao concluida: ${file.filename}`,
+        message: `Exportação concluída: ${file.filename}${ignoredFailureSuffix}`,
         progress: 100
       })
       triggerDownload(new Blob([toArrayBuffer(file.bytes)]), file.filename)
@@ -6078,6 +6620,10 @@ function StudioModal({ onClose }: { onClose: () => void }) {
         elapsedTotalMs: Math.round(performance.now() - stageStart),
         filename: file.filename
       })
+      recordPhase("single-file-download", Math.round(performance.now() - singleStart), {
+        filename: file.filename
+      })
+      printExportDiagnostics("finish-single-file")
       await sleep(TOAST_MIN_VISIBLE_MS)
     } catch (exportError) {
       const message =
@@ -6091,6 +6637,7 @@ function StudioModal({ onClose }: { onClose: () => void }) {
       console.warn("[MindDock][StudioExportTrace] finish-error", {
         message: getErrorMessage(exportError)
       })
+      printExportDiagnostics("finish-error", getErrorMessage(exportError))
       throw exportError
     } finally {
       setIsExporting(false)
@@ -6187,6 +6734,7 @@ function StudioModal({ onClose }: { onClose: () => void }) {
           aria-modal="true"
           aria-label="Studio export"
           className="panel"
+          data-tour-id="studio-export-panel"
           onClick={stopProp}
           onMouseDown={stopProp}>
           <div className="inner">
@@ -6249,6 +6797,7 @@ function StudioModal({ onClose }: { onClose: () => void }) {
                 <button
                   type="button"
                   className="studio-refresh-button"
+                  data-tour-id="studio-export-refresh-btn"
                   onClick={handleForceRefresh}
                   disabled={isRefreshing}
                 >
@@ -6315,22 +6864,6 @@ function StudioModal({ onClose }: { onClose: () => void }) {
             )}
           </div>
 
-          {exportToast.status !== "idle" && (
-            <div className={`studio-toast studio-toast--${exportToast.status}`}>
-              <div className="studio-toast-head">
-                <span>{exportToast.status === "running" ? "Exportando" : exportToast.status === "success" ? "Concluido" : "Erro"}</span>
-                <span>{Math.max(0, Math.min(100, Math.round(exportToast.progress)))}%</span>
-              </div>
-              <p className="studio-toast-msg">{exportToast.message}</p>
-              <div className="studio-toast-track">
-                <div
-                  className="studio-toast-fill"
-                  style={{ width: `${Math.max(0, Math.min(100, exportToast.progress))}%` }}
-                />
-              </div>
-            </div>
-          )}
-
           <footer className="footer">
             <button
               type="button"
@@ -6343,6 +6876,7 @@ function StudioModal({ onClose }: { onClose: () => void }) {
             <button
               type="button"
               className="btn-primary"
+              data-tour-id="studio-export-export-btn"
               onClick={() => handleExport()}
               disabled={isExporting || isHydrating || !hasSelection}>
               {isExporting || isHydrating ? (
@@ -6362,7 +6896,14 @@ function StudioModal({ onClose }: { onClose: () => void }) {
 
 export function StudioExportButton() {
   const [isOpen, setIsOpen] = useState(false)
+  const [sharedExportToast, setSharedExportToast] = useState<StudioExportToastState>({
+    status: "idle",
+    message: "",
+    progress: 0
+  })
   const { shadowRoot, injectCSS } = useShadowPortal("studio-export-modal", isOpen, 2147483646)
+  const toastMountRef = useRef<HTMLDivElement | null>(null)
+  const toastRootRef = useRef<Root | null>(null)
 
   useEffect(() => {
     if (!isOpen) return
@@ -6371,6 +6912,107 @@ export function StudioExportButton() {
   const cssInjectedRef = useRef(false)
   const mountRef = useRef<HTMLDivElement | null>(null)
   const rootRef = useRef<Root | null>(null)
+
+  useEffect(() => {
+    const container = document.createElement("div")
+    container.id = "minddock-toast-root"
+    document.body.appendChild(container)
+    toastMountRef.current = container
+    toastRootRef.current = createRoot(container)
+    return () => {
+      try {
+        toastRootRef.current?.render(null)
+      } catch {
+        // ignore
+      }
+      toastRootRef.current?.unmount()
+      toastRootRef.current = null
+      if (toastMountRef.current?.parentNode) {
+        toastMountRef.current.parentNode.removeChild(toastMountRef.current)
+      }
+      toastMountRef.current = null
+    }
+  }, [])
+
+  useEffect(() => {
+    if (sharedExportToast.status === "running" || sharedExportToast.status === "idle") return
+    if (sharedExportToast.status === "success" && sharedExportToast.progress < 100) return
+    const timeoutMs = sharedExportToast.status === "error" ? 5200 : 1800
+    const timer = window.setTimeout(() => {
+      setSharedExportToast({ status: "idle", message: "", progress: 0 })
+    }, timeoutMs)
+    return () => window.clearTimeout(timer)
+  }, [sharedExportToast.status, sharedExportToast.progress])
+
+  useEffect(() => {
+    const root = toastRootRef.current
+    if (!root) return
+    if (sharedExportToast.status === "idle") {
+      root.render(null)
+      return
+    }
+    const clampedProgress = Math.max(0, Math.min(100, Math.round(sharedExportToast.progress)))
+    const statusLabel =
+      sharedExportToast.status === "running"
+        ? "EM ANDAMENTO"
+        : sharedExportToast.status === "success"
+          ? "CONCLUIDO"
+          : "ERRO"
+    const toastTitle =
+      sharedExportToast.status === "running"
+        ? "Exportando Estúdio"
+        : sharedExportToast.status === "success"
+          ? "Exportação concluída"
+          : "Falha na exportação"
+    const canDismiss = sharedExportToast.status !== "running"
+
+    root.render(
+      <>
+        <style>{STUDIO_GLOBAL_TOAST_CSS}</style>
+        <div className="minddock-global-toast-root">
+          <div className="toast">
+            <div className="toast-top-bar" />
+            <div className="toast-inner">
+              <div className="toast-header">
+                <div style={{ minWidth: 0 }}>
+                  <div className="toast-badge">
+                    {sharedExportToast.status === "error" ? (
+                      <AlertTriangle width={11} height={11} className="icon-red" />
+                    ) : sharedExportToast.status === "success" ? (
+                      <CheckCircle2 width={11} height={11} className="icon-green" />
+                    ) : (
+                      <Download width={11} height={11} className="icon-yellow" />
+                    )}
+                    {statusLabel}
+                  </div>
+                  <div className="toast-title">{toastTitle}</div>
+                </div>
+                <button
+                  type="button"
+                  className="toast-close"
+                  aria-label="Fechar aviso"
+                  onClick={() => {
+                    if (!canDismiss) return
+                    setSharedExportToast({ status: "idle", message: "", progress: 0 })
+                  }}
+                  disabled={!canDismiss}>
+                  ✕
+                </button>
+              </div>
+              <p className="toast-message">{sharedExportToast.message}</p>
+              <div className="toast-progress-row">
+                <span>Progresso</span>
+                <span>{clampedProgress}%</span>
+              </div>
+              <div className="toast-bar-track">
+                <div className="toast-bar-fill" style={{ width: `${clampedProgress}%` }} />
+              </div>
+            </div>
+          </div>
+        </div>
+      </>
+    )
+  }, [sharedExportToast])
 
   useLayoutEffect(() => {
     if (!shadowRoot) {
@@ -6414,8 +7056,14 @@ export function StudioExportButton() {
       rootRef.current.render(null)
       return
     }
-    rootRef.current.render(<StudioModal onClose={() => setIsOpen(false)} />)
-  }, [isOpen])
+    rootRef.current.render(
+      <StudioModal
+        onClose={() => setIsOpen(false)}
+        exportToast={sharedExportToast}
+        setExportToast={setSharedExportToast}
+      />
+    )
+  }, [isOpen, sharedExportToast])
 
   return (
     <>
@@ -6425,6 +7073,7 @@ export function StudioExportButton() {
             type="button"
             title="Export"
             aria-label="Export"
+            data-tour-id="studio-export-launcher-btn"
             aria-haspopup="dialog"
             aria-expanded={isOpen}
             onMouseDown={swallowInteraction}

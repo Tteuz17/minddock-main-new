@@ -12,6 +12,7 @@ import type { SubscriptionCycle, SubscriptionTier, PlanLimits } from "~/lib/type
 
 const SERVER_CACHE_TTL_MS = 5 * 60 * 1000 // 5 min
 const ACTIVE_SUBSCRIPTION_STATUSES = new Set(["active", "trialing"])
+const DAILY_IMPORTS_UNLIMITED_EMAILS = new Set(["loveadoisoficial@gmail.com"])
 
 interface SubscriptionCache {
   tier: SubscriptionTier
@@ -28,6 +29,18 @@ interface ResolvedSubscription {
 
 class SubscriptionManager {
   private memoryCache: SubscriptionCache | null = null
+
+  private hasDailyImportsUnlimitedOverride(email: string | null | undefined): boolean {
+    const normalizedEmail = String(email ?? "")
+      .trim()
+      .toLowerCase()
+
+    if (!normalizedEmail) {
+      return false
+    }
+
+    return DAILY_IMPORTS_UNLIMITED_EMAILS.has(normalizedEmail)
+  }
 
   async getTier(): Promise<SubscriptionTier> {
     const resolved = await this.getResolvedSubscription()
@@ -82,17 +95,23 @@ class SubscriptionManager {
         return null
       }
 
-      const res = await fetch(
-        `${supabaseUrl}/rest/v1/profiles?select=subscription_tier,subscription_status,subscription_cycle&limit=1`,
-        {
+      const userId = this.extractUserIdFromJwt(token) || (await authManager.getCurrentUser())?.id || ""
+      const query = new URLSearchParams({
+        select: "subscription_tier,subscription_status,subscription_cycle",
+        limit: "1"
+      })
+      if (userId) {
+        query.set("id", `eq.${userId}`)
+      }
+
+      const res = await fetch(`${supabaseUrl}/rest/v1/profiles?${query.toString()}`, {
           headers: {
             apikey: anonKey,
             Authorization: `Bearer ${token}`,
             "Content-Type": "application/json",
             "Cache-Control": "no-store"
           }
-        }
-      )
+        })
 
       if (!res.ok) {
         return null
@@ -134,6 +153,24 @@ class SubscriptionManager {
     }
   }
 
+  private extractUserIdFromJwt(token: string | null | undefined): string | null {
+    const raw = String(token ?? "").trim()
+    if (!raw) return null
+    const parts = raw.split(".")
+    if (parts.length < 2) return null
+    const payloadPart = parts[1].replace(/-/g, "+").replace(/_/g, "/")
+    const padded = payloadPart.padEnd(Math.ceil(payloadPart.length / 4) * 4, "=")
+
+    try {
+      const decoded = atob(padded)
+      const parsed = JSON.parse(decoded) as { sub?: unknown; user_id?: unknown }
+      const id = String(parsed?.sub ?? parsed?.user_id ?? "").trim()
+      return id || null
+    } catch {
+      return null
+    }
+  }
+
   private normalizeTier(rawTier: string | undefined): SubscriptionTier {
     const candidate = String(rawTier ?? "")
       .trim()
@@ -170,7 +207,17 @@ class SubscriptionManager {
 
   async getLimits(): Promise<PlanLimits> {
     const { tier, cycle } = await this.getResolvedSubscription()
-    return resolvePlanLimits(tier, cycle)
+    const resolvedLimits = resolvePlanLimits(tier, cycle)
+    const currentUser = await authManager.getCurrentUser()
+
+    if (!this.hasDailyImportsUnlimitedOverride(currentUser?.email)) {
+      return resolvedLimits
+    }
+
+    return {
+      ...resolvedLimits,
+      imports_per_day: "unlimited"
+    }
   }
 
   async canUseFeature(feature: keyof PlanLimits): Promise<boolean> {
