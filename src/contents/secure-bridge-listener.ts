@@ -24,7 +24,6 @@ const ACCOUNT_EMAIL_KEY = "nexus_notebook_account_email"
 const PENDING_NOTEBOOK_RESULT_KEY = "minddock_pending_notebook_result"
 const PENDING_NOTEBOOK_REQUESTED_AT_KEY = "minddock_pending_notebook_requested_at"
 const PROVISIONAL_NOTEBOOK_MAX_AGE_MS = 30000
-const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i
 const BLOCKED_NOTEBOOK_TITLE_KEYS = new Set([
   "conversa",
   "conversas",
@@ -48,7 +47,6 @@ export interface StudioCacheItem {
   mimeType?: string
   sourceCount?: number
   updatedAt?: string
-  notebookId?: string
   kind?: "text" | "asset"
 }
 
@@ -64,21 +62,6 @@ function isObjectRecord(value: unknown): value is Record<string, unknown> {
 
 function normalizeString(value: unknown): string {
   return String(value ?? "").trim()
-}
-
-function normalizeNotebookScope(value: unknown): string {
-  return normalizeString(value).toLowerCase()
-}
-
-function resolveNotebookIdFromLocation(): string | null {
-  const match = String(window.location.href ?? "").match(UUID_RE)
-  return match?.[0] ?? null
-}
-
-function buildNotebookScopedStorageKey(baseKey: string, accountKey: string, notebookId?: string): string {
-  const scopedKey = buildScopedStorageKey(baseKey, accountKey)
-  const notebookScope = normalizeNotebookScope(notebookId)
-  return notebookScope ? `${scopedKey}::notebook:${notebookScope}` : scopedKey
 }
 
 function normalizeNotebookTitleKey(value: string): string {
@@ -193,7 +176,6 @@ function resolveStudioEntries(payload: unknown): StudioCacheItem[] | null {
       mimeType: normalizeString(candidate.mimeType) || undefined,
       sourceCount: typeof candidate.sourceCount === "number" ? candidate.sourceCount : undefined,
       updatedAt: normalizeString(candidate.updatedAt) || undefined,
-      notebookId: normalizeNotebookScope(candidate.notebookId) || undefined,
       kind:
         candidate.kind === "asset" || candidate.kind === "text"
           ? candidate.kind
@@ -369,35 +351,14 @@ function persistStudioCache(
   try {
     const syncedAt = new Date().toISOString()
     const accountScope = resolveCurrentAccountScope(accountHints)
-    const currentNotebookId = normalizeNotebookScope(resolveNotebookIdFromLocation())
-    const normalizedItems = items.map((item) => ({
-      ...item,
-      notebookId: normalizeNotebookScope(item.notebookId) || currentNotebookId || undefined
-    }))
 
     const scopedStorageKey = buildScopedStorageKey(STUDIO_STORAGE_KEY_BASE, accountScope.accountKey)
     const scopedSyncKey = buildScopedStorageKey(STUDIO_STORAGE_SYNC_KEY_BASE, accountScope.accountKey)
-    const notebookScopedStorageKey = buildNotebookScopedStorageKey(
-      STUDIO_STORAGE_KEY_BASE,
-      accountScope.accountKey,
-      currentNotebookId
-    )
-    const notebookScopedSyncKey = buildNotebookScopedStorageKey(
-      STUDIO_STORAGE_SYNC_KEY_BASE,
-      accountScope.accountKey,
-      currentNotebookId
-    )
 
     chrome.storage.local.set(
       {
-        [scopedStorageKey]: normalizedItems,
+        [scopedStorageKey]: items,
         [scopedSyncKey]: syncedAt,
-        ...(currentNotebookId
-          ? {
-              [notebookScopedStorageKey]: normalizedItems,
-              [notebookScopedSyncKey]: syncedAt
-            }
-          : {}),
         ...(accountScope.accountEmail ? { [ACCOUNT_EMAIL_KEY]: accountScope.accountEmail } : {}),
         ...(accountScope.authUser ? { [AUTH_USER_KEY]: accountScope.authUser } : {})
       },
@@ -407,7 +368,7 @@ function persistStudioCache(
         }
 
         notifyCacheUpdated(accountScope.accountKey)
-        logStudioSync(normalizedItems)
+        logStudioSync(items)
       }
     )
   } catch {

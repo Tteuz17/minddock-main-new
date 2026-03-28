@@ -1,5 +1,4 @@
 ﻿import type { PlasmoCSConfig } from "plasmo"
-import { STUDIO_LIST_TYPE_LABELS_PT_NUMERIC } from "~/shared/studioTypes"
 
 export const config: PlasmoCSConfig = {
   matches: ["https://notebooklm.google.com/*"],
@@ -346,7 +345,22 @@ function installPageHook() {
     return frames
   }
 
-  const STUDIO_TYPE_MAP: Record<number, string> = STUDIO_LIST_TYPE_LABELS_PT_NUMERIC
+  const STUDIO_TYPE_MAP: Record<number, string> = {
+    1: "Áudio Overview",
+    2: "Guia de Estudo",
+    3: "Briefing",
+    4: "Quiz",
+    5: "Sumário",
+    6: "Mind Map",
+    7: "FAQ",
+    8: "Linha do Tempo",
+    9: "Blog Post",
+    10: "Infográfico",
+    11: "Tabela de Dados",
+    12: "Slides",
+    13: "Flashcards",
+    14: "Vídeo Overview"
+  }
 
   function extractListItemsFromPayload(payload: unknown) {
     const out: { id: string; title: string; type?: number; typeLabel?: string }[] = []
@@ -586,5 +600,3 @@ function installPageHook() {
     if (notebookId) queueStudioListFetch(notebookId, "message")
   })
 }
-
-
