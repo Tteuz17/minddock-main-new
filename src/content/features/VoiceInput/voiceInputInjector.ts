@@ -1,4 +1,4 @@
-import { createElement } from "react"
+﻿import { createElement } from "react"
 import { createRoot, type Root } from "react-dom/client"
 import { VoiceDictationButton } from "./VoiceDictationButton"
 
@@ -336,27 +336,33 @@ function resolveComposerContainer(inputElement: EditableInputElement): HTMLEleme
   return fallbackContainer instanceof HTMLElement ? fallbackContainer : inputElement.parentElement
 }
 
-function ensureMicrophoneMountPoint(): HTMLElement {
+function ensureMicrophoneMountPoint(sendButtonElement: HTMLButtonElement): HTMLElement {
   const existingAnchor = document.getElementById(VOICE_ANCHOR_ID)
   const microphoneMountPoint = existingAnchor instanceof HTMLElement ? existingAnchor : document.createElement("div")
 
   microphoneMountPoint.id = VOICE_ANCHOR_ID
-  microphoneMountPoint.style.display = "flex"
+  microphoneMountPoint.style.display = "inline-flex"
   microphoneMountPoint.style.alignItems = "center"
   microphoneMountPoint.style.justifyContent = "center"
   microphoneMountPoint.style.width = `${VOICE_BUTTON_SIZE}px`
   microphoneMountPoint.style.height = `${VOICE_BUTTON_SIZE}px`
-  microphoneMountPoint.style.margin = "0"
+  microphoneMountPoint.style.margin = "0 8px 0 0"
   microphoneMountPoint.style.padding = "0"
+  microphoneMountPoint.style.flex = "0 0 auto"
   microphoneMountPoint.style.pointerEvents = "auto"
-  microphoneMountPoint.style.position = "fixed"
-  microphoneMountPoint.style.left = "-9999px"
-  microphoneMountPoint.style.top = "-9999px"
-  microphoneMountPoint.style.zIndex = "2147483647"
+  microphoneMountPoint.style.position = "relative"
+  microphoneMountPoint.style.left = "auto"
+  microphoneMountPoint.style.top = "auto"
+  microphoneMountPoint.style.zIndex = "auto"
   microphoneMountPoint.style.opacity = "1"
   microphoneMountPoint.style.visibility = "visible"
 
-  if (!microphoneMountPoint.isConnected) {
+  const sendButtonParent = sendButtonElement.parentElement
+  if (sendButtonParent instanceof HTMLElement) {
+    if (microphoneMountPoint.parentElement !== sendButtonParent || microphoneMountPoint.nextElementSibling !== sendButtonElement) {
+      sendButtonParent.insertBefore(microphoneMountPoint, sendButtonElement)
+    }
+  } else if (!microphoneMountPoint.isConnected) {
     document.body.appendChild(microphoneMountPoint)
   }
 
@@ -450,13 +456,19 @@ function mountVoiceUi(): void {
   }
 
   const sendButtonElement = resolveSendButtonWithin(composerContainer)
-  const sourceCounterElement = resolveSourcesCounterWithin(composerContainer, sendButtonElement)
-  const microphoneMountPoint = ensureMicrophoneMountPoint()
-  if (!(microphoneMountPoint instanceof HTMLElement)) {
+  clearAllSourceCounterSpacing()
+  if (!(sendButtonElement instanceof HTMLButtonElement)) {
+    if (mountedVoiceAnchor) {
+      mountedVoiceAnchor.style.display = "none"
+    }
     return
   }
 
-  positionMicrophoneMountPoint(microphoneMountPoint, notebookInputElement, sourceCounterElement, sendButtonElement)
+  const microphoneMountPoint = ensureMicrophoneMountPoint(sendButtonElement)
+  if (!(microphoneMountPoint instanceof HTMLElement)) {
+    return
+  }
+  microphoneMountPoint.style.display = ""
 
   if (mountedVoiceRoot && mountedVoiceAnchor === microphoneMountPoint) {
     mountedVoiceRoot.render(
@@ -553,5 +565,7 @@ if (document.readyState === "loading") {
 
 window.addEventListener("pagehide", teardownVoiceAssistantUI)
 window.addEventListener("beforeunload", teardownVoiceAssistantUI)
+
+
 
 

@@ -44,8 +44,6 @@ export interface StudioItem {
   kind?: "text" | "asset"
 }
 
-console.log("🚀 MindDock: Interceptor carregado no MAIN world")
-
 function rememberRpcContextFromUrlAndBody(requestUrl: string, requestBody?: string): void {
   try {
     const url = new URL(requestUrl)
@@ -665,6 +663,31 @@ function isStructuredJsonContent(value: string): boolean {
   return false
 }
 
+function sanitizeStudioContent(raw: unknown): string | undefined {
+  if (typeof raw !== "string") return undefined
+  const normalized = raw.trim()
+  if (!normalized) return undefined
+  if (normalized.length < 80) return undefined
+  if (looksLikeUrl(normalized)) return undefined
+  if (looksLikeJsonPayloadString(normalized)) return undefined
+  return normalized
+}
+
+function extractDownloadableUrlFromRawPayload(raw: string): string | undefined {
+  const normalized = String(raw ?? "").trim()
+  if (!normalized) return undefined
+
+  const candidates = normalized.match(/https?:\\\/\\\/[^\s"'<>]+|https?:\/\/[^\s"'<>]+/gi) ?? []
+  for (const candidate of candidates) {
+    const unescaped = candidate.replace(/\\\//g, "/").trim()
+    if (!looksLikeUrl(unescaped)) continue
+    if (!isDownloadableAssetUrl(unescaped)) continue
+    return unescaped
+  }
+
+  return undefined
+}
+
 function normalizeStudioToken(value: string): string {
   return normalizeString(value)
     .toLowerCase()
@@ -1020,12 +1043,13 @@ function extractStudioCandidateFromObject(candidate: Record<string, unknown>): S
     return null
   }
 
+  const safeContent = sanitizeStudioContent(content)
   const score =
     (title ? 10 : 0) +
     (id ? 6 : 0) +
     (type ? 4 : 0) +
     (meta ? 2 : 0) +
-    (content ? 4 : 0) +
+    (safeContent ? 4 : 0) +
     (url ? 4 : 0) +
     (sourceCount ? 2 : 0) +
     (updatedAt ? 1 : 0)
@@ -1045,7 +1069,7 @@ function extractStudioCandidateFromObject(candidate: Record<string, unknown>): S
     title,
     type: type || undefined,
     meta: resolvedMeta || undefined,
-    content: content || undefined,
+    content: safeContent,
     url: url || undefined,
     mimeType: mimeType || undefined,
     sourceCount,
@@ -1073,7 +1097,8 @@ function extractStudioCandidateFromArray(candidate: readonly unknown[]): StudioI
   const typeCandidate = stringValues.find((value) => looksLikeType(value) && value !== titleCandidate) ?? ""
   const metaCandidate = stringValues.find((value) => looksLikeMeta(value) && value !== titleCandidate) ?? ""
   const urlCandidate = stringValues.find((value) => looksLikeUrl(value)) ?? ""
-  const contentCandidate = stringValues.find((value) => looksLikeContent(value)) ?? ""
+  const contentCandidateRaw = stringValues.find((value) => looksLikeContent(value)) ?? ""
+  const contentCandidate = sanitizeStudioContent(contentCandidateRaw) ?? ""
 
   const score =
     10 +
@@ -1102,9 +1127,15 @@ function extractStudioCandidateFromArray(candidate: readonly unknown[]): StudioI
 
 function mergeStudioItems(existing: StudioItem, incoming: StudioItem): StudioItem {
   const merged: StudioItem = { ...existing, ...incoming }
+  const existingContent = sanitizeStudioContent(existing.content)
+  const incomingContent = sanitizeStudioContent(incoming.content)
 
-  if (!existing.content && incoming.content) {
-    merged.content = incoming.content
+  if (!existingContent && incomingContent) {
+    merged.content = incomingContent
+  } else if (existingContent) {
+    merged.content = existingContent
+  } else {
+    merged.content = undefined
   }
 
   if (!existing.url && incoming.url) {
@@ -1254,12 +1285,15 @@ function extractStudioItemsFromCji9Payload(payload: unknown): StudioItem[] {
             const key = `${id}::${parsedTitle}`
             if (!seen.has(key)) {
               seen.add(key)
+              const safeContent = sanitizeStudioContent(json)
+              const extractedUrl = extractDownloadableUrlFromRawPayload(json)
               items.push({
                 id,
                 title: parsedTitle,
-                content: json,
+                content: safeContent,
+                url: extractedUrl,
                 meta: sourceCount ? `${sourceCount} fontes` : undefined,
-                kind: "text"
+                kind: extractedUrl ? "asset" : "text"
               })
             }
           }
@@ -1479,7 +1513,6 @@ function extractRpcPayloadNodes(node: unknown): unknown[] {
 function parseBatchexecuteCalls(rawNetworkResponse: string): Array<{ rpcId: string; payload: unknown }> {
   const parsedNodes = parseGoogleRpcResponse(rawNetworkResponse)
   if (parsedNodes.length === 0) {
-    console.warn("[MindDock][Studio][RPC] parsedNodes: 0, raw length:", rawNetworkResponse.length)
     return []
   }
 
@@ -1569,22 +1602,15 @@ function processStudioNetworkResponse(rawNetworkResponse: string, requestUrl: st
     if (now > studioArmUntil) {
       return
     }
-    console.warn("[MindDock][Studio][ARMED] janela ms:", studioArmUntil - now)
     const calls = parseBatchexecuteCalls(rawNetworkResponse)
     if (calls.length === 0) {
-      const snippet = rawNetworkResponse.slice(0, 220).replace(/\s+/g, " ")
-      console.warn("[MindDock][Studio][RPC] calls: 0, raw head:", snippet)
       return
     }
 
     const items = new Map<string, StudioItem>()
 
-    const callRpcIds = calls.map((call) => call.rpcId)
     const preferredCalls = calls.filter((call) => STUDIO_RPC_ALLOWLIST.has(call.rpcId))
     const callsToProcess = preferredCalls.length > 0 ? preferredCalls : calls
-
-    console.warn("[MindDock][Studio][RPC] calls:", calls.length)
-    console.warn("[MindDock][Studio][RPC] rpcids sample:", callRpcIds.slice(0, 6))
 
     for (const call of callsToProcess) {
       const payloadCandidates = [call.payload, ...extractRpcPayloadNodes(call.payload)]
@@ -1619,22 +1645,6 @@ function processStudioNetworkResponse(rawNetworkResponse: string, requestUrl: st
 
     const accountHints = resolveNotebookAccountHints(requestUrl)
     broadcastStudioItems(filteredItems, accountHints)
-    const requestRpcIds = resolveRpcIdsFromUrl(requestUrl)
-    console.group("[MindDock][Studio][RPC]")
-    console.log("rpcids:", requestRpcIds.join(",") || "n/a")
-    console.log("calls:", calls.length)
-    console.log("items:", filteredItems.length)
-    console.table(
-      filteredItems.slice(0, 5).map((item) => ({
-        title: item.title,
-        type: item.type,
-        meta: item.meta,
-        url: item.url,
-        mimeType: item.mimeType,
-        kind: item.kind
-      }))
-    )
-    console.groupEnd()
   } catch {
     // Silent by design: parsing failures must not affect the page.
   }
@@ -1669,11 +1679,6 @@ function interceptGoogleCloudRpc(requestUrl: string, rawNetworkResponse: string)
 
   rememberRpcContextFromUrlAndBody(requestUrl)
 
-  if (Date.now() <= studioArmUntil) {
-    const head = String(rawNetworkResponse ?? "").slice(0, 180).replace(/\s+/g, " ")
-    console.warn("[MindDock][Studio][RAW]", "len:", rawNetworkResponse.length, "head:", head)
-  }
-
   if (doesRequestTargetNotebookList(requestUrl)) {
     processRawNetworkResponse(rawNetworkResponse, requestUrl)
   }
@@ -1695,7 +1700,6 @@ function patchFetch(): void {
   window.fetch = new Proxy(originalFetch, {
     apply(target, thisArg, argArray: [RequestInfo | URL, RequestInit | undefined]) {
       const [requestInput, requestInit] = argArray
-      console.log("📡 Fetch detectado:", requestInput?.toString())
 
       const requestUrl = resolveRequestUrl(requestInput)
       const isBatchExecuteTarget = isTargetRequestUrl(requestUrl)
@@ -1707,7 +1711,6 @@ function patchFetch(): void {
             ? requestInit.body.toString()
             : undefined
         rememberRpcContextFromUrlAndBody(requestUrl, bodyText)
-        console.log("🎯 Alvo batchexecute identificado na URL:", requestUrl)
         const urlRpcIds = resolveRpcIdsFromUrl(requestUrl)
         const { ids: bodyRpcIds, studioHint } = extractRpcIdsFromRequestBody(requestInit?.body)
         rememberRpcIds([...urlRpcIds, ...bodyRpcIds], studioHint)
@@ -1847,7 +1850,6 @@ function installStudioArmListener(): void {
       return
     }
     studioArmUntil = Date.now() + STUDIO_ARM_WINDOW_MS
-    console.warn("[MindDock][Studio][ARM] armado por 8s")
   })
 }
 
