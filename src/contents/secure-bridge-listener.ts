@@ -272,17 +272,11 @@ function notifyCacheUpdated(accountKey: string): void {
 }
 
 function logNotebookSync(notebooks: NotebookEntry[]): void {
-  console.group("⚓ MindDock Bridge Debug")
-  console.log("Quantidade:", notebooks.length)
-  console.table(notebooks)
-  console.groupEnd()
+  void notebooks
 }
 
 function logStudioSync(items: StudioCacheItem[]): void {
-  console.group("âš“ MindDock Bridge Debug (Studio)")
-  console.log("Quantidade:", items.length)
-  console.table(items)
-  console.groupEnd()
+  void items
 }
 
 function persistNotebookCache(
@@ -296,9 +290,6 @@ function persistNotebookCache(
     const syncedAt = new Date().toISOString()
     const accountScope = resolveCurrentAccountScope(accountHints)
     if (!accountScope.confirmed) {
-      console.warn(
-        "[MindDock Bridge] Cache de notebooks ignorado: conta do NotebookLM ainda nao confirmada."
-      )
       return
     }
 
@@ -360,9 +351,6 @@ function persistStudioCache(
   try {
     const syncedAt = new Date().toISOString()
     const accountScope = resolveCurrentAccountScope(accountHints)
-    if (!accountScope.confirmed) {
-      console.warn("[MindDock Bridge] Cache de Studio com conta nao confirmada; usando escopo provisório.")
-    }
 
     const scopedStorageKey = buildScopedStorageKey(STUDIO_STORAGE_KEY_BASE, accountScope.accountKey)
     const scopedSyncKey = buildScopedStorageKey(STUDIO_STORAGE_SYNC_KEY_BASE, accountScope.accountKey)

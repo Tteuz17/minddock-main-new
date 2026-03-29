@@ -20,6 +20,12 @@ let previewRenderLogged = false
 // --- Tipos ------------------------------------------------------------------
 export type ExportPreviewFormat = "markdown" | "text" | "pdf" | "docx"
 
+export interface ExportPreviewToast {
+  status: "running" | "success" | "error"
+  message: string
+  progress: number
+}
+
 export interface ExportPreviewItem {
   id: string
   title: string
@@ -42,6 +48,7 @@ export interface ExportPreviewOpenDetail {
   onChangeItem?: (id: string, content: string) => void
   onRequestExport?: (format?: ExportPreviewFormat) => void
   isExporting?: boolean
+  toast?: ExportPreviewToast
   labels: {
     previewLabTitle: string
     title: string
@@ -186,6 +193,50 @@ const EXPORT_CSS = `
   font-size:14px; color:#9ca3af; padding:32px 20px;
 }
 
+.minddock-export .export-toast {
+  margin: 0 20px 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(255,255,255,0.16);
+  background: #0b0b0b;
+  padding: 10px 12px;
+}
+.minddock-export .export-toast.running { border-color: rgba(250,204,21,0.42); background: #120f02; }
+.minddock-export .export-toast.success { border-color: rgba(74,222,128,0.45); background: #06120a; }
+.minddock-export .export-toast.error { border-color: rgba(248,113,113,0.45); background: #1a0707; }
+.minddock-export .export-toast-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #e8edf7;
+  margin-bottom: 6px;
+}
+.minddock-export .export-toast-msg {
+  font-size: 12px;
+  line-height: 1.5;
+  color: #b9c2d0;
+  margin-bottom: 8px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.minddock-export .export-toast-track {
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.08);
+  overflow: hidden;
+}
+.minddock-export .export-toast-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: #facc15;
+  transition: width 220ms ease;
+}
+.minddock-export .export-toast.success .export-toast-fill { background: #4ade80; }
+.minddock-export .export-toast.error .export-toast-fill { background: #f87171; }
+
 /* Footer */
 .minddock-export .footer {
   display:grid; grid-template-columns:240px 1fr; gap:12px;
@@ -298,8 +349,16 @@ export function ExportPreviewPanel() {
 
   useEffect(() => {
     const onUpdate = (event: Event) => {
-      const custom = event as CustomEvent<{ isExporting: boolean }>
-      setDetail((prev) => (prev ? { ...prev, isExporting: custom.detail.isExporting } : prev))
+      const custom = event as CustomEvent<{ isExporting: boolean; toast?: ExportPreviewToast }>
+      setDetail((prev) =>
+        prev
+          ? {
+              ...prev,
+              isExporting: custom.detail.isExporting,
+              toast: custom.detail.toast
+            }
+          : prev
+      )
     }
     window.addEventListener(EXPORT_PREVIEW_UPDATE_EVENT, onUpdate)
     return () => window.removeEventListener(EXPORT_PREVIEW_UPDATE_EVENT, onUpdate)
@@ -412,6 +471,24 @@ export function ExportPreviewPanel() {
             ))}
           </div>
         )}
+
+        {detail.toast ? (
+          <div className={`export-toast ${detail.toast.status}`}>
+            <div className="export-toast-head">
+              <span>
+                {detail.toast.status === "running" ? "Exportando" : detail.toast.status === "success" ? "Concluido" : "Erro"}
+              </span>
+              <span>{Math.max(0, Math.min(100, Math.round(detail.toast.progress)))}%</span>
+            </div>
+            <p className="export-toast-msg">{detail.toast.message}</p>
+            <div className="export-toast-track">
+              <div
+                className="export-toast-fill"
+                style={{ width: `${Math.max(0, Math.min(100, detail.toast.progress))}%` }}
+              />
+            </div>
+          </div>
+        ) : null}
 
         <footer className="footer">
           <button

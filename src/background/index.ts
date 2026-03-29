@@ -249,7 +249,7 @@ async function flushPendingSelection(): Promise<boolean> {
 
   const resolvedNotebookId = await resolveDefaultNotebookIdForSelection()
   const sourceTitle =
-    String(pending?.sourceTitle ?? "").trim() || `[Seleção] MindDock - ${buildCaptureTimestampLabel()}`
+    String(pending?.sourceTitle ?? "").trim() || `[SELEÇÃO] MindDock - ${buildCaptureTimestampLabel()}`
 
   const response = await runRouterCommand(
     {
@@ -309,8 +309,8 @@ async function captureSelectionFromContextMenu(
   const sourceUrl = String(sourceTabRecord?.url ?? "").trim()
   const timestampLabel = buildCaptureTimestampLabel()
   const sourceTitle = tabTitle
-    ? `[Seleção] ${tabTitle} - ${timestampLabel}`
-    : `[Seleção] MindDock - ${timestampLabel}`
+    ? `[SELEÇÃO] ${tabTitle} - ${timestampLabel}`
+    : `[SELEÇÃO] MindDock - ${timestampLabel}`
   const sourceBody = [
     `Fonte: ${tabTitle || "Selection"}`,
     "-----",

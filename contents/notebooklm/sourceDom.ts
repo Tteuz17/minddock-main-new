@@ -763,7 +763,15 @@ export function dispatchSourcePanelReset(): void {
   window.dispatchEvent(new CustomEvent(SOURCE_PANEL_RESET_EVENT))
 }
 
+export function isStudioExportModalOpen(): boolean {
+  const host = document.querySelector<HTMLElement>('[data-minddock-shadow-host="studio-export-modal"]')
+  const shadowRoot = host?.shadowRoot
+  if (!shadowRoot) return false
+  return Boolean(shadowRoot.querySelector('[data-minddock-studio-export-overlay="true"]'))
+}
+
 export function dispatchSourcePanelExport(): void {
+  if (isStudioExportModalOpen()) return
   window.dispatchEvent(new CustomEvent(SOURCE_PANEL_EXPORT_EVENT))
 }
 
@@ -2710,6 +2718,46 @@ function resolveStudioLabel(): HTMLElement | null {
   return pickClosest(strictMatches) ?? pickClosest(relaxedMatches)
 }
 
+export function resolveStudioLabelText(): string | null {
+  const label = resolveStudioLabel()
+  if (!label) return null
+  const text = String(label.innerText || label.textContent || "").replace(/\s+/g, " ").trim()
+  return text.length > 0 ? text : null
+}
+
+function isStudioLabelCollapsed(studioLabel: HTMLElement): boolean {
+  if (!isVisible(studioLabel)) {
+    return true
+  }
+
+  const studioRect = studioLabel.getBoundingClientRect()
+  const visibleLabelText = normalize(`${studioLabel.innerText ?? ""} ${studioLabel.textContent ?? ""}`)
+  const hasVisibleStudioText =
+    visibleLabelText.includes("studio") || visibleLabelText.includes("estudio")
+
+  if (!hasVisibleStudioText && studioRect.width > 0 && studioRect.width <= 88) {
+    return true
+  }
+
+  const tabLikeHost =
+    studioLabel.closest<HTMLElement>(
+      "[role='tab'], [data-testid*='tab'], [aria-selected], [class*='tab'], [class*='rail'], [class*='sidebar']"
+    ) ?? studioLabel.parentElement
+
+  if (tabLikeHost && isVisible(tabLikeHost)) {
+    const hostRect = tabLikeHost.getBoundingClientRect()
+    const hostVisibleText = normalize(`${tabLikeHost.innerText ?? ""} ${tabLikeHost.textContent ?? ""}`)
+    const hostHasStudioText =
+      hostVisibleText.includes("studio") || hostVisibleText.includes("estudio")
+
+    if (!hostHasStudioText && hostRect.width > 0 && hostRect.width <= 92) {
+      return true
+    }
+  }
+
+  return false
+}
+
 export function resolveStudioOverflowMenuButton(): HTMLElement | null {
   const studioLabel = resolveStudioLabel()
   const studioRect = studioLabel?.getBoundingClientRect()
@@ -2776,14 +2824,13 @@ export function resolveStudioOverflowMenuButton(): HTMLElement | null {
 }
 
 export function resolveStudioExportAnchor(): HTMLElement | null {
-  const exportOverlay = document.querySelector("[data-minddock-host='export-preview-panel']")
-  if (exportOverlay) {
-    return null
-  }
-
   const studioLabel = resolveStudioLabel()
   const studioRect = studioLabel?.getBoundingClientRect()
   if (studioLabel && studioRect) {
+    if (isStudioLabelCollapsed(studioLabel)) {
+      return null
+    }
+
     const candidates = queryDeepAll<HTMLElement>([
       "button",
       "[role='button']",
@@ -2810,43 +2857,15 @@ export function resolveStudioExportAnchor(): HTMLElement | null {
       return sorted[0] ?? null
     }
 
-    const sibling = studioLabel.nextElementSibling
-    if (sibling instanceof HTMLElement && isVisible(sibling)) {
-      return sibling
+    const overflowButton = resolveStudioOverflowMenuButton()
+    if (overflowButton) {
+      return overflowButton
     }
 
-    return studioLabel
+    return null
   }
 
-  const fallbackCandidates = queryDeepAll<HTMLElement>([
-    "button",
-    "[role='button']",
-    "[aria-haspopup='menu']",
-    "[data-testid*='menu']"
-  ]).filter((candidate) => {
-    if (!isVisible(candidate) || isMindDockInjectedElement(candidate)) {
-      return false
-    }
-    const rect = candidate.getBoundingClientRect()
-    const nearTop = rect.top <= 200
-    const inRightPane = rect.left >= window.innerWidth * 0.55
-    const compact = rect.width <= 64 && rect.height <= 64
-    return nearTop && inRightPane && compact
-  })
-
-  if (fallbackCandidates.length > 0) {
-    const sorted = [...fallbackCandidates].sort((left, right) => {
-      const leftRect = left.getBoundingClientRect()
-      const rightRect = right.getBoundingClientRect()
-      if (leftRect.top !== rightRect.top) {
-        return leftRect.top - rightRect.top
-      }
-      return leftRect.left - rightRect.left
-    })
-    return sorted[0] ?? null
-  }
-
-  return resolveStudioOverflowMenuButton()
+  return null
 }
 
 function findDeleteConversationHistoryAction(labelRect?: DOMRect): HTMLElement | null {

@@ -619,7 +619,7 @@ export function HomeDashboard({
 
                   {isDefaultNotebookMenuOpen && notebookOptions.length > 0 ? (
                     <div className="absolute left-0 right-0 top-[calc(100%+6px)] z-[120] overflow-hidden rounded-[12px] border border-white/10 bg-[#0b0f14] shadow-[0_14px_30px_rgba(0,0,0,0.45)]">
-                      <div className="max-h-40 overflow-y-auto py-1">
+                      <div className="max-h-40 overflow-y-auto py-1 [scrollbar-width:thin] [scrollbar-color:#000000_#0b0f14] [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-track]:bg-[#0b0f14] [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-black">
                         {notebookOptions.map((notebook) => {
                           const isSelected = notebook.id === defaultNotebookId
 

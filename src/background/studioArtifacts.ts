@@ -16,6 +16,8 @@ const MIME_RE = /^[a-z]+\/[a-z0-9.+-]+$/i
 const ASSET_EXT_RE =
   /\.(png|jpe?g|gif|webp|svg|pdf|mp3|wav|ogg|m4a|aac|flac|mp4|mkv|webm|mov|avi)(\?|#|$)/i
 
+// Mapeamento unificado baseado nos typeCodes reais do RPC do NotebookLM
+// Fonte: análise do gArtLc/cFji9 — typeCodes 3,5,7,8 são sempre visuais
 const LIST_TYPE_LABELS: Record<number, string> = {
   1: "Audio Overview",
   2: "Study Guide",
@@ -33,14 +35,20 @@ const LIST_TYPE_LABELS: Record<number, string> = {
   14: "Video Overview"
 }
 
+// typeCodes do payload de conteúdo (cFji9/gArtLc) — esses têm prioridade absoluta
 const CONTENT_TYPE_LABELS: Record<number, string> = {
+  1: "Audio Overview",
+  2: "Blog Post",
   3: "Video Overview",
   4: "Quiz",
   5: "Mind Map",
   7: "Infographic",
   8: "Slides",
-  9: "Data Table"
+  9: "Blog Post"
 }
+
+// typeCodes que SEMPRE indicam visual — inquebrável
+const VISUAL_TYPE_CODES = new Set([1, 3, 5, 6, 7, 8, 10, 12, 14])
 
 export const VISUAL_TYPES = new Set(["Slides", "Infographic", "Mind Map", "Video Overview", "Audio Overview"])
 
@@ -63,6 +71,9 @@ const TYPE_KEYWORDS: Array<{ match: RegExp; label: string }> = [
   { match: /timeline|linha do tempo/i, label: "Timeline" },
   { match: /data table|tabela de dados/i, label: "Data Table" }
 ]
+
+const LIST_TITLE_NOISE_RE =
+  /informational article|answer key|glossary|you are a highly capable|com base nas interacoes|based on interactions|escreva|write|use this guide|responda/i
 
 export type StudioArtifactItem = {
   id: string
@@ -110,6 +121,37 @@ function normalizeToken(value: string): string {
     .toLowerCase()
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
+}
+
+function scoreListTitleCandidate(title: string, typeId?: number): number {
+  const raw = normalizeString(title)
+  if (!raw) return Number.NEGATIVE_INFINITY
+
+  const normalized = normalizeToken(raw)
+  const wordCount = raw.split(/\s+/u).filter(Boolean).length
+  let score = 0
+
+  if (raw.length >= 6 && raw.length <= 90) score += 24
+  else if (raw.length > 120 || raw.length < 4) score -= 40
+
+  if (wordCount >= 2 && wordCount <= 12) score += 16
+  else if (wordCount > 15) score -= 28
+
+  if (/\p{L}/u.test(raw)) score += 10
+  if (/^[a-z]{2}[_-][a-z]{2}$/i.test(raw)) score -= 70
+  if (/[.!?]\s/u.test(raw)) score -= 22
+  if (/[#*_`]/u.test(raw)) score -= 24
+  if (looksLikeUrl(raw)) score -= 80
+  if (/^[\d\s).:;,-]+$/u.test(raw)) score -= 35
+  if (LIST_TITLE_NOISE_RE.test(normalized)) score -= 55
+  if (/quiz|flashcard|data table|tabela de dados/i.test(normalized)) score -= 10
+
+  if (typeof typeId === "number") {
+    if (typeId >= 1 && typeId <= 14) score += 6
+    if (VISUAL_TYPE_CODES.has(typeId)) score += 4
+  }
+
+  return score
 }
 
 function hashString(value: string): string {
@@ -211,6 +253,37 @@ function collectNumbers(node: unknown, out: number[], depth = 0): void {
   }
 }
 
+function collectNumbersOwned(
+  node: unknown,
+  ownerId: string,
+  out: number[],
+  ownerCtx: string | null = null,
+  depth = 0
+): void {
+  if (depth > 6 || node == null) return
+
+  if (Array.isArray(node)) {
+    let ctx = ownerCtx
+    if (typeof node[0] === "string" && UUID_RE.test(node[0])) {
+      ctx = node[0]
+    }
+    if (ctx !== null && ctx !== ownerId) return
+    node.forEach((child) => collectNumbersOwned(child, ownerId, out, ctx, depth + 1))
+    return
+  }
+
+  if (typeof node === "number" && Number.isFinite(node)) {
+    out.push(node)
+    return
+  }
+
+  if (typeof node === "object") {
+    Object.values(node as Record<string, unknown>).forEach((child) =>
+      collectNumbersOwned(child, ownerId, out, ownerCtx, depth + 1)
+    )
+  }
+}
+
 function looksLikeUrl(value: string): boolean {
   return /^https?:\/\//iu.test(value) || /^\/\//iu.test(value)
 }
@@ -235,7 +308,7 @@ function looksLikeTitle(value: string): boolean {
   if (looksLikeUrl(normalized)) return false
   if (UUID_RE.test(normalized)) return false
   if (normalized.length < 4 || normalized.length > 160) return false
-  if (!/[A-Za-z\u00c0-\u00ff]/u.test(normalized)) return false
+  if (!/\p{L}/u.test(normalized)) return false
   if (/\n/.test(normalized) && normalized.length > 120) return false
   return true
 }
@@ -246,7 +319,7 @@ function looksLikeContent(value: string): boolean {
   if (looksLikeUrl(normalized)) return false
   if (looksLikeMimeType(normalized)) return false
   if (looksLikeMeta(normalized)) return false
-  if (!/[A-Za-z\u00c0-\u00ff]/u.test(normalized)) return false
+  if (!/\p{L}/u.test(normalized)) return false
   if (UUID_RE.test(normalized.trim())) return false
   return true
 }
@@ -257,7 +330,7 @@ function isContentish(value: string, titleNorm: string): boolean {
   if (looksLikeUrl(v)) return false
   if (looksLikeMimeType(v)) return false
   if (looksLikeMeta(v)) return false
-  if (!/[A-Za-z\u00c0-\u00ff]/u.test(v)) return false
+  if (!/\p{L}/u.test(v)) return false
   if (titleNorm && v.toLowerCase() === titleNorm.toLowerCase()) return false
   if (UUID_RE.test(v.trim())) return false
   const tokens = v.split(/[\s\-]+/).filter(Boolean)
@@ -347,7 +420,19 @@ function toExcerpt(text: string, max = 160): string {
 function looksLikeAssetUrl(value: string): boolean {
   const normalized = normalizeString(value)
   if (!looksLikeUrl(normalized)) return false
-  return ASSET_EXT_RE.test(normalized) || normalized.includes("googleusercontent")
+  const lower = normalized.toLowerCase()
+
+  return (
+    ASSET_EXT_RE.test(lower) ||
+    lower.includes("googleusercontent") ||
+    lower.includes("googlevideo.com") ||
+    lower.includes("videoplayback") ||
+    lower.includes("alt=media") ||
+    lower.includes("=m22") ||
+    lower.includes("=m140") ||
+    /\/(video|audio|image)\//i.test(lower) ||
+    /(?:^|[?&])mime=(video|audio|image)\//i.test(lower)
+  )
 }
 
 function scoreTitle(value: string): number {
@@ -379,6 +464,161 @@ function pickBestContent(strings: string[], title?: string | null): string | nul
   if (block.length >= 120) return block
 
   return contentish.sort((a, b) => b.length - a.length)[0] ?? null
+}
+
+function extractOwnedMedia(
+  node: unknown,
+  ownerId: string,
+  mimePrefix: string,
+  ownerCtx: string | null = null
+): Array<{ url: string; mime: string }> {
+  if (!Array.isArray(node)) return []
+  let ctx = ownerCtx
+  if (typeof node[0] === "string" && UUID_RE.test(node[0])) {
+    ctx = node[0]
+  }
+  if (ctx && ctx !== ownerId) return []
+  const results: Array<{ url: string; mime: string }> = []
+  const url =
+    node.find((value) => typeof value === "string" && looksLikeUrl(value)) as string | undefined
+  const mime =
+    node.find((value) => typeof value === "string" && looksLikeMimeType(value)) as string | undefined
+  if (ctx === ownerId && url && mime && mime.toLowerCase().startsWith(mimePrefix)) {
+    results.push({ url: url.startsWith("//") ? `https:${url}` : url, mime })
+  }
+  for (const child of node) {
+    results.push(...extractOwnedMedia(child, ownerId, mimePrefix, ctx))
+  }
+  return results
+}
+
+function isSlidesType(type?: string): boolean {
+  const token = normalizeToken(type ?? "")
+  return token === "slides" || token === "8" || token === "12" || token === "tablet"
+}
+
+function isPdfUrl(value?: string | null): boolean {
+  const url = normalizeUrl(value)
+  if (!url) return false
+  return /\.pdf(?:[?#]|$)/i.test(url) || /(?:^|[?&])mime=application\/pdf/i.test(url)
+}
+
+function chooseOwnedMediaForType(
+  type: string | undefined,
+  mediaGroups: {
+    pdf: Array<{ url: string; mime: string }>
+    video: Array<{ url: string; mime: string }>
+    audio: Array<{ url: string; mime: string }>
+    image: Array<{ url: string; mime: string }>
+  }
+): { url: string; mime: string } | null {
+  const token = normalizeToken(type ?? "")
+  const slidesLike = token === "slides" || token === "8" || token === "12" || token === "tablet"
+  const videoLike =
+    token === "video overview" || token === "3" || token.includes("video") || token === "briefing"
+  const audioLike = token === "audio overview" || token === "1" || token.includes("audio")
+  const imageLike =
+    token === "infographic" ||
+    token === "mind map" ||
+    token === "5" ||
+    token === "6" ||
+    token === "7" ||
+    token === "10"
+
+  const ordered =
+    slidesLike
+      ? [...mediaGroups.pdf, ...mediaGroups.image, ...mediaGroups.video, ...mediaGroups.audio]
+      : videoLike
+        ? [...mediaGroups.video, ...mediaGroups.audio, ...mediaGroups.image, ...mediaGroups.pdf]
+        : audioLike
+          ? [...mediaGroups.audio, ...mediaGroups.video, ...mediaGroups.image, ...mediaGroups.pdf]
+          : imageLike
+            ? [...mediaGroups.image, ...mediaGroups.pdf, ...mediaGroups.video, ...mediaGroups.audio]
+            : [...mediaGroups.video, ...mediaGroups.audio, ...mediaGroups.image, ...mediaGroups.pdf]
+
+  if (ordered.length === 0) return null
+  if (isSlidesType(type)) {
+    const pdfFirst = ordered.find((media) => media.mime.toLowerCase() === "application/pdf" || isPdfUrl(media.url))
+    if (pdfFirst) return pdfFirst
+  }
+  return ordered[0]
+}
+
+function isVisualTypeCode(numericCandidates: number[]): boolean {
+  return numericCandidates.some((v) => VISUAL_TYPE_CODES.has(Math.round(v)))
+}
+
+function isVisualTypeToken(value?: string): boolean {
+  const raw = normalizeString(value)
+  if (!raw) return false
+  if (/^\d+$/u.test(raw)) return VISUAL_TYPE_CODES.has(Number(raw))
+
+  const token = normalizeToken(raw)
+  return (
+    token === "video overview" ||
+    token === "audio overview" ||
+    token === "slides" ||
+    token === "infographic" ||
+    token === "mind map"
+  )
+}
+
+function isMediaUrl(value?: string | null): boolean {
+  const normalized = normalizeUrl(value)
+  if (!normalized) return false
+  if (!looksLikeUrl(normalized)) return false
+  return looksLikeAssetUrl(normalized)
+}
+
+const URL_TEXT_RE = /^(https?:)?\/\//i
+const MIME_PREFIX_RE = /^(video|audio|image)\//i
+
+function scoreOwnedText(value: string): number {
+  let points = 0
+  if (value.length > 80) points += 3
+  if (value.length > 200) points += 3
+  if (/[#*_\-|]/u.test(value)) points += 1
+  if (/[.!?]/u.test(value)) points += 1
+  return points
+}
+
+function extractOwnedText(node: unknown, ownerId: string): string {
+  const blocks: string[] = []
+  const seen = new Set<string>()
+
+  const visit = (current: unknown, ownerCtx: string | null = null) => {
+    if (!Array.isArray(current)) return
+    let ctx = ownerCtx
+    if (typeof current[0] === "string" && UUID_RE.test(current[0])) {
+      ctx = current[0]
+    }
+    if (ctx && ctx !== ownerId) return
+
+    for (const value of current) {
+      if (typeof value === "string") {
+        const text = normalizeString(value)
+        if (!text) continue
+        if (UUID_RE.test(text)) continue
+        if (URL_TEXT_RE.test(text)) continue
+        if (MIME_PREFIX_RE.test(text)) continue
+        if (looksLikeMimeType(text)) continue
+        if (looksLikeMeta(text)) continue
+        if (text.length < 30) continue
+        if (seen.has(text)) continue
+        seen.add(text)
+        blocks.push(text)
+        continue
+      }
+      if (Array.isArray(value)) {
+        visit(value, ctx)
+      }
+    }
+  }
+
+  visit(node)
+  if (!blocks.length) return ""
+  blocks.sort((a, b) => scoreOwnedText(b) - scoreOwnedText(a) || b.length - a.length)
+  return blocks[0]
 }
 
 function pickBestUrl(strings: string[]): string | null {
@@ -435,12 +675,13 @@ function inferTypeLabel(
   const lookup = context === "list" ? LIST_TYPE_LABELS : CONTENT_TYPE_LABELS
   for (const value of numericCandidates) {
     const asInt = Math.round(value)
-    if (context === "list" && CONTENT_TYPE_LABELS[asInt] && VISUAL_TYPES.has(CONTENT_TYPE_LABELS[asInt])) {
+    if (context === "content" && VISUAL_TYPE_CODES.has(asInt) && CONTENT_TYPE_LABELS[asInt]) {
       return CONTENT_TYPE_LABELS[asInt]
     }
     if (lookup[asInt]) return lookup[asInt]
   }
   const haystack = `${title} ${content}`.toLowerCase()
+  if (/blog\s*post|postagem no blog|informational article/i.test(haystack)) return "Blog Post"
   if (/quiz/i.test(haystack)) return "Quiz"
   if (/flashcard|cart\u00e3o|cart\u00f5es de estudo/i.test(haystack)) return "Flashcards"
   if (/faq/i.test(haystack)) return "FAQ"
@@ -460,13 +701,96 @@ function inferTypeLabel(
   return undefined
 }
 
+function looksLikeDataTableContent(value?: string): boolean {
+  const text = normalizeString(value)
+  if (!text || text.length < 220) return false
+
+  if (/<table[\s>][\s\S]*<\/table>/iu.test(text)) {
+    return true
+  }
+
+  const markdownTableHeader =
+    /\n\|\s*[^|\n]+(\|\s*[^|\n]+){2,}\s*\|\n\|\s*:?-{3,}:?(\s*\|\s*:?-{3,}:?){2,}\s*\|/u
+  if (markdownTableHeader.test(`\n${text}`)) {
+    return true
+  }
+
+  const lines = text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(0, 120)
+  if (lines.length < 6) return false
+
+  let structuredLines = 0
+  let pipeStructuredLines = 0
+  for (const line of lines) {
+    const pipeCells = line.split("|").map((part) => part.trim()).filter(Boolean).length
+    if (pipeCells >= 4) {
+      structuredLines += 1
+      pipeStructuredLines += 1
+      continue
+    }
+    const tabCells = line.split("\t").map((part) => part.trim()).filter(Boolean).length
+    if (tabCells >= 4) {
+      structuredLines += 1
+      continue
+    }
+  }
+
+  if (structuredLines < 4) return false
+  if (pipeStructuredLines >= 3) return true
+
+  const normalized = normalizeToken(text)
+  const tableKeywords = [
+    "pilar",
+    "etapa",
+    "descricao",
+    "ferramentas",
+    "visualizacao",
+    "fonte",
+    "categoria",
+    "indicador",
+    "metrica",
+    "coluna",
+    "linha",
+    "recomendadas",
+    "criterio"
+  ]
+  const keywordHits = tableKeywords.reduce(
+    (count, keyword) => count + (normalized.includes(keyword) ? 1 : 0),
+    0
+  )
+  return keywordHits >= 3
+}
+
+function reclassifyDataTableItem(item: StudioArtifactItem): StudioArtifactItem {
+  const typeToken = normalizeToken(item.type ?? "")
+  if (typeToken && typeToken !== "blog post") {
+    return item
+  }
+
+  const content = typeof item.content === "string" ? item.content : ""
+  if (!looksLikeDataTableContent(content)) {
+    return item
+  }
+
+  return {
+    ...item,
+    type: "Data Table"
+  }
+}
+
 function deriveKind(item: StudioArtifactItem): "text" | "asset" {
-  const type = item.type ?? ""
-  const url = normalizeString(item.url)
+  if (!isVisualTypeToken(item.type)) return "text"
+  const url = normalizeUrl(item.url)
+  const contentUrl = typeof item.content === "string" ? normalizeUrl(item.content) : ""
+  const hasMediaUrl = (url && isMediaUrl(url)) || (contentUrl && isMediaUrl(contentUrl))
+  if (hasMediaUrl) return "asset"
+
   const mime = normalizeString(item.mimeType).toLowerCase()
-  if (VISUAL_TYPES.has(type)) return "asset"
-  if (url && looksLikeAssetUrl(url)) return "asset"
-  if (mime && /(audio|video|image|pdf)/u.test(mime)) return "asset"
+  if (mime === "application/pdf" || /^(video|audio|image)\//i.test(mime)) return "asset"
+
   return "text"
 }
 
@@ -516,40 +840,16 @@ function extractStudioItemFromNode(
 ): StudioArtifactItem | null {
   const strings: string[] = []
   collectStrings(node, strings)
-  console.log("[studioArtifacts][dbg] strings", {
-    count: strings.length,
-    top10: strings.slice(0, 10)
-  })
   if (strings.length === 0) return null
   if (context === "list") {
     const listHit = findListIdTitle(node)
     if (listHit) {
-      let typeCandidate = inferTypeLabel(
-        listHit.title,
-        "",
-        typeof listHit.type === "number" ? [listHit.type] : [],
-        "list"
-      )
-      if (typeof listHit.type === "number") {
-        const contentTypeOverride = CONTENT_TYPE_LABELS[listHit.type]
-        if (contentTypeOverride && VISUAL_TYPES.has(contentTypeOverride)) {
-          typeCandidate = contentTypeOverride
-        }
-      }
-      const urlInNode = pickBestUrl(strings)
-      if (urlInNode) {
-        if (/\.pdf/i.test(urlInNode)) typeCandidate = "Slides"
-        else if (/\.png|\.jpg|\.jpeg|\.webp/i.test(urlInNode)) typeCandidate = "Infographic"
-        else if (/=mp2|=m22|=m140/i.test(urlInNode)) typeCandidate = "Video Overview"
-        else if (/\.mp3|\.m4a/i.test(urlInNode)) typeCandidate = "Audio Overview"
-        else if (/googleusercontent/i.test(urlInNode) && !typeCandidate) typeCandidate = "Infographic"
-      }
+      const typeCandidate =
+        typeof listHit.type === "number" ? LIST_TYPE_LABELS[listHit.type] ?? String(listHit.type) : undefined
       const item: StudioArtifactItem = {
         id: listHit.id,
         title: listHit.title,
         type: typeCandidate || undefined,
-        url: urlInNode || undefined,
-        content: urlInNode || undefined,
         updatedAt: new Date().toISOString()
       }
       item.kind = deriveKind(item)
@@ -562,34 +862,95 @@ function extractStudioItemFromNode(
   const preferredHits = preferredIds ? uniqueIds.filter((value) => preferredIds.has(value)) : []
   const hasPreferred = preferredHits.length > 0
   if (context === "content" && preferredIds) {
-    if (preferredHits.length !== 1) {
+    if (preferredHits.length === 0) {
       const hasAssetUrl = strings.some((value) => looksLikeAssetUrl(value))
-      if (!hasAssetUrl) return null
+      const hasLongContent = strings.some(
+        (value) => value.length > 200 && !looksLikeUrl(value) && !looksLikeMimeType(value)
+      )
+      if (!hasAssetUrl && !hasLongContent) return null
     }
   }
 
-  const idCandidate = hasPreferred ? preferredHits[0] : pickBestId(strings, preferredIds)
+  // Prioridade 1: UUID em node[0] — é sempre o dono direto do nó
+  const nodeOwnerUuid =
+    Array.isArray(node) && typeof node[0] === "string" && UUID_RE.test(node[0])
+      ? node[0]
+      : null
+
+  // Prioridade 2: preferredHits — mas só se bate com o dono do nó
+  const idCandidate =
+    nodeOwnerUuid && (!preferredIds || preferredIds.has(nodeOwnerUuid))
+      ? nodeOwnerUuid
+      : hasPreferred
+        ? preferredHits[0]
+        : pickBestId(strings, preferredIds)
   if (!UUID_RE.test(String(idCandidate))) {
     return null
   }
   const titleCandidate =
     (preferredTitles && preferredTitles.get(idCandidate)) || pickBestTitle(strings)
   let contentCandidate = pickBestContent(strings, titleCandidate)
-  console.log("[studioArtifacts][dbg] candidates", {
-    title: titleCandidate,
-    content: contentCandidate?.slice?.(0, 120),
-    url: pickBestUrl(strings)
-  })
-  const urlCandidate = pickBestUrl(strings)
-  const mimeCandidate = strings.find((value) => looksLikeMimeType(value)) ?? ""
+  if (!contentCandidate || contentCandidate.trim().length === 0) {
+    contentCandidate = extractOwnedText(node, idCandidate)
+  }
   const metaCandidate = strings.find((value) => looksLikeMeta(value)) ?? ""
   const sourceCount = pickSourceCount(strings)
 
   const numericCandidates: number[] = []
-  collectNumbers(node, numericCandidates)
+  if (UUID_RE.test(String(idCandidate))) {
+    collectNumbersOwned(node, String(idCandidate), numericCandidates)
+  } else {
+    collectNumbers(node, numericCandidates)
+  }
   let typeCandidate: string | undefined
   typeCandidate = inferTypeLabel(titleCandidate ?? "", "", numericCandidates, context)
-  if (!typeCandidate && urlCandidate) {
+
+  // só buscar url/mime se o typeCode indica visual — evita contaminação de vizinhos
+  const nodeIsVisual = isVisualTypeCode(numericCandidates)
+  let urlCandidate: string | null = null
+  let mimeCandidate = ""
+  if (nodeIsVisual) {
+    const ownedVideo = extractOwnedMedia(node, idCandidate, "video/")
+    const ownedAudio = extractOwnedMedia(node, idCandidate, "audio/")
+    const ownedImage = extractOwnedMedia(node, idCandidate, "image/")
+    const ownedPdf = extractOwnedMedia(node, idCandidate, "application/pdf")
+    const selectedOwned = chooseOwnedMediaForType(typeCandidate, {
+      video: ownedVideo,
+      audio: ownedAudio,
+      image: ownedImage,
+      pdf: ownedPdf
+    })
+    if (selectedOwned) {
+      urlCandidate = selectedOwned.url
+      mimeCandidate = selectedOwned.mime
+    }
+  } else {
+    urlCandidate = null
+    mimeCandidate = ""
+  }
+
+  if (!urlCandidate) {
+    const fallbackUrl = isSlidesType(typeCandidate)
+      ? strings.map(normalizeUrl).find((value) => isPdfUrl(value)) ?? pickBestUrl(strings)
+      : pickBestUrl(strings)
+    if (fallbackUrl && looksLikeAssetUrl(fallbackUrl)) {
+      urlCandidate = fallbackUrl
+      const fallbackMime = strings
+        .map((value) => normalizeString(value).toLowerCase())
+        .find((value) =>
+          isSlidesType(typeCandidate)
+            ? value === "application/pdf"
+            : looksLikeMimeType(value) && !value.startsWith("text/")
+        )
+      if (fallbackMime) mimeCandidate = fallbackMime
+      if (!mimeCandidate && isSlidesType(typeCandidate) && isPdfUrl(fallbackUrl)) {
+        mimeCandidate = "application/pdf"
+      }
+    }
+  }
+
+  const hasLongTextContent = typeof contentCandidate === "string" && contentCandidate.length > 100
+  if (!typeCandidate && urlCandidate && !hasLongTextContent) {
     if (/\.pdf/i.test(urlCandidate)) typeCandidate = "Slides"
     else if (/\.png|\.jpg|\.jpeg|\.webp/i.test(urlCandidate)) typeCandidate = "Infographic"
     else if (/=mp2|=m22|=m140/i.test(urlCandidate)) typeCandidate = "Video Overview"
@@ -642,13 +1003,14 @@ function extractStudioItemFromNode(
   const isAsset =
     isAssetLike(typeCandidate, mimeCandidate, urlCandidate) ||
     (typeof urlCandidate === "string" && ASSET_EXT_RE.test(urlCandidate))
+  const isConfirmedVisual = typeCandidate ? VISUAL_TYPES.has(typeCandidate) : false
   let content =
     contentCandidate && urlCandidate && contentCandidate === urlCandidate ? undefined : contentCandidate ?? undefined
   if (!content && textFallback) {
     content = textFallback
   }
   const hasContent = typeof content === "string" && content.trim().length > 0
-  if (!hasContent && urlCandidate && isAsset) {
+  if (!hasContent && urlCandidate && isAsset && isConfirmedVisual) {
     content = urlCandidate
   }
 
@@ -668,14 +1030,31 @@ function extractStudioItemFromNode(
     updatedAt: new Date().toISOString()
   }
   item.kind = deriveKind(item)
-  if (item.kind === "asset") {
+  if (item.kind === "asset" && isConfirmedVisual) {
     item.content = item.url ?? item.content
   }
-  if (item.url && looksLikeAssetUrl(item.url)) {
+  if (item.url && isMediaUrl(item.url) && isConfirmedVisual) {
     item.kind = "asset"
     item.content = item.url
   }
-  return item
+  const visualSignal = isVisualTypeToken(item.type)
+
+  if (item.kind === "text") {
+    if (visualSignal && (item.url || item.mimeType)) {
+      item.kind = "asset"
+      item.content = item.url ?? item.content
+    } else {
+      const ownedText = extractOwnedText(node, id)
+      const fallbackText =
+        typeof item.content === "string" && !URL_TEXT_RE.test(item.content.trim())
+          ? item.content.trim()
+          : ""
+      item.content = ownedText || fallbackText || undefined
+      item.url = undefined
+      item.mimeType = undefined
+    }
+  }
+  return reclassifyDataTableItem(item)
 }
 
 function extractStudioItemsFromPayload(
@@ -722,7 +1101,7 @@ function extractStudioItemsFromPayload(
 }
 
 function extractListItemsFromPayload(payload: unknown): StudioArtifactItem[] {
-  const items = new Map<string, StudioArtifactItem>()
+  const items = new Map<string, { item: StudioArtifactItem; score: number }>()
 
   const visit = (node: unknown) => {
     if (!Array.isArray(node)) return
@@ -734,17 +1113,27 @@ function extractListItemsFromPayload(payload: unknown): StudioArtifactItem[] {
       UUID_RE.test(node[0])
     ) {
       const id = node[0]
-      const title = node[1]
+      const title = normalizeString(node[1])
       const typeId = typeof node[2] === "number" ? node[2] : undefined
       const typeLabel = typeId !== undefined ? LIST_TYPE_LABELS[typeId] ?? String(typeId) : undefined
+      const score = scoreListTitleCandidate(title, typeId)
+      if (score <= -40) {
+        for (const child of node) visit(child)
+        return
+      }
 
-      items.set(id, {
-        id,
-        title,
-        meta: undefined,
-        type: typeLabel
-      })
-      return
+      const prev = items.get(id)
+      if (!prev || score > prev.score || (score === prev.score && title.length > prev.item.title.length)) {
+        const nextItem: StudioArtifactItem = {
+          id,
+          title,
+          meta: prev?.item.meta,
+          type: typeLabel ?? prev?.item.type
+        }
+        items.set(id, { item: nextItem, score })
+      } else if (prev && !prev.item.type && typeLabel) {
+        prev.item.type = typeLabel
+      }
     }
 
     for (const child of node) visit(child)
@@ -752,6 +1141,8 @@ function extractListItemsFromPayload(payload: unknown): StudioArtifactItem[] {
 
   visit(payload)
   return Array.from(items.values())
+    .map((entry) => entry.item)
+    .filter((item) => normalizeString(item.title).length >= 3)
 }
 
 function extractPayloadsFromRawText(rawText: string, rpcId: string): unknown[] {
@@ -785,6 +1176,10 @@ function extractStudioItemsFromRawText(
   const payloads = extractPayloadsFromRawText(rawText, rpcId)
   const items: StudioArtifactItem[] = []
   for (const payload of payloads) {
+    if (context === "list") {
+      items.push(...extractListItemsFromPayload(payload))
+      continue
+    }
     items.push(...extractStudioItemsFromPayload(payload, context, preferredIds, preferredTitles))
   }
   return items
@@ -955,6 +1350,52 @@ function hasSignal(item: StudioArtifactItem): boolean {
   return false
 }
 
+function isSafeOverflowBlogPost(item: StudioArtifactItem): boolean {
+  if (normalizeToken(item.type ?? "") !== "blog post") return false
+
+  const title = normalizeString(item.title)
+  if (title.length < 4 || title.length > 120) return false
+  if (/^[a-z]{2}[_-][a-z]{2}$/i.test(title)) return false
+  if (!/\p{L}/u.test(title)) return false
+
+  const words = title.split(/\s+/u).filter(Boolean).length
+  if (words > 14) return false
+  if (/[.!?]\s/u.test(title)) return false
+  if (looksLikeUrl(title)) return false
+  if (isAssetLike(item.type, item.mimeType, item.url)) return false
+
+  const signals = normalizeToken(`${title} ${item.meta ?? ""} ${item.content ?? ""}`)
+  if (/quiz|answer key|glossary|flashcard|cartao|data table|tabela de dados/i.test(signals)) return false
+  if (LIST_TITLE_NOISE_RE.test(signals)) return false
+
+  return true
+}
+
+function scoreDedupCandidate(item: StudioArtifactItem): number {
+  const contentScore = item.content ? Math.min(String(item.content).length, 500) : 0
+  const textBias = item.kind === "text" ? 40 : 0
+  const visual = VISUAL_TYPES.has(item.type ?? "")
+  const consistentKind =
+    (visual && item.kind === "asset") || (!visual && item.kind === "text")
+  const consistencyScore = consistentKind ? 80 : 0
+  return contentScore + textBias + consistencyScore
+}
+
+function dedupeByNormalizedTitle(items: StudioArtifactItem[]): StudioArtifactItem[] {
+  const byTitle = new Map<string, StudioArtifactItem>()
+  for (const item of items) {
+    const titleKey = normalizeTitleKey(item.title)
+    const key = titleKey || item.id
+    const prev = byTitle.get(key)
+    if (!prev) {
+      byTitle.set(key, item)
+      continue
+    }
+    byTitle.set(key, scoreDedupCandidate(item) >= scoreDedupCandidate(prev) ? item : prev)
+  }
+  return Array.from(byTitle.values())
+}
+
 function filterBySignal(items: StudioArtifactItem[], ids?: string[]): StudioArtifactItem[] {
   const requestedIds = new Set((ids ?? []).filter(Boolean))
   const filtered = items.filter((it) => {
@@ -1087,15 +1528,58 @@ export async function fetchStudioArtifactsByIds(
 
   const contentById = new Map(contentItems.map((item) => [item.id, item]))
   const listIds = new Set(listItems.map((item) => item.id))
+  const VISUAL_MIME_RE = /^(video|audio|image)\//i
+  const MEDIA_EXT_RE = /\.(mp4|m4a|mp3|wav|ogg|pdf|png|jpe?g|webp)(?:[?#]|$)/i
+  const MEDIA_HINT_RE = /googleusercontent\.com|=m22\b|\/video\/|\/audio\/|\/image\//i
+
+  const normalizeMediaUrl = (v: unknown): string | undefined => {
+    if (typeof v !== "string") return undefined
+    const s = v.trim()
+    if (!s) return undefined
+    const u = s.startsWith("//") ? `https:${s}` : s
+    if (!/^https?:\/\//i.test(u)) return undefined
+    if (MEDIA_EXT_RE.test(u) || MEDIA_HINT_RE.test(u)) return u
+    return undefined
+  }
+
+  const isVisualMime = (mime?: string) =>
+    !!mime && (VISUAL_MIME_RE.test(mime) || mime === "application/pdf")
 
   const stitchedItems = listItems.map((item) => {
-    const content = contentById.get(item.id)
-    if (!content) return item
-    return { ...content, ...item, title: item.title }
+    const ci = contentById.get(item.id)
+    if (!ci) return item
+
+    const mimeType = ci.mimeType ?? item.mimeType
+    const url =
+      normalizeMediaUrl(ci.url) ??
+      normalizeMediaUrl(item.url) ??
+      normalizeMediaUrl(ci.content) ??
+      normalizeMediaUrl(item.content)
+
+    const kind =
+      ci.kind ??
+      item.kind ??
+      (url || isVisualMime(mimeType) ? "asset" : "text")
+
+    const content =
+      ci.content ??
+      item.content ??
+      (kind === "asset" ? url : undefined)
+
+    return {
+      ...item,
+      ...ci,
+      title: item.title || ci.title,
+      type: ci.type ?? item.type,
+      content,
+      url,
+      mimeType,
+      kind
+    }
   })
 
   const contentOnly = contentItems.filter((item) => !listIds.has(item.id))
-  const mergedItems = [...stitchedItems, ...contentOnly]
+  const mergedItems = [...stitchedItems, ...contentOnly].map(reclassifyDataTableItem)
   console.log(
     "[studioArtifacts] list",
     listItems.length,
@@ -1105,33 +1589,56 @@ export async function fetchStudioArtifactsByIds(
     mergedItems.length
   )
   const filteredItems = filterBySignal(mergedItems, ids)
+  const dedupedByTitle = dedupeByNormalizedTitle(filteredItems)
   console.log(
     "[studioArtifacts] contentCount",
-    filteredItems.filter((item) => typeof item.content === "string" && item.content.trim().length > 0).length,
+    dedupedByTitle.filter((item) => typeof item.content === "string" && item.content.trim().length > 0).length,
     "total",
-    filteredItems.length
+    dedupedByTitle.length
   )
-  const finalItems = filteredItems
+  const finalItems = dedupedByTitle.map(reclassifyDataTableItem)
   const contentCount = finalItems.filter(
     (item) => typeof item.content === "string" && item.content.trim().length > 0
   ).length
   const urlCount = finalItems.filter((item) => typeof item.url === "string" && item.url.trim().length > 0).length
-  console.warn("[BG_LOG][studio-final]", {
-    total: finalItems.length,
-    contentCount,
-    urlCount,
-    sample: finalItems.slice(0, 3).map((item) => ({
-      id: item.id,
-      title: item.title,
-      hasContent: Boolean(typeof item.content === "string" && item.content.trim().length > 0),
-      hasUrl: Boolean(typeof item.url === "string" && item.url.trim().length > 0),
-      type: item.type
-    }))
-  })
-  if (filteredItems.length > 0) {
-    await persistStudioCache(filteredItems)
+  void contentCount
+  void urlCount
+  if (finalItems.length > 0) {
+    await persistStudioCache(finalItems)
   }
 
   if (idSet.size === 0) return finalItems
-  return finalItems.filter((item) => idSet.has(item.id))
+  const finalById = new Map(finalItems.map((item) => [item.id, item] as const))
+  const listById = new Map(listItems.map((item) => [item.id, item] as const))
+  const requestedItems: StudioArtifactItem[] = []
+
+  for (const id of idSet) {
+    const fromFinal = finalById.get(id)
+    const fromList = listById.get(id)
+    const base = fromFinal ?? fromList
+    if (!base) continue
+
+    const canonicalTitle = normalizeString(fromList?.title ?? "") || normalizeString(base.title) || "Studio"
+    const canonicalType = fromFinal?.type ?? fromList?.type ?? base.type
+
+    const canonical: StudioArtifactItem = {
+      ...base,
+      id,
+      title: canonicalTitle,
+      type: canonicalType
+    }
+    canonical.kind = deriveKind(canonical)
+    requestedItems.push(canonical)
+  }
+
+  const droppedByRequestedIds = finalItems.filter((item) => !idSet.has(item.id))
+  if (droppedByRequestedIds.length > 0) {
+    console.log(
+      "[studioArtifacts] droppedByRequestedIds",
+      droppedByRequestedIds.length,
+      droppedByRequestedIds.map((item) => ({ id: item.id, title: item.title, type: item.type }))
+    )
+  }
+  const overflowBlogPosts = droppedByRequestedIds.filter(isSafeOverflowBlogPost)
+  return [...requestedItems, ...overflowBlogPosts]
 }

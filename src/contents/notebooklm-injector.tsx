@@ -18,6 +18,7 @@ import { ExportPreviewPanel } from "../../contents/notebooklm/ExportPreviewPanel
 import { SourceFilterPanel } from "../../contents/notebooklm/SourceFilterPanel"
 import { StudioExportButton } from "../../contents/notebooklm/StudioExportButton"
 import { ZettelButton } from "../../contents/notebooklm/ZettelButton"
+import { NotebookOnboardingTour } from "../../contents/notebooklm/NotebookOnboardingTour"
 import "~/content/features/VoiceInput/voiceInputInjector"
 import {
   resolveNotebookConfigureButton,
@@ -200,6 +201,7 @@ const mountedRoots = new Map<string, MountedRootRecord>()
 const AGILE_BAR_ROOT_ID = "minddock-agile-bar-root"
 const FOCUS_THREADS_ROOT_ID = "minddock-focus-threads-root"
 const PREVIEW_PANEL_ROOT_ID = "minddock-preview-panel-root"
+const NOTEBOOK_ONBOARDING_ROOT_ID = "minddock-notebook-onboarding-root"
 
 let domObserver: MutationObserver | null = null
 let refreshTimer: number | null = null
@@ -261,8 +263,25 @@ function mountTargets(): void {
   }
 
   for (const target of TARGETS) {
-    const host = target.resolveHost()
+    const currentMounted = mountedRoots.get(target.key)
+    const stickyStudioHost =
+      target.key === "studio-export" &&
+      currentMounted?.host instanceof HTMLElement &&
+      currentMounted.host.isConnected &&
+      isVisible(currentMounted.host)
+        ? currentMounted.host
+        : null
+
+    const host = stickyStudioHost ?? target.resolveHost()
     if (!(host instanceof HTMLElement) || !isVisible(host)) {
+      if (target.key === "studio-export") {
+        const mounted = mountedRoots.get(target.key)
+        if (mounted) {
+          mounted.root.unmount()
+          mountedRoots.delete(target.key)
+          mounted.container.remove()
+        }
+      }
       continue
     }
 
@@ -543,6 +562,52 @@ function mountPreviewPanel(): void {
     </InjectionErrorBoundary>
   )
   mountedRoots.set("preview-panel", { root, host: rootElement, container: rootElement })
+}
+
+function mountNotebookOnboardingTour(): void {
+  const mounted = mountedRoots.get("notebook-onboarding")
+
+  if (!isNotebookWorkspaceRoute()) {
+    if (mounted) {
+      mounted.root.unmount()
+      mountedRoots.delete("notebook-onboarding")
+      mounted.container.remove()
+    }
+    return
+  }
+
+  if (!(document.body instanceof HTMLBodyElement)) {
+    return
+  }
+
+  let rootElement = document.getElementById(NOTEBOOK_ONBOARDING_ROOT_ID) as HTMLElement | null
+  if (!rootElement) {
+    rootElement = document.createElement("div")
+    rootElement.id = NOTEBOOK_ONBOARDING_ROOT_ID
+    rootElement.setAttribute("data-minddock-target", "notebook-onboarding")
+    document.body.appendChild(rootElement)
+  }
+
+  if (mounted && mounted.host === document.body && mounted.container === rootElement) {
+    return
+  }
+
+  if (mounted) {
+    mounted.root.unmount()
+    mountedRoots.delete("notebook-onboarding")
+  }
+
+  const root = createRoot(rootElement)
+  root.render(
+    <InjectionErrorBoundary targetKey="notebook-onboarding">
+      {renderSafely("notebook-onboarding", () => <NotebookOnboardingTour />)}
+    </InjectionErrorBoundary>
+  )
+  mountedRoots.set("notebook-onboarding", {
+    root,
+    host: document.body,
+    container: rootElement
+  })
 }
 
 function resolveVisibleComposerTop(): number | null {
@@ -1336,6 +1401,7 @@ function refreshUi(): void {
   mountTargets()
   mountAgileBar()
   mountPreviewPanel()
+  mountNotebookOnboardingTour()
   mountFocusThreadsBar()
   updateAgileBarPosition()
   updateFocusThreadsBarPosition()
@@ -1358,7 +1424,7 @@ function scheduleRefresh(): void {
   refreshTimer = window.setTimeout(() => {
     refreshTimer = null
     refreshUi()
-  }, 100)
+  }, 40)
 }
 
 function startObservers(): void {
@@ -1376,7 +1442,9 @@ function startObservers(): void {
 
     domObserver.observe(document.body, {
       childList: true,
-      subtree: true
+      subtree: true,
+      attributes: true,
+      attributeFilter: ["class", "style", "aria-expanded", "aria-hidden", "data-state", "hidden"]
     })
   }
 
@@ -1460,7 +1528,7 @@ function cleanup(): void {
     mounted.root.unmount()
     mountedRoots.delete(key)
 
-    if (key === "agile-bar" || key === "focus-threads") {
+    if (key === "agile-bar" || key === "focus-threads" || key === "notebook-onboarding") {
       mounted.host.remove()
     }
   }

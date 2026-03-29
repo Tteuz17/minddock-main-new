@@ -163,6 +163,37 @@ export function formatChatAsReadableMarkdown(
   return `${header}${meta}${body}`
 }
 
+function stripMarkdownBoldMarkers(value: string): string {
+  const normalizedValue = String(value ?? "").replace(/\r/g, "")
+  if (!normalizedValue) {
+    return ""
+  }
+
+  let output = normalizedValue
+
+  for (let pass = 0; pass < 3; pass += 1) {
+    const next = output
+      .replace(/\*\*\*([^\n*][^*\n]*?)\*\*\*/g, "$1")
+      .replace(/\*\*([^\n*][^*\n]*?)\*\*/g, "$1")
+      .replace(/__([^\n_][^_\n]*?)__/g, "$1")
+      .replace(/\*\*\*/g, "")
+      .replace(/__(?=\S)|(?<=\S)__/g, "")
+      .replace(/\*\*(?=\S)|(?<=\S)\*\*/g, "")
+      .replace(/^\s*\*+\s+/gm, "• ")
+      .replace(/(?<=\S)\*(?=\S)/g, "")
+      .replace(/(?<=\S)_(?=\S)/g, "")
+      .replace(/~~/g, "")
+
+    if (next === output) {
+      break
+    }
+
+    output = next
+  }
+
+  return output.replace(/\n{3,}/g, "\n\n").trim()
+}
+
 export function formatChatAsReadableMarkdownV2(
   platform: string,
   messages: Array<{ role: string; content: string }>,
@@ -170,6 +201,7 @@ export function formatChatAsReadableMarkdownV2(
 ): string {
   const normalizedPlatform = normalizeChatPlatformLabel(platform)
   const normalizedTitle = String(title ?? "").trim()
+  const isReddit = normalizedPlatform.toLowerCase() === "reddit"
   const divider = "------------------------------------------------------------"
   const header = normalizedTitle
     ? `# ${normalizedTitle}\n\n`
@@ -178,7 +210,9 @@ export function formatChatAsReadableMarkdownV2(
   const body = messages
     .map((message) => {
       const roleLabel = message.role === "user" ? "Usuario:" : `${normalizedPlatform}:`
-      return `${roleLabel}\n\n${String(message.content ?? "").trim()}`
+      const content = String(message.content ?? "").trim()
+      const normalizedContent = isReddit ? stripMarkdownBoldMarkers(content) : content
+      return `${roleLabel}\n\n${normalizedContent}`
     })
     .join(`\n\n${divider}\n\n`)
 
@@ -233,11 +267,28 @@ export async function removeFromStorage(key: string): Promise<void> {
   })
 }
 
-function getSecureStorageArea(): chrome.storage.StorageArea {
+const LOCAL_PERSISTED_SECURE_KEYS = new Set<string>([
+  // Supabase session must survive extension reloads.
+  "minddock_supabase_session"
+])
+
+function getSessionStorageArea(): chrome.storage.StorageArea | null {
   const storageWithSession = chrome.storage as typeof chrome.storage & {
     session?: chrome.storage.StorageArea
   }
-  return storageWithSession.session ?? chrome.storage.local
+  return storageWithSession.session ?? null
+}
+
+function shouldPersistSecureKeyInLocal(key: string): boolean {
+  const normalizedKey = String(key ?? "").trim()
+  return LOCAL_PERSISTED_SECURE_KEYS.has(normalizedKey)
+}
+
+function getSecureStorageArea(key: string): chrome.storage.StorageArea {
+  if (shouldPersistSecureKeyInLocal(key)) {
+    return chrome.storage.local
+  }
+  return getSessionStorageArea() ?? chrome.storage.local
 }
 
 async function getFromArea<T>(
@@ -268,13 +319,31 @@ async function removeFromArea(area: chrome.storage.StorageArea, key: string): Pr
 }
 
 export async function getFromSecureStorage<T>(key: string): Promise<T | null> {
-  const secureArea = getSecureStorageArea()
+  const secureArea = getSecureStorageArea(key)
   const secureValue = await getFromArea<T>(secureArea, key)
   if (secureValue !== null) {
     return secureValue
   }
 
+  const sessionArea = getSessionStorageArea()
+
   if (secureArea === chrome.storage.local) {
+    if (!sessionArea) {
+      return null
+    }
+
+    const sessionValue = await getFromArea<T>(sessionArea, key)
+    if (sessionValue === null) {
+      return null
+    }
+
+    // One-time migration from session-backed storage to persisted local storage.
+    await setInArea(chrome.storage.local, key, sessionValue)
+    await removeFromArea(sessionArea, key)
+    return sessionValue
+  }
+
+  if (!sessionArea || secureArea !== sessionArea) {
     return null
   }
 
@@ -290,20 +359,34 @@ export async function getFromSecureStorage<T>(key: string): Promise<T | null> {
 }
 
 export async function setInSecureStorage<T>(key: string, value: T): Promise<void> {
-  const secureArea = getSecureStorageArea()
+  const secureArea = getSecureStorageArea(key)
   await setInArea(secureArea, key, value)
+  const sessionArea = getSessionStorageArea()
 
   if (secureArea !== chrome.storage.local) {
     // Ensure sensitive entries are not persisted in local storage.
     await removeFromArea(chrome.storage.local, key)
+    return
+  }
+
+  if (sessionArea) {
+    // Ensure persisted keys are not shadowed by stale session values.
+    await removeFromArea(sessionArea, key)
   }
 }
 
 export async function removeFromSecureStorage(key: string): Promise<void> {
-  const secureArea = getSecureStorageArea()
+  const secureArea = getSecureStorageArea(key)
   await removeFromArea(secureArea, key)
+  const sessionArea = getSessionStorageArea()
+
   if (secureArea !== chrome.storage.local) {
     await removeFromArea(chrome.storage.local, key)
+    return
+  }
+
+  if (sessionArea) {
+    await removeFromArea(sessionArea, key)
   }
 }
 

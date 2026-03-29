@@ -656,6 +656,7 @@ export function ConversationExportMenu() {
       <div className="inline-flex shrink-0 items-center gap-1 rounded-[12px] border border-white/[0.08] bg-[#06080c] p-[3px]">
         <button
           type="button"
+          data-tour-id="chat-export-main-btn"
           title={exportLabel}
           aria-haspopup="menu"
           aria-expanded={isOpen}
@@ -685,6 +686,7 @@ export function ConversationExportMenu() {
 
         <button
           type="button"
+          data-tour-id="chat-export-copy-btn"
           title={copyDone ? "Copied!" : copyLabel}
           aria-label={copyDone ? "Copied!" : copyLabel}
           onMouseDown={swallowInteraction}
@@ -713,9 +715,12 @@ export function ConversationExportMenu() {
         <section
           role="menu"
           aria-label="Export menu"
+          data-tour-id="chat-export-menu"
           className="absolute right-0 top-[calc(100%+10px)] z-[2147483646] w-[324px] rounded-[18px] border border-white/[0.08] bg-[#000000] p-2 shadow-[0_24px_56px_rgba(0,0,0,0.52)]">
           <div className="space-y-2">
-            <div className="rounded-[14px] border border-white/[0.08] bg-[#050505] p-2.5">
+            <div
+              className="rounded-[14px] border border-white/[0.08] bg-[#050505] p-2.5"
+              data-tour-id="chat-export-menu-config">
               <div className="mb-2 inline-flex items-center gap-1.5 rounded-full border border-white/[0.1] bg-white/[0.03] px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-[#93a0b6]">
                 <Download size={11} strokeWidth={2} className="text-[#facc15]" />
                 Configuration
@@ -784,7 +789,9 @@ export function ConversationExportMenu() {
               />
             </div>
 
-            <div className="overflow-hidden rounded-[14px] border border-white/[0.08] bg-[#050505]">
+            <div
+              className="overflow-hidden rounded-[14px] border border-white/[0.08] bg-[#050505]"
+              data-tour-id="chat-export-menu-formats">
               <div className="flex items-center justify-between border-b border-white/[0.08] px-3 py-2">
                 <span className="text-[10px] font-semibold uppercase tracking-[0.08em] text-[#8390a5]">Formats</span>
                 <span className="text-[10px] text-[#728098]">{FORMAT_OPTIONS.length} options</span>

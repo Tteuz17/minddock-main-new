@@ -135,12 +135,15 @@ class StorageManager {
     localUsage[type] += 1
     await setInStorage(STORAGE_KEYS.AI_MONTHLY_USAGE, localUsage)
 
-    const serverResult = await this.incrementServerAiMonthlyUsage(type)
-    if (!serverResult) {
+    const serverUsage = await this.fetchServerAiMonthlyUsage(true)
+    if (!serverUsage) {
       return
     }
 
-    await this.syncLocalAiMonthlyUsageFromServerCount(type, serverResult.currentCount, serverResult.monthKey)
+    const merged = this.mergeAiMonthlyUsage(localUsage, serverUsage)
+    if (JSON.stringify(merged) !== JSON.stringify(localUsage)) {
+      await setInStorage(STORAGE_KEYS.AI_MONTHLY_USAGE, merged)
+    }
   }
 
   async checkUsageLimit(type: UsageType, limit: number | "unlimited"): Promise<boolean> {

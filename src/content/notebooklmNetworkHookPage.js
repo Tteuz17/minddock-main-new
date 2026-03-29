@@ -4,7 +4,6 @@
 (() => {
   if (window.__KORTEX_NOTEBOOKLM_NETWORK_HOOK_INSTALLED__) return
   window.__KORTEX_NOTEBOOKLM_NETWORK_HOOK_INSTALLED__ = true
-  try { console.log('[MindDock][PageHook] v2 loaded') } catch (_) {}
 
   const MUTATION_RPC_IDS = new Set([
     'izAoDd', // add text/gdoc source
@@ -168,7 +167,6 @@
           items,
           notebookId: ctx.notebookId || parseNotebookIdFromSourcePath(ctx.sourcePath || '')
         }, 'kortex')
-        console.log('[MindDock][PageHook] gArtLc items:', items.length)
       }
     } catch (_) {}
   }

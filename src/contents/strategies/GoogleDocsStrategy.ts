@@ -1,4 +1,4 @@
-import type { CSSProperties } from "react"
+﻿import type { CSSProperties } from "react"
 
 import type { ContentStrategy, StrategyMenuAlign } from "./types"
 
@@ -7,8 +7,13 @@ export class GoogleDocsStrategy implements ContentStrategy {
 
   matches(url: string): boolean {
     try {
-      const host = new URL(url).hostname.toLowerCase()
-      return host === "docs.google.com" || host.endsWith(".docs.google.com")
+      const parsed = new URL(url)
+      const host = parsed.hostname.toLowerCase()
+      const pathname = parsed.pathname.toLowerCase()
+      if (!(host === "docs.google.com" || host.endsWith(".docs.google.com"))) {
+        return false
+      }
+      return pathname === "/document/d" || pathname.startsWith("/document/d/")
     } catch {
       return false
     }
@@ -18,7 +23,7 @@ export class GoogleDocsStrategy implements ContentStrategy {
     return document.body
   }
 
-  // Keep host in document.body — Google Docs replaces toolbar children on every action.
+  // Keep host in document.body - Google Docs replaces toolbar children on every action.
   mountHost(_host: HTMLElement): boolean {
     return false
   }

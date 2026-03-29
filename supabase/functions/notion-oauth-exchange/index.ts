@@ -8,11 +8,17 @@
  *   supabase functions deploy notion-oauth-exchange --no-verify-jwt
  *
  * Required secrets:
+ *   supabase secrets set SUPABASE_URL=https://<project-ref>.supabase.co
+ *   supabase secrets set SUPABASE_SERVICE_ROLE_KEY=<service-role-key>
  *   supabase secrets set NOTION_CLIENT_SECRET=secret_xxx
  *
  * Optional:
  *   supabase secrets set NOTION_CLIENT_ID=321d872b-594c-81e6-b469-00375ccd1eac
+ *   supabase secrets set ALLOWED_ORIGINS=https://minddocklm.digital,https://app.minddocklm.digital
+ *   supabase secrets set NOTION_ALLOWED_EXTENSION_IDS=<ext_id_1>,<ext_id_2>
  */
+
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2"
 
 const DEFAULT_NOTION_CLIENT_ID = "321d872b-594c-81e6-b469-00375ccd1eac"
 const NOTION_OAUTH_TOKEN_ENDPOINT = "https://api.notion.com/v1/oauth/token"
@@ -23,11 +29,17 @@ const CORS_HEADERS = {
   "Access-Control-Allow-Methods": "POST, OPTIONS"
 }
 
+const CHROME_EXTENSION_ORIGIN_REGEX = /^chrome-extension:\/\/[a-z]{32}$/i
+const MOZ_EXTENSION_ORIGIN_REGEX = /^moz-extension:\/\/[a-z0-9-]+$/i
+const LOCALHOST_ORIGIN_REGEX = /^https?:\/\/localhost(?::\d{1,5})?$/i
+const CHROMIUM_REDIRECT_HOST_REGEX = /^([a-p]{32})\.chromiumapp\.org$/i
+
 interface ExchangeRequestBody {
   provider?: unknown
   code?: unknown
   redirectUri?: unknown
   redirect_uri?: unknown
+  extensionId?: unknown
 }
 
 interface NotionTokenResponse {
@@ -35,30 +47,78 @@ interface NotionTokenResponse {
   token_type?: string
 }
 
-function jsonResponse(body: unknown, status = 200): Response {
+function parseCsvSet(value: string | null | undefined): Set<string> {
+  return new Set(
+    String(value ?? "")
+      .split(",")
+      .map((item) => item.trim().toLowerCase())
+      .filter(Boolean)
+  )
+}
+
+const allowedOrigins = parseCsvSet(Deno.env.get("ALLOWED_ORIGINS"))
+const allowedExtensionIds = parseCsvSet(Deno.env.get("NOTION_ALLOWED_EXTENSION_IDS"))
+
+function isAllowedOrigin(origin: string): boolean {
+  const normalized = String(origin ?? "").trim()
+  if (!normalized) {
+    return true
+  }
+
+  if (
+    CHROME_EXTENSION_ORIGIN_REGEX.test(normalized) ||
+    MOZ_EXTENSION_ORIGIN_REGEX.test(normalized) ||
+    LOCALHOST_ORIGIN_REGEX.test(normalized)
+  ) {
+    return true
+  }
+
+  return allowedOrigins.has(normalized.toLowerCase())
+}
+
+function isBrowserOriginAllowed(request: Request): boolean {
+  const origin = String(request.headers.get("origin") ?? "").trim()
+  if (!origin) {
+    return true
+  }
+  return isAllowedOrigin(origin)
+}
+
+function jsonResponse(body: unknown, status = 200, headers?: HeadersInit): Response {
   return new Response(JSON.stringify(body), {
     status,
     headers: {
       ...CORS_HEADERS,
-      "Content-Type": "application/json"
+      "Content-Type": "application/json",
+      "Cache-Control": "no-store",
+      ...(headers ?? {})
     }
   })
 }
 
-function isAllowedRedirectUri(value: string): boolean {
+function extractChromiumRedirectExtensionId(value: string): string | null {
   try {
     const parsed = new URL(value)
-    return (
-      parsed.protocol === "https:" &&
-      parsed.hostname.endsWith(".chromiumapp.org") &&
-      parsed.pathname.length > 0
-    )
+    if (parsed.protocol !== "https:" || parsed.pathname.length === 0) {
+      return null
+    }
+
+    const hostMatch = parsed.hostname.match(CHROMIUM_REDIRECT_HOST_REGEX)
+    if (!hostMatch?.[1]) {
+      return null
+    }
+
+    return hostMatch[1].toLowerCase()
   } catch {
-    return false
+    return null
   }
 }
 
 Deno.serve(async (request: Request) => {
+  if (!isBrowserOriginAllowed(request)) {
+    return jsonResponse({ error: "Origin not allowed" }, 403)
+  }
+
   if (request.method === "OPTIONS") {
     return new Response(null, { headers: CORS_HEADERS })
   }
@@ -67,11 +127,37 @@ Deno.serve(async (request: Request) => {
     return jsonResponse({ error: "Method not allowed" }, 405)
   }
 
+  const authHeader = String(request.headers.get("Authorization") ?? "").trim()
+  if (!authHeader.startsWith("Bearer ")) {
+    return jsonResponse({ error: "Missing authorization" }, 401)
+  }
+
+  const token = authHeader.slice(7).trim()
+  if (!token) {
+    return jsonResponse({ error: "Missing authorization token" }, 401)
+  }
+
+  const supabaseUrl = String(Deno.env.get("SUPABASE_URL") ?? "").trim()
+  const supabaseServiceKey = String(Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "").trim()
   const notionClientSecret = String(Deno.env.get("NOTION_CLIENT_SECRET") ?? "").trim()
   const notionClientId = String(Deno.env.get("NOTION_CLIENT_ID") ?? DEFAULT_NOTION_CLIENT_ID).trim()
 
+  if (!supabaseUrl || !supabaseServiceKey) {
+    return jsonResponse({ error: "Supabase auth not configured on server" }, 503)
+  }
+
   if (!notionClientSecret) {
     return jsonResponse({ error: "NOTION_CLIENT_SECRET is not configured on server" }, 503)
+  }
+
+  const supabase = createClient(supabaseUrl, supabaseServiceKey)
+  const {
+    data: { user },
+    error: authError
+  } = await supabase.auth.getUser(token)
+
+  if (authError || !user) {
+    return jsonResponse({ error: "Invalid or expired session" }, 401)
   }
 
   let body: ExchangeRequestBody
@@ -88,13 +174,27 @@ Deno.serve(async (request: Request) => {
 
   const code = String(body.code ?? "").trim()
   const redirectUri = String(body.redirectUri ?? body.redirect_uri ?? "").trim()
+  const extensionId = String(body.extensionId ?? "").trim().toLowerCase()
 
   if (!code) {
     return jsonResponse({ error: "Missing authorization code" }, 400)
   }
 
-  if (!redirectUri || !isAllowedRedirectUri(redirectUri)) {
+  if (code.length > 4096) {
+    return jsonResponse({ error: "Invalid authorization code" }, 400)
+  }
+
+  const redirectExtensionId = extractChromiumRedirectExtensionId(redirectUri)
+  if (!redirectExtensionId) {
     return jsonResponse({ error: "Invalid redirectUri" }, 400)
+  }
+
+  if (extensionId && extensionId !== redirectExtensionId) {
+    return jsonResponse({ error: "redirectUri/extensionId mismatch" }, 400)
+  }
+
+  if (allowedExtensionIds.size > 0 && !allowedExtensionIds.has(redirectExtensionId)) {
+    return jsonResponse({ error: "Extension is not allowed for Notion OAuth" }, 403)
   }
 
   const notionResponse = await fetch(NOTION_OAUTH_TOKEN_ENDPOINT, {
@@ -116,10 +216,9 @@ Deno.serve(async (request: Request) => {
     return jsonResponse(
       {
         error: "Notion OAuth exchange failed",
-        status: notionResponse.status,
-        details: rawPayload || notionResponse.statusText
+        status: notionResponse.status
       },
-      notionResponse.status
+      notionResponse.status >= 500 ? 502 : 400
     )
   }
 

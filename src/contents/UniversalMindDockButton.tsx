@@ -32,16 +32,15 @@ import { showMindDockToast } from "../../contents/common/minddock-ui"
 
 export const config: PlasmoCSConfig = {
   matches: [
-    "https://youtube.com/watch*",
-    "https://*.youtube.com/watch*",
+    "https://youtube.com/*",
+    "https://*.youtube.com/*",
     "https://chat.openai.com/*",
     "https://chatgpt.com/*",
     "https://claude.ai/*",
     "https://gemini.google.com/*",
     "https://perplexity.ai/*",
     "https://www.perplexity.ai/*",
-    "https://docs.google.com/*",
-    "https://docs.google.com/document/*",
+    "https://docs.google.com/document/d/*",
     "https://linkedin.com/*",
     "https://www.linkedin.com/*",
     "https://reddit.com/*",
@@ -60,8 +59,10 @@ export const config: PlasmoCSConfig = {
     "https://www.kimi.moonshot.cn/*",
     "https://kimi.com/*",
     "https://www.kimi.com/*",
+    "https://*.kimi.com/*",
     "https://openevidence.com/*",
-    "https://www.openevidence.com/*"
+    "https://www.openevidence.com/*",
+    "https://*.openevidence.com/*"
   ],
   run_at: "document_idle"
 }
@@ -148,7 +149,15 @@ interface SyncedConversationRecord {
 interface CaptureResolutionOptions {
   linkedInPostUrn?: string | null
   linkedInPostRoot?: HTMLElement | null
+  linkedInSnapshot?: LinkedInCaptureSnapshot | null
   redditPostRoot?: HTMLElement | null
+}
+
+interface LinkedInCaptureSnapshot {
+  postContent: string
+  authorName: string
+  sourceUrl: string
+  sourceTitle: string
 }
 
 interface NotebookAccountScope {
@@ -182,6 +191,7 @@ const LEGACY_CHAT_LINK_PREFIX = "minddock_link_"
 const NO_CHANGES_DETECTED_ERROR = "NO_CHANGES_DETECTED"
 const RESYNC_FLOW_LIMIT_SECONDS = 90
 const RESYNC_RUNTIME_TIMEOUT_MS = 100_000
+const GEMINI_CONTENT_GRACE_MS = 6000
 const STRICT_NOTEBOOK_ACCOUNT_MODE = true
 const LINKEDIN_INLINE_TRIGGER_ATTRIBUTE = "data-minddock-linkedin-inline-trigger"
 const REDDIT_INLINE_TRIGGER_ATTRIBUTE = "data-minddock-reddit-inline-trigger"
@@ -211,10 +221,17 @@ const LINKEDIN_ACTION_LABEL_TOKENS = [
   "send"
 ] as const
 const YOUTUBE_SNIPER_BUTTON_ATTRIBUTE = "data-minddock-youtube-sniper-button"
+const YOUTUBE_SNIPER_FALLBACK_ATTRIBUTE = "data-minddock-youtube-sniper-fallback"
 const YOUTUBE_SNIPER_BUTTON_ID = "minddock-youtube-sniper-button"
 const YOUTUBE_SNIPER_OVERLAY_HOST_ID = "minddock-youtube-sniper-overlay-host"
 const YOUTUBE_SNIPER_OVERLAY_MOUNT_ID = "minddock-youtube-sniper-overlay-root"
 const YOUTUBE_ACTION_BAR_SELECTORS = [
+  "ytd-watch-metadata ytd-menu-renderer",
+  "ytd-watch-flexy ytd-menu-renderer",
+  "ytd-watch-grid ytd-menu-renderer",
+  "#actions ytd-menu-renderer",
+  "ytd-watch-metadata #menu",
+  "ytd-watch-metadata #menu-container",
   "ytd-watch-metadata #top-level-buttons-computed",
   "ytd-watch-metadata #top-level-buttons",
   "#actions #top-level-buttons-computed",
@@ -236,10 +253,10 @@ const YOUTUBE_DISLIKE_BUTTON_SELECTORS = [
   "#dislike-button button",
   "#dislike-button",
   "button[aria-label*='dislike']",
-  "button[aria-label*='Não gostei']",
+  "button[aria-label*='NÃ£o gostei']",
   "button[aria-label*='Nao gostei']"
 ] as const
-
+const YOUTUBE_SNIPER_ICON_VERTICAL_OFFSET_PX = 1
 const HOST_ID = "minddock-universal-button-host"
 const MOUNT_ID = "minddock-universal-button-root"
 const STYLE_ID = "minddock-universal-button-style"
@@ -264,6 +281,8 @@ let bootstrapPromise: Promise<void> | null = null
 let injectionManager: InjectionManager | null = null
 let rebootstrapTimer: number | null = null
 let sniperDefaultNotebookId = ""
+let youtubeSniperHardGuardStop: (() => void) | null = null
+let youtubeTranscriptSuppressorStop: (() => void) | null = null
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -346,7 +365,7 @@ function stripTrailingContextSnippet(value: string): string {
   const [fullMatch, innerRaw] = parentheticalMatch
   const inner = normalizeString(innerRaw)
   const words = inner.split(/\s+/u).filter(Boolean)
-  const hasLetters = /[A-Za-zÀ-ÖØ-öø-ÿ]/u.test(inner)
+  const hasLetters = /[A-Za-z\u00C0-\u00D6\u00D8-\u00F6\u00F8-\u00FF]/u.test(inner)
   const looksLikeContextSnippet = hasLetters && (words.length >= 3 || inner.length >= 22)
 
   if (!looksLikeContextSnippet) {
@@ -485,6 +504,15 @@ function isVisibleElement(element: Element): element is HTMLElement {
   return style.display !== "none" && style.visibility !== "hidden"
 }
 
+function isRenderableElement(element: Element | null | undefined): element is HTMLElement {
+  if (!(element instanceof HTMLElement) || !isVisibleElement(element)) {
+    return false
+  }
+
+  const rect = element.getBoundingClientRect()
+  return rect.width > 0 && rect.height > 0
+}
+
 function normalizeGenericCaptureText(value: unknown): string {
   return String(value ?? "")
     .replace(/\u00a0/g, " ")
@@ -493,6 +521,25 @@ function normalizeGenericCaptureText(value: unknown): string {
     .replace(/[ \f\v]+\n/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim()
+}
+
+function stripMarkdownBoldFormatting(value: string): string {
+  if (!value) {
+    return ""
+  }
+
+  let output = value
+  for (let pass = 0; pass < 3; pass += 1) {
+    const next = output
+      .replace(/\*\*([^\n*][^*\n]*?)\*\*/g, "$1")
+      .replace(/__([^\n_][^_\n]*?)__/g, "$1")
+    if (next === output) {
+      break
+    }
+    output = next
+  }
+
+  return output
 }
 
 function resolveGenericPlatformLabel(host: string): string {
@@ -632,6 +679,66 @@ async function buildGenericPagePreparedCapture(
   }
 
   const host = window.location.hostname.toLowerCase()
+  if (host.includes("linkedin.com")) {
+    const snapshotCapture = buildLinkedInPreparedCaptureFromSnapshot(options.linkedInSnapshot ?? null, currentUrl)
+    if (snapshotCapture) {
+      return snapshotCapture
+    }
+
+    const fallbackSnapshot = buildLinkedInCaptureSnapshotFromRoot(
+      options.linkedInPostRoot ?? null,
+      currentUrl,
+      normalizeString(options.linkedInPostUrn) || null
+    )
+    const fallbackSnapshotCapture = buildLinkedInPreparedCaptureFromSnapshot(fallbackSnapshot, currentUrl)
+    if (fallbackSnapshotCapture) {
+      return fallbackSnapshotCapture
+    }
+
+    const viewportSnapshot = buildLinkedInCaptureSnapshotFromRoot(
+      resolveLinkedInCaptureRootNearViewport(),
+      currentUrl,
+      normalizeString(options.linkedInPostUrn) || null
+    )
+    const viewportSnapshotCapture = buildLinkedInPreparedCaptureFromSnapshot(viewportSnapshot, currentUrl)
+    if (viewportSnapshotCapture) {
+      return viewportSnapshotCapture
+    }
+
+    const fallbackUrn = normalizeString(options.linkedInPostUrn)
+    if (fallbackUrn) {
+      const fallbackSourceUrl = resolveLinkedInSourceUrlFromPostUrn(fallbackUrn, currentUrl)
+      const fallbackContent = normalizeGenericCaptureText(
+        `Post by Desconhecido\nSource: ${fallbackSourceUrl}\nPublicacao do LinkedIn sem texto visivel no momento da captura.`
+      )
+      return {
+        sourceKind: "chat",
+        sourcePlatform: "LinkedIn",
+        sourceTitle: resolveBestSourceTitle([resolveSafeCaptureTitle(), "Post do LinkedIn"]),
+        conversation: [
+          {
+            role: "user",
+            content: fallbackContent
+          }
+        ]
+      }
+    }
+
+    return {
+      sourceKind: "chat",
+      sourcePlatform: "LinkedIn",
+      sourceTitle: resolveBestSourceTitle([resolveSafeCaptureTitle(), "Post do LinkedIn"]),
+      conversation: [
+        {
+          role: "user",
+          content: normalizeGenericCaptureText(
+            `Post by Desconhecido\nSource: ${currentUrl}\nPublicacao do LinkedIn sem texto visivel no momento da captura.`
+          )
+        }
+      ]
+    }
+  }
+
   const sourcePlatform = resolveGenericPlatformLabel(host)
   const sourceTitle = resolveSafeCaptureTitle()
   const selectedText = normalizeGenericCaptureText(window.getSelection?.()?.toString() || "")
@@ -751,6 +858,92 @@ function isGenericConversationUrl(rawUrl: string): boolean {
   } catch {
     return true
   }
+}
+
+function detectGeminiConversationContent(): boolean {
+  const candidates = Array.from(
+    document.querySelectorAll(
+      [
+        "conversational-turn user-query",
+        "conversational-turn model-response",
+        "user-query",
+        "model-response",
+        "conversational-turn",
+        "[data-turn-id]",
+        "[class*='conversation-turn']",
+        "[class*='model-response']",
+        "[class*='user-query']"
+      ].join(",")
+    )
+  )
+
+  for (const candidate of candidates) {
+    if (!isVisibleElement(candidate)) {
+      continue
+    }
+
+    const text = normalizeString((candidate as HTMLElement).innerText || candidate.textContent || "")
+    if (text.length > 0) {
+      return true
+    }
+  }
+
+  const actionControls = Array.from(
+    document.querySelectorAll<HTMLElement>(
+      "conversational-turn button[aria-label], model-response button[aria-label], user-query button[aria-label]"
+    )
+  )
+  for (const actionControl of actionControls) {
+    if (!isVisibleElement(actionControl)) {
+      continue
+    }
+
+    const label = normalizeString(
+      [
+        actionControl.getAttribute("aria-label") ?? "",
+        actionControl.getAttribute("title") ?? "",
+        actionControl.textContent ?? ""
+      ].join(" ")
+    ).toLowerCase()
+
+    if (
+      label.includes("like") ||
+      label.includes("gostei") ||
+      label.includes("nao gostei") ||
+      label.includes("dislike") ||
+      label.includes("copiar") ||
+      label.includes("copy")
+    ) {
+      return true
+    }
+  }
+
+  return false
+}
+
+function detectGeminiComposerSurface(): boolean {
+  const composerCandidates = Array.from(
+    document.querySelectorAll(
+      [
+        "div[class*='text-input-field']",
+        "textarea[aria-label*='gemini' i]",
+        "textarea[placeholder*='gemini' i]",
+        "div[contenteditable='true'][aria-label*='gemini' i]",
+        "div[contenteditable='true'][data-placeholder*='gemini' i]",
+        "button[class*='toolbox-drawer-button']",
+        "button[aria-label*='ferramentas' i]",
+        "button[aria-label*='tools' i]"
+      ].join(",")
+    )
+  )
+
+  for (const candidate of composerCandidates) {
+    if (isVisibleElement(candidate)) {
+      return true
+    }
+  }
+
+  return false
 }
 
 function formatNotebooksSyncLabel(syncedAt: string): string {
@@ -1394,7 +1587,49 @@ function isYouTubeWatchUrl(rawUrl: string): boolean {
 }
 
 function resolveYouTubeActionBar(): HTMLElement | null {
-  return queryFirstVisibleElement(YOUTUBE_ACTION_BAR_SELECTORS)
+  const directActionBar = queryFirstVisibleElement(YOUTUBE_ACTION_BAR_SELECTORS)
+  if (directActionBar) {
+    return directActionBar
+  }
+
+  const globalShareWrapper = resolveYouTubeShareButtonWrapperGlobal()
+  if (globalShareWrapper?.parentElement instanceof HTMLElement) {
+    return globalShareWrapper.parentElement
+  }
+
+  const fallbackVisibleActionBar = queryFirstVisibleElement([
+    "ytd-watch-flexy #menu",
+    "ytd-watch-flexy #menu-container",
+    "ytd-watch-flexy #actions",
+    "ytd-watch-grid #menu",
+    "ytd-watch-grid #actions"
+  ])
+  if (fallbackVisibleActionBar) {
+    return fallbackVisibleActionBar
+  }
+
+  const strictSelectors = [
+    "ytd-watch-metadata ytd-menu-renderer",
+    "ytd-watch-metadata #menu",
+    "ytd-watch-flexy #menu",
+    "ytd-watch-grid #menu",
+    "ytd-watch-flexy #actions"
+  ]
+  for (const selector of strictSelectors) {
+    const candidate = document.querySelector(selector)
+    if (candidate instanceof HTMLElement && candidate.isConnected) {
+      return candidate
+    }
+  }
+
+  return null
+}
+
+function resolveYouTubeWatchRoot(): ParentNode {
+  return (
+    queryFirstVisibleElement(["ytd-watch-flexy", "ytd-watch-grid", "#primary-inner"]) ??
+    document
+  )
 }
 
 function resolveYouTubeButtonWrapper(button: HTMLElement | null): HTMLElement | null {
@@ -1408,14 +1643,202 @@ function resolveYouTubeButtonWrapper(button: HTMLElement | null): HTMLElement | 
   )
 }
 
+function normalizeYouTubeActionLabel(value: string): string {
+  return normalizeString(value)
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+}
+
+function isYouTubeShareLikeLabel(value: string): boolean {
+  const normalized = normalizeYouTubeActionLabel(value)
+  return (
+    normalized.includes("share") ||
+    normalized.includes("compartilh") ||
+    normalized.includes("compartilhar") ||
+    normalized.includes("compartilhar com") ||
+    normalized.includes("partilhar")
+  )
+}
+
+function isYouTubeDislikeLikeLabel(value: string): boolean {
+  const normalized = normalizeYouTubeActionLabel(value)
+  return (
+    normalized.includes("dislike") ||
+    normalized.includes("nao gostei") ||
+    normalized.includes("nÃ£o gostei")
+  )
+}
+
 function resolveYouTubeShareButtonWrapper(actionBar: ParentNode): HTMLElement | null {
   const shareButton = queryFirstVisibleDescendant(actionBar, YOUTUBE_SHARE_BUTTON_SELECTORS)
-  return resolveYouTubeButtonWrapper(shareButton)
+  const shareWrapper = resolveYouTubeButtonWrapper(shareButton)
+  if (shareWrapper) {
+    return shareWrapper
+  }
+
+  const fallbackButtons = Array.from(actionBar.querySelectorAll<HTMLElement>("button, a, [role='button']"))
+  for (const candidate of fallbackButtons) {
+    if (!isRenderableElement(candidate)) {
+      continue
+    }
+    const label = [
+      candidate.getAttribute("aria-label") || "",
+      candidate.getAttribute("title") || "",
+      candidate.textContent || ""
+    ].join(" ")
+    if (!isYouTubeShareLikeLabel(label)) {
+      continue
+    }
+    const wrapper = resolveYouTubeButtonWrapper(candidate)
+    if (wrapper) {
+      return wrapper
+    }
+  }
+
+  const fallbackWrappers = Array.from(
+    actionBar.querySelectorAll<HTMLElement>("ytd-button-renderer, ytd-toggle-button-renderer")
+  )
+  for (const wrapper of fallbackWrappers) {
+    if (!isRenderableElement(wrapper)) {
+      continue
+    }
+    const label = [
+      wrapper.getAttribute("aria-label") || "",
+      wrapper.getAttribute("title") || "",
+      wrapper.textContent || ""
+    ].join(" ")
+    if (isYouTubeShareLikeLabel(label)) {
+      return wrapper
+    }
+  }
+
+  return null
+}
+
+function resolveYouTubeShareAnchor(root: ParentNode): HTMLElement | null {
+  const strictSelectors = [
+    "button[aria-label*='Share']",
+    "button[aria-label*='Compartilhar']",
+    "a[aria-label*='Share']",
+    "a[aria-label*='Compartilhar']",
+    "button[title*='Share']",
+    "button[title*='Compartilhar']"
+  ] as const
+
+  for (const selector of strictSelectors) {
+    let matches: HTMLElement[] = []
+    try {
+      matches = Array.from(root.querySelectorAll<HTMLElement>(selector))
+    } catch {
+      continue
+    }
+
+    for (const candidate of matches) {
+      if (!isRenderableElement(candidate)) {
+        continue
+      }
+      const label = [
+        candidate.getAttribute("aria-label") || "",
+        candidate.getAttribute("title") || "",
+        candidate.textContent || ""
+      ].join(" ")
+      if (isYouTubeShareLikeLabel(label)) {
+        return candidate
+      }
+    }
+  }
+
+  const genericCandidates = Array.from(root.querySelectorAll<HTMLElement>("button, a, [role='button']"))
+  for (const candidate of genericCandidates) {
+    if (!isRenderableElement(candidate)) {
+      continue
+    }
+    const label = [
+      candidate.getAttribute("aria-label") || "",
+      candidate.getAttribute("title") || "",
+      candidate.textContent || ""
+    ].join(" ")
+    if (isYouTubeShareLikeLabel(label)) {
+      return candidate
+    }
+  }
+
+  return null
+}
+
+function resolveYouTubeShareButtonWrapperGlobal(): HTMLElement | null {
+  const watchRoot = resolveYouTubeWatchRoot()
+  const globalShareWrapper = resolveYouTubeShareButtonWrapper(watchRoot)
+  if (isRenderableElement(globalShareWrapper)) {
+    return globalShareWrapper
+  }
+  return null
 }
 
 function resolveYouTubeDislikeButtonWrapper(actionBar: ParentNode): HTMLElement | null {
   const dislikeButton = queryFirstVisibleDescendant(actionBar, YOUTUBE_DISLIKE_BUTTON_SELECTORS)
-  return resolveYouTubeButtonWrapper(dislikeButton)
+  const dislikeWrapper = resolveYouTubeButtonWrapper(dislikeButton)
+  if (dislikeWrapper) {
+    return dislikeWrapper
+  }
+
+  const fallbackButtons = Array.from(actionBar.querySelectorAll<HTMLElement>("button, a, [role='button']"))
+  for (const candidate of fallbackButtons) {
+    if (!isVisibleElement(candidate)) {
+      continue
+    }
+    const label = [
+      candidate.getAttribute("aria-label") || "",
+      candidate.getAttribute("title") || "",
+      candidate.textContent || ""
+    ].join(" ")
+    if (!isYouTubeDislikeLikeLabel(label)) {
+      continue
+    }
+    const wrapper = resolveYouTubeButtonWrapper(candidate)
+    if (wrapper) {
+      return wrapper
+    }
+  }
+
+  return null
+}
+
+function resolveYouTubeTemplateWrapperGlobal(): HTMLElement | null {
+  const watchRoot = resolveYouTubeWatchRoot()
+  const wrappers = Array.from(
+    watchRoot.querySelectorAll<HTMLElement>("ytd-button-renderer, ytd-toggle-button-renderer")
+  )
+  for (const wrapper of wrappers) {
+    if (!isVisibleElement(wrapper)) {
+      continue
+    }
+    if (wrapper.querySelector("button, a, [role='button']")) {
+      return wrapper
+    }
+  }
+  return null
+}
+
+function resolveYouTubeTemplateWrapperInActionBar(actionBar: ParentNode): HTMLElement | null {
+  const wrappers = Array.from(
+    actionBar.querySelectorAll<HTMLElement>("ytd-button-renderer, ytd-toggle-button-renderer")
+  )
+  for (const wrapper of wrappers) {
+    if (!isRenderableElement(wrapper)) {
+      continue
+    }
+    if (wrapper.hasAttribute(YOUTUBE_SNIPER_BUTTON_ATTRIBUTE)) {
+      continue
+    }
+    if (wrapper.querySelector("button, a, [role='button']")) {
+      return wrapper
+    }
+  }
+  return null
 }
 
 function updateYouTubeButtonLabel(root: HTMLElement, label: string): void {
@@ -1447,7 +1870,10 @@ function updateYouTubeButtonIcon(root: HTMLElement): void {
   logo.style.width = "18px"
   logo.style.height = "18px"
   logo.style.objectFit = "contain"
-  logo.style.display = "block"
+  logo.style.display = "inline-block"
+  logo.style.verticalAlign = "middle"
+  logo.style.position = "relative"
+  logo.style.top = `${YOUTUBE_SNIPER_ICON_VERTICAL_OFFSET_PX}px`
 
   if (iconCandidate instanceof SVGElement) {
     iconCandidate.replaceWith(logo)
@@ -1461,6 +1887,96 @@ function updateYouTubeButtonIcon(root: HTMLElement): void {
   }
 
   iconCandidate.replaceWith(logo as unknown as Node)
+}
+
+function attachYouTubeSniperOpenHandler(clickTarget: HTMLElement): void {
+  clickTarget.addEventListener(
+    "click",
+    (event) => {
+      event.preventDefault()
+      event.stopImmediatePropagation()
+      openSniperOverlay()
+    },
+    true
+  )
+}
+
+function buildYouTubeSniperFallbackButton(): HTMLElement {
+  const wrapper = document.createElement("div")
+  wrapper.id = YOUTUBE_SNIPER_BUTTON_ID
+  wrapper.setAttribute(YOUTUBE_SNIPER_BUTTON_ATTRIBUTE, "true")
+  wrapper.setAttribute(YOUTUBE_SNIPER_FALLBACK_ATTRIBUTE, "true")
+  wrapper.style.display = "inline-flex"
+  wrapper.style.alignItems = "center"
+  wrapper.style.marginRight = "8px"
+
+  const button = document.createElement("button")
+  button.type = "button"
+  button.setAttribute("aria-label", "NotebookLM")
+  button.setAttribute("title", "NotebookLM")
+  button.style.display = "inline-flex"
+  button.style.alignItems = "center"
+  button.style.justifyContent = "center"
+  button.style.gap = "8px"
+  button.style.height = "36px"
+  button.style.padding = "0 14px"
+  button.style.borderRadius = "9999px"
+  button.style.border = "1px solid rgba(255,255,255,0.18)"
+  button.style.background = "rgba(255,255,255,0.08)"
+  button.style.color = "#f1f5f9"
+  button.style.fontSize = "14px"
+  button.style.fontWeight = "500"
+  button.style.cursor = "pointer"
+  button.style.lineHeight = "1"
+
+  const logo = document.createElement("img")
+  logo.src = MINDDOCK_BUTTON_LOGO_SRC
+  logo.alt = "MindDock"
+  logo.style.width = "18px"
+  logo.style.height = "18px"
+  logo.style.objectFit = "contain"
+  logo.style.display = "inline-block"
+  logo.style.verticalAlign = "middle"
+  logo.style.position = "relative"
+  logo.style.top = `${YOUTUBE_SNIPER_ICON_VERTICAL_OFFSET_PX}px`
+
+  const label = document.createElement("span")
+  label.textContent = "NotebookLM"
+  label.style.display = "inline-flex"
+  label.style.alignItems = "center"
+  label.style.lineHeight = "1"
+
+  button.append(logo, label)
+  attachYouTubeSniperOpenHandler(button)
+  wrapper.appendChild(button)
+
+  return wrapper
+}
+
+function normalizeYouTubeSniperButtonAlignment(root: HTMLElement, clickTarget: HTMLElement): void {
+  clickTarget.style.alignItems = "center"
+  clickTarget.style.verticalAlign = "middle"
+
+  const iconContainer = root.querySelector<HTMLElement>(
+    "yt-icon, .yt-icon-container, .yt-spec-button-shape-next__icon"
+  )
+  if (iconContainer) {
+    iconContainer.style.display = "inline-flex"
+    iconContainer.style.alignItems = "center"
+    iconContainer.style.justifyContent = "center"
+    iconContainer.style.lineHeight = "0"
+    iconContainer.style.verticalAlign = "middle"
+  }
+
+  const labelNodes = root.querySelectorAll<HTMLElement>(
+    "#text, .yt-spec-button-shape-next__button-text-content, .yt-core-attributed-string"
+  )
+  labelNodes.forEach((node) => {
+    node.style.display = "inline-flex"
+    node.style.alignItems = "center"
+    node.style.lineHeight = "1"
+    node.style.verticalAlign = "middle"
+  })
 }
 
 function ensureYouTubeButtonGap(
@@ -1520,7 +2036,97 @@ function ensureSniperOverlayMount(): HTMLElement {
   return mount
 }
 
+function closeYouTubeTranscriptPanelsInPage(): void {
+  const transcriptPanelSelectors = [
+    'ytd-engagement-panel-section-list-renderer[target-id="PAmodern_transcript_view"]',
+    'ytd-engagement-panel-section-list-renderer[target-id="engagement-panel-searchable-transcript"]',
+    "ytd-transcript-search-panel-renderer",
+    "ytd-transcript-renderer"
+  ] as const
+
+  for (const selector of transcriptPanelSelectors) {
+    let panels: HTMLElement[] = []
+    try {
+      panels = Array.from(document.querySelectorAll<HTMLElement>(selector))
+    } catch {
+      continue
+    }
+
+    for (const panel of panels) {
+      const panelRoot =
+        (panel.closest("ytd-engagement-panel-section-list-renderer") as HTMLElement | null) ?? panel
+      panelRoot.dataset.minddockTranscriptSuppressed = "true"
+      panelRoot.style.position = "fixed"
+      panelRoot.style.top = "-10000px"
+      panelRoot.style.left = "-10000px"
+      panelRoot.style.opacity = "0"
+      panelRoot.style.pointerEvents = "none"
+      panelRoot.style.zIndex = "-1"
+    }
+  }
+}
+
+function restoreYouTubeTranscriptPanelsInPage(): void {
+  const suppressedPanels = Array.from(
+    document.querySelectorAll<HTMLElement>('[data-minddock-transcript-suppressed="true"]')
+  )
+  for (const panel of suppressedPanels) {
+    delete panel.dataset.minddockTranscriptSuppressed
+    panel.style.position = ""
+    panel.style.top = ""
+    panel.style.left = ""
+    panel.style.opacity = ""
+    panel.style.pointerEvents = ""
+    panel.style.zIndex = ""
+  }
+}
+
+function startYouTubeTranscriptSuppressor(): void {
+  if (youtubeTranscriptSuppressorStop) {
+    return
+  }
+
+  let disposed = false
+  let frameId: number | null = null
+  const runClose = (): void => {
+    if (disposed || frameId !== null) {
+      return
+    }
+    frameId = window.requestAnimationFrame(() => {
+      frameId = null
+      if (disposed) {
+        return
+      }
+      closeYouTubeTranscriptPanelsInPage()
+    })
+  }
+
+  runClose()
+
+  const observer = new MutationObserver(() => {
+    runClose()
+  })
+  if (document.body) {
+    observer.observe(document.body, { childList: true, subtree: true })
+  }
+
+  const intervalId = window.setInterval(runClose, 250)
+
+  youtubeTranscriptSuppressorStop = () => {
+    disposed = true
+    if (frameId !== null) {
+      window.cancelAnimationFrame(frameId)
+      frameId = null
+    }
+    observer.disconnect()
+    window.clearInterval(intervalId)
+    youtubeTranscriptSuppressorStop = null
+  }
+}
+
 function closeSniperOverlay(): void {
+  youtubeTranscriptSuppressorStop?.()
+  restoreYouTubeTranscriptPanelsInPage()
   if (sniperOverlayRoot) {
     sniperOverlayRoot.unmount()
     sniperOverlayRoot = null
@@ -1532,6 +2138,8 @@ function closeSniperOverlay(): void {
 }
 
 function openSniperOverlay(): void {
+  closeYouTubeTranscriptPanelsInPage()
+  startYouTubeTranscriptSuppressor()
   const mount = ensureSniperOverlayMount()
   if (!sniperOverlayRoot) {
     sniperOverlayRoot = createRoot(mount)
@@ -1569,56 +2177,141 @@ function buildYouTubeSniperButton(template: HTMLElement): HTMLElement {
 
   updateYouTubeButtonLabel(clone, "NotebookLM")
   updateYouTubeButtonIcon(clone)
-
-  clickTarget.addEventListener(
-    "click",
-    (event) => {
-      event.preventDefault()
-      event.stopImmediatePropagation()
-      openSniperOverlay()
-    },
-    true
-  )
+  normalizeYouTubeSniperButtonAlignment(clone, clickTarget)
+  attachYouTubeSniperOpenHandler(clickTarget)
 
   return clone
 }
 
 function injectYouTubeSniperButton(): void {
-  const actionBar = resolveYouTubeActionBar()
+  let actionBar = resolveYouTubeActionBar()
+  let shareAnchor = actionBar ? resolveYouTubeShareAnchor(actionBar) : null
+  if (!shareAnchor) {
+    const globalWatchRoot = resolveYouTubeWatchRoot()
+    shareAnchor = resolveYouTubeShareAnchor(globalWatchRoot)
+  }
+
+  const insertionAnchor = shareAnchor ? resolveYouTubeButtonWrapper(shareAnchor) ?? shareAnchor : null
+
+  if (!actionBar && insertionAnchor?.parentElement instanceof HTMLElement) {
+    actionBar = insertionAnchor.parentElement
+  }
+
   if (!actionBar) {
     return
   }
 
-  if (actionBar.querySelector(`[${YOUTUBE_SNIPER_BUTTON_ATTRIBUTE}]`)) {
+  const allSniperButtons = Array.from(document.querySelectorAll<HTMLElement>(`[${YOUTUBE_SNIPER_BUTTON_ATTRIBUTE}]`))
+  const existingSniperInActionBar =
+    allSniperButtons.find((button) => actionBar.contains(button)) ??
+    allSniperButtons.find((button) => button.isConnected) ??
+    null
+
+  let usableExistingSniper = existingSniperInActionBar
+  if (usableExistingSniper && !usableExistingSniper.hasAttribute(YOUTUBE_SNIPER_FALLBACK_ATTRIBUTE)) {
+    usableExistingSniper.remove()
+    usableExistingSniper = null
+  }
+
+  for (const button of allSniperButtons) {
+    if (button !== usableExistingSniper) {
+      button.remove()
+    }
+  }
+
+  const sniperButton = usableExistingSniper ?? buildYouTubeSniperFallbackButton()
+  ensureYouTubeButtonGap(sniperButton, actionBar, insertionAnchor)
+
+  if (insertionAnchor?.parentElement) {
+    if (sniperButton.parentElement !== insertionAnchor.parentElement || sniperButton.nextElementSibling !== insertionAnchor) {
+      insertionAnchor.parentElement.insertBefore(sniperButton, insertionAnchor)
+    }
     return
   }
 
-  const shareWrapper = resolveYouTubeShareButtonWrapper(actionBar)
-  const templateWrapper = shareWrapper ?? resolveYouTubeDislikeButtonWrapper(actionBar)
-  if (!templateWrapper) {
-    return
+  if (sniperButton.parentElement !== actionBar) {
+    actionBar.appendChild(sniperButton)
   }
-
-  const sniperButton = buildYouTubeSniperButton(templateWrapper)
-  ensureYouTubeButtonGap(sniperButton, actionBar, shareWrapper)
-
-  if (shareWrapper?.parentElement) {
-    shareWrapper.parentElement.insertBefore(sniperButton, shareWrapper)
-    return
-  }
-
-  if (templateWrapper.parentElement) {
-    templateWrapper.parentElement.insertBefore(sniperButton, templateWrapper.nextSibling)
-    return
-  }
-
-  actionBar.appendChild(sniperButton)
 }
 
 function removeYouTubeSniperButton(): void {
   document.querySelectorAll(`[${YOUTUBE_SNIPER_BUTTON_ATTRIBUTE}]`).forEach((element) => {
     element.remove()
   })
+}
+
+function isYouTubeHostUrl(rawUrl: string): boolean {
+  try {
+    return new URL(rawUrl).hostname.toLowerCase().endsWith("youtube.com")
+  } catch {
+    return window.location.hostname.toLowerCase().endsWith("youtube.com")
+  }
+}
+
+function startYouTubeSniperHardGuard(): void {
+  if (youtubeSniperHardGuardStop || !isYouTubeHostUrl(window.location.href)) {
+    return
+  }
+
+  let disposed = false
+  let frameId: number | null = null
+
+  const ensureSniperForCurrentRoute = (): void => {
+    if (disposed || frameId !== null) {
+      return
+    }
+
+    frameId = window.requestAnimationFrame(() => {
+      frameId = null
+      if (disposed) {
+        return
+      }
+
+      if (!isYouTubeWatchUrl(window.location.href)) {
+        removeYouTubeSniperButton()
+        closeSniperOverlay()
+        return
+      }
+
+      try {
+        injectYouTubeSniperButton()
+      } catch {
+        // no-op
+      }
+    })
+  }
+
+  ensureSniperForCurrentRoute()
+
+  const observer = new MutationObserver(() => {
+    ensureSniperForCurrentRoute()
+  })
+  if (document.body) {
+    observer.observe(document.body, { childList: true, subtree: true })
+  }
+
+  const intervalId = window.setInterval(ensureSniperForCurrentRoute, 900)
+  const navigationEvents = ["yt-navigate-finish", "yt-page-data-fetched", URL_CHANGE_EVENT, "popstate"]
+  const navigationHandler = (): void => {
+    ensureSniperForCurrentRoute()
+  }
+  navigationEvents.forEach((eventName) => {
+    window.addEventListener(eventName, navigationHandler as EventListener)
+  })
+
+  youtubeSniperHardGuardStop = () => {
+    disposed = true
+    if (frameId !== null) {
+      window.cancelAnimationFrame(frameId)
+      frameId = null
+    }
+    observer.disconnect()
+    window.clearInterval(intervalId)
+    navigationEvents.forEach((eventName) => {
+      window.removeEventListener(eventName, navigationHandler as EventListener)
+    })
+    youtubeSniperHardGuardStop = null
+  }
 }
 
 function isLinkedInSuggestionsHeadingText(value: string): boolean {
@@ -1823,7 +2516,7 @@ function resolveFloatingButtonPlacement(currentUrl: string): FloatingButtonPlace
   if (host.includes("perplexity.ai")) {
     const threadActionsButton = queryFirstVisibleElement([
       "button[aria-label='Thread actions']",
-      "button[aria-label='Ações da thread']"
+      "button[aria-label='AÃ§Ãµes da thread']"
     ])
     if (threadActionsButton) {
       const anchor = (threadActionsButton.closest("div[class*='gap-x-sm']") as HTMLElement | null) || threadActionsButton
@@ -1959,15 +2652,142 @@ function isXHostUrl(rawUrl: string): boolean {
   }
 }
 
+function shouldShowMindDockOnChatGptRoute(rawUrl: string): boolean {
+  try {
+    const parsed = new URL(rawUrl)
+    const host = parsed.hostname.toLowerCase()
+    const pathname = parsed.pathname || "/"
+
+    const isChatGptHost = host === "chatgpt.com" || host.endsWith(".chatgpt.com")
+    if (!isChatGptHost) {
+      if (host.includes("chat.openai.com")) {
+        return false
+      }
+      return true
+    }
+
+    return /^\/(?:c|g)(?:\/|$)/u.test(pathname)
+  } catch {
+    return true
+  }
+}
+
+function shouldShowMindDockOnGeminiRoute(rawUrl: string): boolean {
+  try {
+    const parsed = new URL(rawUrl)
+    const host = parsed.hostname.toLowerCase()
+
+    if (!host.includes("gemini.google.com")) {
+      return true
+    }
+
+    const pathname = parsed.pathname || "/"
+    return /^\/(?:app|gem)\/[^/?#]+/u.test(pathname)
+  } catch {
+    return true
+  }
+}
+
+function shouldShowMindDockOnGrokRoute(rawUrl: string): boolean {
+  try {
+    const parsed = new URL(rawUrl)
+    const host = parsed.hostname.toLowerCase()
+
+    const isGrokHost = host === "grok.com" || host.endsWith(".grok.com")
+    if (!isGrokHost) {
+      return true
+    }
+
+    const pathname = parsed.pathname || "/"
+    return /^\/c\/[^/?#]+/u.test(pathname)
+  } catch {
+    return true
+  }
+}
+
+function shouldShowMindDockOnGensparkRoute(rawUrl: string): boolean {
+  try {
+    const parsed = new URL(rawUrl)
+    const host = parsed.hostname.toLowerCase()
+
+    const isGensparkHost = host === "www.genspark.ai" || host === "genspark.ai"
+    if (!isGensparkHost) {
+      return true
+    }
+
+    const pathname = parsed.pathname || "/"
+    const hasAgentId = normalizeString(parsed.searchParams.get("id"))
+
+    return /^\/agents\/?$/u.test(pathname) && Boolean(hasAgentId)
+  } catch {
+    return true
+  }
+}
+
+function shouldShowMindDockOnKimiRoute(rawUrl: string): boolean {
+  try {
+    const parsed = new URL(rawUrl)
+    const host = parsed.hostname.toLowerCase()
+
+    const isKimiHost = host === "www.kimi.com" || host === "kimi.com"
+    if (!isKimiHost) {
+      return true
+    }
+
+    const pathname = parsed.pathname || "/"
+    return /^\/chat(?:\/|$)/u.test(pathname)
+  } catch {
+    return true
+  }
+}
+
+function shouldShowMindDockOnOpenEvidenceRoute(rawUrl: string): boolean {
+  try {
+    const parsed = new URL(rawUrl)
+    const host = parsed.hostname.toLowerCase()
+
+    const isOpenEvidenceHost = host === "www.openevidence.com" || host === "openevidence.com"
+    if (!isOpenEvidenceHost) {
+      return true
+    }
+
+    const pathname = parsed.pathname || "/"
+    return /^\/ask(?:\/|$)/u.test(pathname)
+  } catch {
+    return true
+  }
+}
+
 function shouldShowMindDockOnXRoute(rawUrl: string): boolean {
+  if (!shouldShowMindDockOnChatGptRoute(rawUrl)) {
+    return false
+  }
+
+  if (!shouldShowMindDockOnGeminiRoute(rawUrl)) {
+    return false
+  }
+
+  if (!shouldShowMindDockOnGrokRoute(rawUrl)) {
+    return false
+  }
+
+  if (!shouldShowMindDockOnGensparkRoute(rawUrl)) {
+    return false
+  }
+
+  if (!shouldShowMindDockOnKimiRoute(rawUrl)) {
+    return false
+  }
+
+  if (!shouldShowMindDockOnOpenEvidenceRoute(rawUrl)) {
+    return false
+  }
+
   if (!isXHostUrl(rawUrl)) {
     return true
   }
 
-  if (isGrokRouteUrl(rawUrl)) {
-    return true
-  }
-
+  // No X/Twitter: mostrar somente em URL de post (/status/{id}).
   return Boolean(parseStatusIdFromUrl(rawUrl))
 }
 
@@ -2076,6 +2896,95 @@ function extractXTweetText(tweet: Element): string {
 
   if (uniqueMediaHints.length > 0) {
     return normalizeGenericCaptureText(uniqueMediaHints.join("\n"))
+  }
+
+  return ""
+}
+
+
+function resolveXConversationTitleCandidate(text: string): string {
+  const normalizedText = normalizeGenericCaptureText(text)
+  if (!normalizedText) {
+    return ""
+  }
+
+  const firstLine = normalizeString(normalizedText.split("\n")[0] || "")
+  return firstLine.slice(0, 120)
+}
+
+function resolveXSourceTitleFromTweet(
+  tweetText: string,
+  displayName: string,
+  handle: string,
+  fallbackTitle = ""
+): string {
+  const normalizedHandle = normalizeString(handle).replace(/^@+/u, "").toLowerCase()
+  const handleLabel = normalizedHandle ? `@${normalizedHandle}` : ""
+  const authorTitle = normalizeString([normalizeString(displayName), handleLabel].filter(Boolean).join(" "))
+
+  return resolveBestSourceTitle([
+    resolveXConversationTitleCandidate(tweetText),
+    authorTitle,
+    handleLabel,
+    normalizeString(fallbackTitle),
+    resolveSafeCaptureTitle(),
+    normalizeString(document.title),
+    "Post do X"
+  ])
+}
+
+function resolveXTitleFromConversation(conversation: Array<{ content: string }>): string {
+  for (const message of conversation) {
+    const normalizedContent = normalizeGenericCaptureText(stripMarkdownBoldFormatting(normalizeString(message?.content)))
+    if (!normalizedContent) {
+      continue
+    }
+
+    const lines = normalizedContent.split("\n")
+    for (const rawLine of lines) {
+      const line = normalizeString(stripMarkdownBoldFormatting(rawLine))
+      if (!line) {
+        continue
+      }
+
+      const comparison = normalizeTitleComparisonKey(line)
+      if (!comparison) {
+        continue
+      }
+
+      if (
+        comparison.startsWith("source:") ||
+        comparison.startsWith("author:") ||
+        comparison.startsWith("post by") ||
+        comparison.startsWith("usuario:") ||
+        /^\[\d+\/\d+\]$/u.test(comparison) ||
+        /^https?:\/\//u.test(comparison)
+      ) {
+        continue
+      }
+
+      return line.slice(0, 120)
+    }
+  }
+
+  return ""
+}
+
+function resolveXTitleFromUrl(rawUrl: string): string {
+  try {
+    const parsed = new URL(rawUrl)
+    const pathname = normalizeString(parsed.pathname || "")
+    const statusMatch = pathname.match(/^\/?([A-Za-z0-9_]{1,15})\/status\/\d+/u)
+    if (statusMatch?.[1]) {
+      return `Post de @${statusMatch[1].toLowerCase()}`
+    }
+
+    const profileMatch = pathname.match(/^\/?([A-Za-z0-9_]{1,15})\/?$/u)
+    if (profileMatch?.[1]) {
+      return `Perfil @${profileMatch[1].toLowerCase()}`
+    }
+  } catch {
+    // no-op
   }
 
   return ""
@@ -2444,7 +3353,7 @@ function sanitizeLinkedInPostText(rawValue: string): string {
     /^(like|curtir|comment|comentar|repost|republicar|share|compartilhar|send|enviar|follow|seguir)$/iu,
     /^[0-9.,]+\s*(reactions?|reacoes?|comments?|comentarios?|reposts?)$/iu,
     /^(promoted|patrocinado)$/iu,
-    /^(\.\.\.|…)\s*(more|mais)$/iu,
+    /^(\.\.\.|â€¦)\s*(more|mais)$/iu,
     /^(ver|mostrar)\s+mais$/iu,
     /^see\s+more$/iu
   ]
@@ -2473,6 +3382,38 @@ function sanitizeLinkedInPostText(rawValue: string): string {
   return normalizeGenericCaptureText(deduped.join("\n"))
 }
 
+function sanitizeLinkedInCaptureText(rawValue: string): string {
+  const normalized = normalizeGenericCaptureText(rawValue)
+  if (!normalized) {
+    return ""
+  }
+
+  const noiseLinePatterns = [
+    /^(like|curtir|gostar|comment|comentar|repost|republicar|share|compartilhar|send|enviar|follow|seguir)$/iu,
+    /^(gostar|comentar|compartilhar|enviar)(\s+(gostar|comentar|compartilhar|enviar))*$/iu,
+    /^[0-9.,]+\s*(reactions?|reacoes?|comments?|comentarios?|reposts?|compartilhamentos?)$/iu,
+    /^(promoted|patrocinado)$/iu
+  ]
+
+  const cleanedLines = normalized
+    .split("\n")
+    .map((line) => normalizeString(line))
+    .filter((line) => line.length > 0 && !noiseLinePatterns.some((pattern) => pattern.test(line)))
+
+  const joinedText = normalizeGenericCaptureText(cleanedLines.join("\n"))
+  if (!joinedText) {
+    return ""
+  }
+
+  let formattedText = joinedText
+  formattedText = formattedText.replace(/([^\n])\s+(ðŸ”¹|ðŸ”¸|âœ…|âœ”ï¸|â˜‘ï¸|ðŸ‘‰|â€¢)\s+/gu, "$1\n$2 ")
+  formattedText = formattedText.replace(/([^\n])\s+(ðŸ’¡|ðŸ› ï¸|âš ï¸|ðŸ“Œ|ðŸ“)\s+/gu, "$1\n\n$2 ")
+  formattedText = formattedText.replace(/([^\n])\s+(#(?:[\p{L}\p{N}_]+))/gu, "$1\n$2")
+  formattedText = formattedText.replace(/\n{3,}/g, "\n\n")
+
+  return normalizeGenericCaptureText(formattedText)
+}
+
 function sanitizeLinkedInAuthorCandidate(rawValue: string): string {
   const normalizedValue = sanitizeLinkedInPostText(rawValue)
   if (!normalizedValue) {
@@ -2484,7 +3425,7 @@ function sanitizeLinkedInAuthorCandidate(rawValue: string): string {
     return ""
   }
 
-  const withoutMetaTail = normalizeString(firstLine.replace(/\s*[·•|].*$/u, ""))
+  const withoutMetaTail = normalizeString(firstLine.replace(/\s*[Â·â€¢|].*$/u, ""))
   const withoutFollow = normalizeString(withoutMetaTail.replace(/\b(seguir|follow)\b/giu, ""))
   if (!withoutFollow) {
     return ""
@@ -2593,6 +3534,23 @@ function resolveLinkedInPostBody(postRoot: Element): string {
   return sanitizeLinkedInPostText(clonedRoot.innerText || clonedRoot.textContent || "")
 }
 
+function resolveLinkedInFallbackPostContent(postRoot: Element): string {
+  const rootText = sanitizeLinkedInCaptureText((postRoot as HTMLElement).innerText || postRoot.textContent || "")
+  if (rootText.length > 0) {
+    return rootText
+  }
+
+  const imageDescriptions = Array.from(postRoot.querySelectorAll<HTMLImageElement>("img[alt]"))
+    .map((image) => normalizeString(image.getAttribute("alt") || ""))
+    .filter((value) => value.length > 0)
+  const normalizedImageDescriptions = sanitizeLinkedInCaptureText(imageDescriptions.join("\n"))
+  if (normalizedImageDescriptions.length > 0) {
+    return normalizedImageDescriptions
+  }
+
+  return ""
+}
+
 function resolveLinkedInSourceUrl(postRoot: Element, currentUrl: string): string {
   const permalinkSelectors = [
     "a[href*='/feed/update/urn:li:activity:']",
@@ -2632,17 +3590,335 @@ function resolveLinkedInSourceUrl(postRoot: Element, currentUrl: string): string
   return currentUrl
 }
 
+const LINKEDIN_CAPTURE_ROOT_FALLBACK_SELECTORS = [
+  "div[data-finite-scroll-hotkey-item]",
+  ".fie-impression-container",
+  "div[data-view-name='feed-full-update']",
+  "article"
+] as const
+
+const LINKEDIN_CAPTURE_AUTHOR_SELECTORS = ["[data-view-name='feed-header-text']"] as const
+
+const LINKEDIN_CAPTURE_CONTENT_SELECTORS = [
+  "[data-view-name='feed-commentary']",
+  "[data-testid='expandable-text-box']",
+  ".update-components-update-v2__commentary",
+  ".update-components-text",
+  ".feed-shared-inline-show-more-text",
+  ".feed-shared-text",
+  ".feed-shared-update-v2__commentary",
+  ".feed-shared-update-v2__description"
+] as const
+
+function extractLinkedInVisibleText(element: Element | null): string {
+  if (!element) {
+    return ""
+  }
+
+  return sanitizeLinkedInCaptureText((element as HTMLElement).innerText || element.textContent || "")
+}
+
+function resolveLinkedInCaptureAuthor(postRoot: Element): string {
+  for (const selector of LINKEDIN_CAPTURE_AUTHOR_SELECTORS) {
+    const direct = extractLinkedInVisibleText(postRoot.querySelector(selector))
+    if (direct) {
+      return direct.split("\n")[0] || direct
+    }
+  }
+
+  const fallbackAuthor = resolveLinkedInAuthorName(postRoot)
+  return fallbackAuthor || "Desconhecido"
+}
+
+function resolveLinkedInCapturePostContent(postRoot: Element): string {
+  for (const selector of LINKEDIN_CAPTURE_CONTENT_SELECTORS) {
+    const nodes = Array.from(postRoot.querySelectorAll(selector)).slice(0, 3)
+    for (const node of nodes) {
+      const content = extractLinkedInVisibleText(node)
+      if (content) {
+        return content
+      }
+    }
+  }
+
+  return (
+    extractLinkedInVisibleText(postRoot) ||
+    sanitizeLinkedInCaptureText(resolveLinkedInPostBody(postRoot)) ||
+    resolveLinkedInFallbackPostContent(postRoot)
+  )
+}
+
+function resolveLinkedInCaptureRootNearViewport(): HTMLElement | null {
+  let bestCandidate: HTMLElement | null = null
+  let bestDistance = Number.POSITIVE_INFINITY
+  const viewportCenter = window.innerHeight / 2
+
+  for (const selector of LINKEDIN_CAPTURE_ROOT_FALLBACK_SELECTORS) {
+    const nodes = Array.from(document.querySelectorAll<HTMLElement>(selector)).filter((node) => isVisibleElement(node))
+    for (const node of nodes.slice(0, 120)) {
+      const text = resolveLinkedInCapturePostContent(node)
+      if (!text) {
+        continue
+      }
+
+      const rect = node.getBoundingClientRect()
+      const distance = Math.abs(rect.top + rect.height / 2 - viewportCenter)
+      if (distance < bestDistance) {
+        bestDistance = distance
+        bestCandidate = node
+      }
+    }
+
+    if (bestCandidate) {
+      return bestCandidate
+    }
+  }
+
+  return null
+}
+
+function resolveLinkedInPostRootFromTriggerElement(triggerElement: HTMLElement | null): HTMLElement | null {
+  if (!triggerElement || !triggerElement.isConnected) {
+    return null
+  }
+
+  const strictSelectors = [
+    "div[data-urn*='activity']",
+    "div[data-id*='activity']",
+    "article[data-urn*='activity']",
+    "article[data-id*='activity']",
+    "div[data-finite-scroll-hotkey-item]",
+    "article[data-finite-scroll-hotkey-item]",
+    "div.fie-impression-container",
+    "article.fie-impression-container",
+    ".feed-shared-update-v2",
+    ".occludable-update",
+    "article[data-view-name='feed-full-update']",
+    "article[data-view-name='feed-reshare']",
+    "article[class*='feed-shared-update']"
+  ] as const
+
+  for (const selector of strictSelectors) {
+    const candidate = triggerElement.closest(selector) as HTMLElement | null
+    if (!candidate || !candidate.isConnected || !isVisibleElement(candidate)) {
+      continue
+    }
+
+    const rect = candidate.getBoundingClientRect()
+    if (rect.width < 220 || rect.height < 100) {
+      continue
+    }
+
+    return candidate
+  }
+
+  const broadSelectors = ["article[role='article']", "div[role='article']", ...LINKEDIN_CAPTURE_ROOT_FALLBACK_SELECTORS, "section"] as const
+  for (const selector of broadSelectors) {
+    const candidate = triggerElement.closest(selector) as HTMLElement | null
+    if (!candidate || !candidate.isConnected || !isVisibleElement(candidate)) {
+      continue
+    }
+
+    const rect = candidate.getBoundingClientRect()
+    if (rect.width < 220 || rect.height < 100) {
+      continue
+    }
+
+    const text = sanitizeLinkedInPostText(candidate.innerText || candidate.textContent || "")
+    if (text.length < 30) {
+      continue
+    }
+
+    return candidate
+  }
+
+  let cursor: HTMLElement | null = triggerElement.parentElement
+  for (let depth = 0; depth < 14 && cursor; depth += 1) {
+    if (!cursor.isConnected || !isVisibleElement(cursor)) {
+      cursor = cursor.parentElement
+      continue
+    }
+
+    const rect = cursor.getBoundingClientRect()
+    if (rect.width < 220 || rect.height < 100 || rect.width > 1600 || rect.height > 5000) {
+      cursor = cursor.parentElement
+      continue
+    }
+
+    const hasPostSignals = Boolean(
+      cursor.querySelector(
+        [
+          "[data-view-name='feed-commentary']",
+          "[data-testid='expandable-text-box']",
+          "a[href*='/feed/update/']",
+          "a[href*='/posts/']",
+          "img[alt]"
+        ].join(",")
+      )
+    )
+    const text = sanitizeLinkedInPostText(cursor.innerText || cursor.textContent || "")
+    if (hasPostSignals && text.length >= 20) {
+      return cursor
+    }
+
+    cursor = cursor.parentElement
+  }
+
+  return null
+}
+
+function resolveLinkedInSourceUrlFromPostUrn(postUrn: string, fallbackUrl: string): string {
+  const normalizedUrn = normalizeString(postUrn)
+  if (!normalizedUrn) {
+    return fallbackUrl
+  }
+
+  if (normalizedUrn.includes("urn:li:activity:")) {
+    return `https://www.linkedin.com/feed/update/${normalizedUrn}/`
+  }
+
+  const numericMatch = normalizedUrn.match(/(\d{8,})/u)
+  if (numericMatch?.[1]) {
+    return `https://www.linkedin.com/feed/update/urn:li:activity:${numericMatch[1]}/`
+  }
+
+  return fallbackUrl
+}
+
+function buildLinkedInCaptureSnapshotFromRoot(
+  postRoot: HTMLElement | null,
+  currentUrl: string,
+  fallbackPostUrn: string | null = null
+): LinkedInCaptureSnapshot | null {
+  const targetPostRoot = postRoot?.isConnected ? postRoot : resolveLinkedInCaptureRootNearViewport()
+  if (!targetPostRoot || !targetPostRoot.isConnected) {
+    return null
+  }
+
+  const resolvedPostContent = resolveLinkedInCapturePostContent(targetPostRoot)
+  const postContent =
+    resolvedPostContent.length > 0
+      ? resolvedPostContent
+      : "Publicacao do LinkedIn sem texto visivel."
+
+  const authorName = resolveLinkedInCaptureAuthor(targetPostRoot)
+  const sourceUrlFromRoot = resolveLinkedInSourceUrl(targetPostRoot, currentUrl)
+  const sourceUrl =
+    normalizeString(sourceUrlFromRoot) ||
+    resolveLinkedInSourceUrlFromPostUrn(
+      normalizeString(resolveLinkedInPostUrn(targetPostRoot) || fallbackPostUrn),
+      currentUrl
+    )
+
+  const sourceTitle = resolveBestSourceTitle([
+    postContent.split("\n")[0] || "",
+    authorName ? `${authorName} - LinkedIn` : "",
+    resolveSafeCaptureTitle(),
+    "Post do LinkedIn"
+  ])
+
+  return {
+    postContent,
+    authorName,
+    sourceUrl: normalizeString(sourceUrl) || currentUrl,
+    sourceTitle
+  }
+}
+
+const LINKEDIN_POST_ROOT_MARKER_SELECTOR =
+  "div[data-urn*='activity'], div[data-id*='activity'], article[data-urn*='activity'], article[data-id*='activity'], div[data-finite-scroll-hotkey-item], div.fie-impression-container, article.fie-impression-container, .feed-shared-update-v2, .occludable-update, article[data-view-name='feed-full-update'], article[data-view-name='feed-reshare'], article[class*='feed-shared-update']"
+
+function hasLinkedInPermalink(postRoot: Element): boolean {
+  const permalinkAnchor = postRoot.querySelector(
+    "a[href*='/feed/update/'], a[href*='/posts/'], a[href*='/activity-']"
+  )
+  const permalinkHref = normalizeString(permalinkAnchor?.getAttribute("href") || "")
+  return Boolean(permalinkHref)
+}
+
+function hasLinkedInPostIdentity(postRoot: Element): boolean {
+  const urnKey = resolveLinkedInUrnKey(resolveLinkedInPostUrn(postRoot))
+  if (urnKey) {
+    return true
+  }
+
+  return hasLinkedInPermalink(postRoot)
+}
+
+function isLikelyLinkedInSinglePostRoot(postRoot: HTMLElement): boolean {
+  if (!postRoot.isConnected || !isVisibleElement(postRoot)) {
+    return false
+  }
+
+  const rect = postRoot.getBoundingClientRect()
+  if (rect.width < 260 || rect.height < 120) {
+    return false
+  }
+
+  const maxExpectedHeight = Math.max(window.innerHeight * 7, 4200)
+  if (rect.height > maxExpectedHeight) {
+    return false
+  }
+
+  const nestedMarkers = Array.from(postRoot.querySelectorAll<HTMLElement>(LINKEDIN_POST_ROOT_MARKER_SELECTOR)).filter(
+    (candidate) => candidate !== postRoot && isVisibleElement(candidate)
+  )
+  if (nestedMarkers.length > 8) {
+    return false
+  }
+
+  const actionBars = Array.from(
+    postRoot.querySelectorAll<HTMLElement>(LINKEDIN_ACTION_BAR_SELECTORS.join(","))
+  ).filter((candidate) => isVisibleElement(candidate))
+  if (actionBars.length > 3) {
+    return false
+  }
+
+  const permalinkCount = postRoot.querySelectorAll("a[href*='/feed/update/'], a[href*='/posts/'], a[href*='/activity-']").length
+  if (permalinkCount > 6) {
+    return false
+  }
+
+  const socialActionCount = postRoot.querySelectorAll("button[aria-label*='comment' i], button[aria-label*='comentar' i], button[aria-label*='share' i], button[aria-label*='compartilhar' i], button[aria-label*='send' i], button[aria-label*='enviar' i]").length
+  if (socialActionCount > 32) {
+    return false
+  }
+
+  const textSnapshot = sanitizeLinkedInPostText(
+    (postRoot as HTMLElement).innerText || postRoot.textContent || ""
+  )
+  if (textSnapshot.length > 22000) {
+    return false
+  }
+
+  if (textSnapshot.length < 20 && actionBars.length === 0 && !hasLinkedInPostIdentity(postRoot)) {
+    return false
+  }
+
+  return true
+}
+
 function collectLinkedInPostCandidates(): HTMLElement[] {
   const candidateSelectors = [
     "main div[data-urn^='urn:li:activity:']",
+    "main div[data-urn*='urn:li:activity:']",
     "main div[data-id^='urn:li:activity:']",
+    "main div[data-id*='urn:li:activity:']",
+    "main article[data-urn^='urn:li:activity:']",
+    "main article[data-urn*='urn:li:activity:']",
+    "main article[data-id^='urn:li:activity:']",
+    "main article[data-id*='urn:li:activity:']",
     "main div[data-finite-scroll-hotkey-item]",
+    "main article[data-finite-scroll-hotkey-item]",
     "main div.fie-impression-container",
+    "main article.fie-impression-container",
     "main div[data-view-name='feed-full-update']",
+    "main div[data-view-name='feed-reshare']",
+    "main article[data-view-name='feed-full-update']",
+    "main article[data-view-name='feed-reshare']",
     "main .feed-shared-update-v2",
-    "main article",
-    "main div[role='article']",
-    "main .occludable-update"
+    "main .occludable-update",
+    "main article[class*='feed-shared-update']"
   ] as const
 
   const candidates: HTMLElement[] = []
@@ -2659,7 +3935,7 @@ function collectLinkedInPostCandidates(): HTMLElement[] {
     for (const node of nodes) {
       const postRoot =
         (node.closest(
-          "div[data-urn], div[data-id], div[data-finite-scroll-hotkey-item], div.fie-impression-container, .feed-shared-update-v2, .occludable-update, article, div[role='article']"
+          "div[data-urn], div[data-id], article[data-urn], article[data-id], div[data-finite-scroll-hotkey-item], article[data-finite-scroll-hotkey-item], div.fie-impression-container, article.fie-impression-container, .feed-shared-update-v2, .occludable-update, article[data-view-name='feed-full-update'], article[data-view-name='feed-reshare'], article[class*='feed-shared-update']"
         ) as HTMLElement | null) || (node as HTMLElement)
 
       if (!postRoot.isConnected || seen.has(postRoot)) {
@@ -2819,7 +4095,7 @@ function findLinkedInActionBarInPost(postRoot: HTMLElement): HTMLElement | null 
     "div[role='toolbar']",
     "div[aria-label*='Post actions']",
     "div[aria-label*='Acoes da publicacao']",
-    "div[aria-label*='Ações da publicação']"
+    "div[aria-label*='AÃ§Ãµes da publicaÃ§Ã£o']"
   ] as const
 
   for (const selector of strictSelectors) {
@@ -2955,7 +4231,7 @@ function collectLinkedInActionBarsRobust(): HTMLElement[] {
 
 function resolveLinkedInPostRootFromActionBar(actionBar: Element): HTMLElement | null {
   const postRoot = actionBar.closest(
-    "div[data-urn], div[data-id], div[data-finite-scroll-hotkey-item], div.fie-impression-container, .feed-shared-update-v2"
+    "div[data-urn], div[data-id], article[data-urn], article[data-id], div[data-finite-scroll-hotkey-item], article[data-finite-scroll-hotkey-item], div.fie-impression-container, article.fie-impression-container, .feed-shared-update-v2, .occludable-update, article[data-view-name='feed-full-update'], article[data-view-name='feed-reshare'], article[class*='feed-shared-update']"
   ) as HTMLElement | null
 
   if (!postRoot || !isVisibleElement(postRoot)) {
@@ -2973,10 +4249,14 @@ function resolveLinkedInPostRoot(
   if (preferredPostRoot?.isConnected) {
     const directPostRoot =
       (preferredPostRoot.closest(
-        "div[data-urn], div[data-id], div[data-finite-scroll-hotkey-item], div.fie-impression-container, .feed-shared-update-v2, .occludable-update, article, div[role='article']"
+        "div[data-urn], div[data-id], article[data-urn], article[data-id], div[data-finite-scroll-hotkey-item], article[data-finite-scroll-hotkey-item], div.fie-impression-container, article.fie-impression-container, .feed-shared-update-v2, .occludable-update, article[data-view-name='feed-full-update'], article[data-view-name='feed-reshare'], article[class*='feed-shared-update']"
       ) as HTMLElement | null) || preferredPostRoot
 
-    if (directPostRoot?.isConnected && !isLinkedInSponsoredPost(directPostRoot)) {
+    if (
+      directPostRoot?.isConnected &&
+      !isLinkedInSponsoredPost(directPostRoot) &&
+      isLikelyLinkedInSinglePostRoot(directPostRoot)
+    ) {
       const directContent = resolveLinkedInPostBody(directPostRoot)
       if (directContent.length >= 8) {
         return directPostRoot
@@ -2987,6 +4267,7 @@ function resolveLinkedInPostRoot(
   const candidates = collectLinkedInPostCandidates()
     .filter((postRoot) => postRoot.isConnected)
     .filter((postRoot) => !isLinkedInSponsoredPost(postRoot))
+    .filter((postRoot) => isLikelyLinkedInSinglePostRoot(postRoot))
   if (candidates.length === 0) {
     return null
   }
@@ -3014,6 +4295,7 @@ function resolveLinkedInPostRoot(
     .map((actionBar) => resolveLinkedInPostRootFromActionBar(actionBar))
     .filter((postRoot): postRoot is HTMLElement => Boolean(postRoot))
     .filter((postRoot) => !isLinkedInSponsoredPost(postRoot))
+    .filter((postRoot) => isLikelyLinkedInSinglePostRoot(postRoot))
   if (actionBarRoots.length > 0) {
     const actionRootByUrn = targetUrnKey
       ? actionBarRoots.find((postRoot) => resolveLinkedInUrnKey(resolveLinkedInPostUrn(postRoot)) === targetUrnKey)
@@ -3044,23 +4326,77 @@ function resolveLinkedInPostRoot(
   return bestCandidate || candidates[0] || null
 }
 
+function buildLinkedInPreparedCaptureFromSnapshot(
+  snapshot: LinkedInCaptureSnapshot | null,
+  fallbackUrl: string
+): PreparedCapturePayload | null {
+  if (!snapshot) {
+    return null
+  }
+
+  const sanitizedSnapshotContent = sanitizeLinkedInCaptureText(snapshot.postContent)
+  const postContent =
+    sanitizedSnapshotContent.length > 0
+      ? sanitizedSnapshotContent
+      : "Publicacao do LinkedIn sem texto visivel."
+
+  const authorName = sanitizeLinkedInAuthorCandidate(snapshot.authorName)
+  const sourceUrl = normalizeString(snapshot.sourceUrl) || fallbackUrl
+  const sourceTitle = resolveBestSourceTitle([
+    normalizeString(snapshot.sourceTitle),
+    postContent.split("\n")[0] || "",
+    authorName ? `${authorName} - LinkedIn` : "",
+    resolveSafeCaptureTitle(),
+    "Post do LinkedIn"
+  ])
+
+  const linkedInHeader = [`Post by ${authorName || "Desconhecido"}`, `Source: ${sourceUrl}`].join("\n")
+  const formattedContent = normalizeGenericCaptureText(`${linkedInHeader}\n\n${postContent}`)
+
+  if (!formattedContent) {
+    return null
+  }
+
+  return {
+    sourceKind: "chat",
+    sourcePlatform: "LinkedIn",
+    sourceTitle,
+    conversation: [
+      {
+        role: "user",
+        content: formattedContent
+      }
+    ]
+  }
+}
+
 function buildLinkedInPreparedCapture(
   currentUrl: string,
   preferredPostUrn: string | null = null,
-  preferredPostRoot: HTMLElement | null = null
+  preferredPostRoot: HTMLElement | null = null,
+  preferredSnapshot: LinkedInCaptureSnapshot | null = null
 ): PreparedCapturePayload | null {
+  const snapshotCapture = buildLinkedInPreparedCaptureFromSnapshot(preferredSnapshot, currentUrl)
+  if (snapshotCapture) {
+    return snapshotCapture
+  }
+
   const postRoot = resolveLinkedInPostRoot(currentUrl, preferredPostUrn, preferredPostRoot)
   if (!postRoot) {
     return null
   }
 
-  const authorName = resolveLinkedInAuthorName(postRoot)
-  const postContent = resolveLinkedInPostBody(postRoot)
-  const sourceUrl = resolveLinkedInSourceUrl(postRoot, currentUrl)
-
-  if (!postContent) {
+  if (!isLikelyLinkedInSinglePostRoot(postRoot)) {
     return null
   }
+
+  const authorName = resolveLinkedInAuthorName(postRoot)
+  const resolvedPostContent =
+    resolveLinkedInCapturePostContent(postRoot) ||
+    resolveLinkedInPostBody(postRoot) ||
+    resolveLinkedInFallbackPostContent(postRoot)
+  const postContent = sanitizeLinkedInCaptureText(resolvedPostContent) || "Publicacao do LinkedIn sem texto visivel."
+  const sourceUrl = resolveLinkedInSourceUrl(postRoot, currentUrl)
 
   const sourceTitle = resolveBestSourceTitle([
     postContent.split("\n")[0] || "",
@@ -3069,7 +4405,7 @@ function buildLinkedInPreparedCapture(
     "Post do LinkedIn"
   ])
 
-  const linkedInHeader = [`Autor: ${authorName || "Desconhecido"}`, `Fonte: ${sourceUrl}`].join("\n")
+  const linkedInHeader = [`Post by ${authorName || "Desconhecido"}`, `Source: ${sourceUrl}`].join("\n")
   const formattedContent = normalizeGenericCaptureText(`${linkedInHeader}\n\n${postContent}`)
 
   return {
@@ -3396,12 +4732,76 @@ function resolveGensparkConversationTitle(): string {
   return resolveBestSourceTitle([...titleCandidates, "Chat Genspark"])
 }
 
+function isLikelyGensparkSuggestionLine(value: string): boolean {
+  const normalized = normalizeString(value)
+  if (!normalized) {
+    return false
+  }
+
+  if (/^(?:[-*â€¢]|\d+[.)])\s*/u.test(normalized)) {
+    return false
+  }
+
+  const tokenCount = normalized.split(/\s+/u).filter(Boolean).length
+  if (tokenCount < 3 || tokenCount > 18) {
+    return false
+  }
+
+  const lower = normalized.toLowerCase()
+  return /^(pesquise|pesquisar|crie|criar|mostre(?:-me)?|mostrar|gere|gerar|resuma|resumir|compare|comparar|escreva|escrever|explique|explicar|show|create|generate|summarize|compare|write|draft)\b/iu.test(
+    lower
+  )
+}
+
+function sanitizeGensparkTurnContent(rawValue: string): string {
+  const normalized = normalizeGenericCaptureText(rawValue)
+  if (!normalized) {
+    return ""
+  }
+
+  const lines = normalized.split("\n").map((line) => normalizeString(line))
+  let lastIndex = lines.length - 1
+
+  while (lastIndex >= 0 && !lines[lastIndex]) {
+    lastIndex -= 1
+  }
+
+  if (lastIndex < 0) {
+    return ""
+  }
+
+  let suggestionLineCount = 0
+  while (lastIndex >= 0 && isLikelyGensparkSuggestionLine(lines[lastIndex])) {
+    suggestionLineCount += 1
+    lastIndex -= 1
+  }
+
+  if (suggestionLineCount >= 3) {
+    while (lastIndex >= 0 && !lines[lastIndex]) {
+      lastIndex -= 1
+    }
+    return normalizeGenericCaptureText(lines.slice(0, lastIndex + 1).join("\n"))
+  }
+
+  return normalized
+}
+
 function formatGensparkTurnContent(statementNode: HTMLElement): string {
   try {
     const clonedNode = statementNode.cloneNode(true) as HTMLElement
     const removableSelectors = [
       ".message-actions-user",
       ".buttons",
+      "[class*='suggest']",
+      "[class*='prompt']",
+      "[class*='recommend']",
+      "[class*='quick']",
+      "[class*='starter']",
+      "[class*='follow']",
+      "[data-testid*='suggest']",
+      "[data-testid*='prompt']",
+      "[data-testid*='recommend']",
+      "[data-testid*='quick']",
       "button",
       "svg",
       "script",
@@ -3415,7 +4815,7 @@ function formatGensparkTurnContent(statementNode: HTMLElement): string {
       }
     }
 
-    const cleaned = normalizeGenericCaptureText(clonedNode.innerText || clonedNode.textContent || "")
+    const cleaned = sanitizeGensparkTurnContent(clonedNode.innerText || clonedNode.textContent || "")
     if (cleaned) {
       return cleaned
     }
@@ -3423,7 +4823,7 @@ function formatGensparkTurnContent(statementNode: HTMLElement): string {
     // fallback below
   }
 
-  return normalizeGenericCaptureText(statementNode.innerText || statementNode.textContent || "")
+  return sanitizeGensparkTurnContent(statementNode.innerText || statementNode.textContent || "")
 }
 
 function buildGensparkPreparedCapture(_currentUrl: string): PreparedCapturePayload | null {
@@ -4593,23 +5993,27 @@ function buildRedditLegacyPreparedCapture(currentUrl: string): PreparedCapturePa
 
   const contentCandidates = [
     normalizeGenericCaptureText(
-      postRoot.getAttribute("data-full-content") ||
+      stripMarkdownBoldFormatting(
+        postRoot.getAttribute("data-full-content") ||
         postRoot.getAttribute("data-content") ||
         postRoot.getAttribute("content") ||
         ""
+      )
     ),
-    normalizeGenericCaptureText(postRoot.querySelector(".md.text-14-scalable")?.textContent || ""),
+    normalizeGenericCaptureText(stripMarkdownBoldFormatting(postRoot.querySelector(".md.text-14-scalable")?.textContent || "")),
     normalizeGenericCaptureText(
-      postRoot.querySelector("[data-full-content], [data-expanded-content], .expanded-content")?.textContent || ""
+      stripMarkdownBoldFormatting(
+        postRoot.querySelector("[data-full-content], [data-expanded-content], .expanded-content")?.textContent || ""
+      )
     ),
-    normalizeGenericCaptureText(postRoot.querySelector("shreddit-post-text-body")?.textContent || "")
+    normalizeGenericCaptureText(stripMarkdownBoldFormatting(postRoot.querySelector("shreddit-post-text-body")?.textContent || ""))
   ]
 
   const body =
     contentCandidates.find((candidate) => candidate.length > 0) ||
     normalizeGenericCaptureText(
       Array.from(postRoot.querySelectorAll("p, div, span, li"))
-        .map((element) => normalizeGenericCaptureText(element.textContent || ""))
+        .map((element) => normalizeGenericCaptureText(stripMarkdownBoldFormatting(element.textContent || "")))
         .filter(Boolean)
         .slice(0, 80)
         .join("\n")
@@ -4633,7 +6037,7 @@ function buildRedditLegacyPreparedCapture(currentUrl: string): PreparedCapturePa
   return {
     sourceKind: "chat",
     sourcePlatform: "Reddit",
-    sourceTitle: resolveSafeCaptureTitle(),
+    sourceTitle,
     conversation: [
       {
         role: "user",
@@ -4660,7 +6064,7 @@ async function buildRedditPreparedCapture(
       const conversation = captured.messages
         .map((message): { role: CaptureConversationRole; content: string } => ({
           role: "user",
-          content: normalizeGenericCaptureText(message.content)
+          content: normalizeGenericCaptureText(stripMarkdownBoldFormatting(message.content))
         }))
         .filter((message) => message.content.length > 0)
 
@@ -4694,20 +6098,30 @@ function buildXSingleTweetPreparedCapture(currentUrl: string, root: ParentNode =
   }
 
   const tweetText = extractXTweetText(tweet)
-  if (!tweetText) {
-    return null
-  }
 
   const userBlock = tweet.querySelector("div[data-testid='User-Name']")
   const handle = extractXHandleFromUserBlock(userBlock)
   const displayName = extractXDisplayNameFromUserBlock(userBlock)
   const permalink = extractXPermalinkFromTweet(tweet) || currentUrl
+  const statusId = parseStatusIdFromUrl(permalink)
 
   const authorLabel =
     displayName || handle ? `Author: ${displayName || handle}${handle ? ` (@${handle})` : ""}` : ""
 
+  const fallbackTweetText = normalizeGenericCaptureText(
+    [
+      displayName || handle ? `Post de ${displayName || `@${handle}`}` : "",
+      statusId ? `Status ID: ${statusId}` : ""
+    ]
+      .filter(Boolean)
+      .join(" - ")
+  )
+  const captureBodyText = tweetText || fallbackTweetText || "Post do X sem texto visivel."
+
+  const sourceTitle = resolveXSourceTitleFromTweet(captureBodyText, displayName, handle, permalink)
+
   const singleContent = normalizeGenericCaptureText(
-    [normalizeString(permalink) ? `Source: ${permalink}` : "", authorLabel, "", tweetText]
+    [normalizeString(permalink) ? `Source: ${permalink}` : "", authorLabel, "", captureBodyText]
       .filter(Boolean)
       .join("\n")
   )
@@ -4719,7 +6133,7 @@ function buildXSingleTweetPreparedCapture(currentUrl: string, root: ParentNode =
   return {
     sourceKind: "chat",
     sourcePlatform: "X",
-    sourceTitle: resolveSafeCaptureTitle(),
+    sourceTitle,
     conversation: [
       {
         role: "user",
@@ -4747,6 +6161,7 @@ function buildXThreadPreparedCapture(currentUrl: string): PreparedCapturePayload
 
   const primaryUserBlock = primaryTweet.querySelector("div[data-testid='User-Name']")
   const opHandle = extractXHandleFromUserBlock(primaryUserBlock)
+  const opDisplayName = extractXDisplayNameFromUserBlock(primaryUserBlock)
   if (!opHandle) {
     return buildXSingleTweetPreparedCapture(currentUrl, timeline)
   }
@@ -4829,6 +6244,12 @@ function buildXThreadPreparedCapture(currentUrl: string): PreparedCapturePayload
   }
 
   const sourceUrl = normalizeString(segments[0]?.url) || currentUrl
+  const sourceTitle = resolveXSourceTitleFromTweet(
+    normalizeString(segments[0]?.text || ""),
+    opDisplayName,
+    opHandle,
+    normalizeString(sourceUrl)
+  )
   const total = segments.length
   const conversation = segments.map((segment, index) => ({
     role: "user" as const,
@@ -4847,7 +6268,7 @@ function buildXThreadPreparedCapture(currentUrl: string): PreparedCapturePayload
   return {
     sourceKind: "chat",
     sourcePlatform: "X",
-    sourceTitle: resolveSafeCaptureTitle(),
+    sourceTitle,
     conversation
   }
 }
@@ -4882,7 +6303,8 @@ const SITE_CAPTURE_PROFILES: SiteCaptureProfile[] = [
       buildLinkedInPreparedCapture(
         currentUrl,
         normalizeString(options.linkedInPostUrn) || null,
-        options.linkedInPostRoot ?? null
+        options.linkedInPostRoot ?? null,
+        options.linkedInSnapshot ?? null
       )
   },
   {
@@ -5732,11 +7154,23 @@ function useSmartCapture(
           sourcePlatform = resolveGenericPlatformLabel(window.location.hostname.toLowerCase())
         }
 
-        const resolvedSourceTitle = resolveBestSourceTitle([
+        const normalizedPlatformKey = normalizeTitleComparisonKey(sourcePlatform)
+        let resolvedSourceTitle = resolveBestSourceTitle([
           extractedSourceTitle,
           resolveSafeCaptureTitle(),
           document.title
         ])
+
+        if (normalizedPlatformKey === "x" || normalizedPlatformKey === "twitter") {
+          resolvedSourceTitle = resolveBestSourceTitle([
+            resolvedSourceTitle,
+            extractedSourceTitle,
+            resolveXTitleFromConversation(conversation),
+            resolveXTitleFromUrl(currentUrl),
+            "Post do X"
+          ])
+        }
+
         const sourceTitle =
           sourceKind === "doc"
             ? sanitizeSourceTitleCandidate(resolvedSourceTitle).replace(/^\[[^\]]+\]\s*/u, "").trim() ||
@@ -5753,7 +7187,7 @@ function useSmartCapture(
           }
         }
 
-        console.log("🚀 [MINDDOCK DEBUG] Enviando Captura:", {
+        console.log("ðŸš€ [MINDDOCK DEBUG] Enviando Captura:", {
           mode: isResync ? "RE-SYNC (SWAP)" : "NEW CAPTURE",
           notebookId: targetNotebookId,
           overwriteSourceId: isResync ? normalizeString(linkedSourceId) || "UNDEFINED (ERRO)" : "N/A"
@@ -5871,6 +7305,7 @@ function useSmartCapture(
       activeNotebookId,
       captureOptions.linkedInPostUrn,
       captureOptions.linkedInPostRoot,
+      captureOptions.linkedInSnapshot,
       captureOptions.redditPostRoot,
       currentUrl,
       linkedNotebookId,
@@ -5911,7 +7346,7 @@ function MenuPanel(props: MenuPanelProps): JSX.Element {
         <motion.div
           animate={{ opacity: 1, y: 0, scale: 1 }}
           className={clsx(
-            "absolute w-[26rem] max-w-[calc(100vw-24px)] overflow-hidden rounded-2xl border border-white/10 bg-zinc-950/90 shadow-[0_30px_80px_rgba(0,0,0,0.6)] backdrop-blur-2xl",
+            "absolute z-[2147483647] w-[26rem] max-w-[calc(100vw-24px)] overflow-hidden rounded-2xl border border-white/10 bg-zinc-950/90 shadow-[0_30px_80px_rgba(0,0,0,0.6)] backdrop-blur-2xl",
             props.menuVertical === "above" ? "bottom-full mb-3" : "top-full mt-3",
             props.menuAlign === "left" ? "left-0" : "right-0"
           )}
@@ -6045,10 +7480,11 @@ function MenuPanel(props: MenuPanelProps): JSX.Element {
                         key={notebook.id}
                         onClick={() => props.onNotebookSelect(notebook)}
                         type="button">
-                        <div className={clsx(
-                          "flex size-7 flex-shrink-0 items-center justify-center rounded-lg",
-                          isActive ? "bg-[#facc15]/20" : "bg-white/8"
-                        )}>
+                        <div
+                          className={clsx(
+                            "flex size-7 flex-shrink-0 items-center justify-center rounded-lg",
+                            isActive ? "bg-[#facc15]/20" : "bg-white/8"
+                          )}>
                           {isActive ? (
                             <Book className="size-3.5 text-[#facc15]" />
                           ) : (
@@ -6056,19 +7492,18 @@ function MenuPanel(props: MenuPanelProps): JSX.Element {
                           )}
                         </div>
                         <div className="min-w-0 flex-1">
-                          <p className={clsx(
-                            "truncate text-sm font-medium",
-                            isActive ? "text-[#facc15]" : "text-white"
-                          )}>
+                          <p
+                            className={clsx(
+                              "truncate text-sm font-medium",
+                              isActive ? "text-[#facc15]" : "text-white"
+                            )}>
                             {truncateLabel(notebook.title)}
                           </p>
                           <p className="text-xs text-zinc-500">
                             {isActive ? "Current notebook" : "Save content here"}
                           </p>
                         </div>
-                        {isActive && (
-                          <Check className="size-3.5 flex-shrink-0 text-[#facc15]" />
-                        )}
+                        {isActive && <Check className="size-3.5 flex-shrink-0 text-[#facc15]" />}
                       </button>
                     )
                   })
@@ -6151,6 +7586,7 @@ function UniversalMindDockButton(): JSX.Element {
   const [resyncLiveLabel, setResyncLiveLabel] = useState("")
   const [selectedLinkedInPostUrn, setSelectedLinkedInPostUrn] = useState<string | null>(null)
   const [selectedLinkedInPostRoot, setSelectedLinkedInPostRoot] = useState<HTMLElement | null>(null)
+  const [selectedLinkedInSnapshot, setSelectedLinkedInSnapshot] = useState<LinkedInCaptureSnapshot | null>(null)
   const [selectedRedditPostRoot, setSelectedRedditPostRoot] = useState<HTMLElement | null>(null)
   const containerRef = useRef<HTMLDivElement | null>(null)
   const isBusyRef = useRef(false)
@@ -6167,9 +7603,10 @@ function UniversalMindDockButton(): JSX.Element {
     () => ({
       linkedInPostUrn: selectedLinkedInPostUrn,
       linkedInPostRoot: selectedLinkedInPostRoot,
+      linkedInSnapshot: selectedLinkedInSnapshot,
       redditPostRoot: selectedRedditPostRoot
     }),
-    [selectedLinkedInPostUrn, selectedLinkedInPostRoot, selectedRedditPostRoot]
+    [selectedLinkedInPostUrn, selectedLinkedInPostRoot, selectedLinkedInSnapshot, selectedRedditPostRoot]
   )
 
   const { linkedNotebookId, linkedSourceId, linkedSyncInfo, captureState, handleCapture } = useSmartCapture(
@@ -6180,6 +7617,53 @@ function UniversalMindDockButton(): JSX.Element {
 
   const isBusy = captureState === "checking" || captureState === "capturing" || isCreatingNotebook
   const isGenericUrl = useMemo(() => isGenericConversationUrl(currentUrl), [currentUrl])
+  const isGeminiHost = activeStrategy.id === "gemini"
+  const isGoogleDocsHost = activeStrategy.id === "google-docs"
+  const isGeminiConversationRoute = useMemo(() => {
+    if (!isGeminiHost) {
+      return false
+    }
+
+    try {
+      const parsed = new URL(currentUrl)
+      const pathname = parsed.pathname.replace(/\/+$/u, "") || "/"
+
+      if (pathname !== "/" && pathname !== "/app") {
+        return true
+      }
+
+      return Boolean(
+        parsed.searchParams.get("conversation") ||
+          parsed.searchParams.get("chat") ||
+          parsed.searchParams.get("id")
+      )
+    } catch {
+      return !isGenericUrl
+    }
+  }, [currentUrl, isGeminiHost, isGenericUrl])
+  const [hasGeminiConversationContent, setHasGeminiConversationContent] = useState(false)
+  const [hasGeminiComposerSurface, setHasGeminiComposerSurface] = useState(false)
+  const [hasGeminiStickyReady, setHasGeminiStickyReady] = useState(false)
+  const [lastGeminiContentAt, setLastGeminiContentAt] = useState(0)
+  const isGeminiGraceActive = isGeminiHost && lastGeminiContentAt > 0 && Date.now() - lastGeminiContentAt < GEMINI_CONTENT_GRACE_MS
+  const isGeminiReady =
+    !isGeminiHost ||
+    isGeminiConversationRoute ||
+    hasGeminiConversationContent ||
+    hasGeminiComposerSurface ||
+    isGeminiGraceActive
+
+  useEffect(() => {
+    if (!isGeminiHost) {
+      setHasGeminiStickyReady(false)
+      return
+    }
+
+    if (isGeminiReady) {
+      setHasGeminiStickyReady(true)
+    }
+  }, [isGeminiHost, isGeminiReady])
+
   const isResyncDisabledForHost = useMemo(() => isResyncDisabledForUrl(currentUrl), [currentUrl])
   const canShowResync = Boolean(linkedNotebookId) && !isGenericUrl && !isResyncDisabledForHost
   const notebookSyncLabel = useMemo(
@@ -6198,8 +7682,72 @@ function UniversalMindDockButton(): JSX.Element {
   useEffect(() => {
     setSelectedLinkedInPostUrn(null)
     setSelectedLinkedInPostRoot(null)
+    setSelectedLinkedInSnapshot(null)
     setSelectedRedditPostRoot(null)
   }, [currentUrl])
+  useEffect(() => {
+    if (!isGeminiHost) {
+      setHasGeminiConversationContent(false)
+      setHasGeminiComposerSurface(false)
+      setLastGeminiContentAt(0)
+      return
+    }
+
+    let animationFrameId: number | null = null
+    setLastGeminiContentAt(Date.now())
+
+    const updateContentState = (): void => {
+      const hasContent = detectGeminiConversationContent()
+      const hasComposerSurface = detectGeminiComposerSurface()
+      if (hasContent || hasComposerSurface) {
+        setLastGeminiContentAt(Date.now())
+      }
+      setHasGeminiConversationContent((prev) => (prev === hasContent ? prev : hasContent))
+      setHasGeminiComposerSurface((prev) =>
+        prev === hasComposerSurface ? prev : hasComposerSurface
+      )
+    }
+
+    updateContentState()
+
+    const delayedCheckIds = [
+      window.setTimeout(updateContentState, 350),
+      window.setTimeout(updateContentState, 900),
+      window.setTimeout(updateContentState, 1800),
+      window.setTimeout(updateContentState, 3200),
+      window.setTimeout(updateContentState, GEMINI_CONTENT_GRACE_MS)
+    ]
+
+    const observer = new MutationObserver(() => {
+      if (animationFrameId !== null) {
+        return
+      }
+
+      animationFrameId = window.requestAnimationFrame(() => {
+        animationFrameId = null
+        updateContentState()
+      })
+    })
+
+    if (document.body) {
+      observer.observe(document.body, { childList: true, subtree: true, characterData: true })
+    }
+
+    const intervalId = window.setInterval(updateContentState, 1200)
+
+    return () => {
+      observer.disconnect()
+      for (const delayedCheckId of delayedCheckIds) {
+        window.clearTimeout(delayedCheckId)
+      }
+      window.clearInterval(intervalId)
+      if (animationFrameId !== null) {
+        window.cancelAnimationFrame(animationFrameId)
+      }
+    }
+  }, [currentUrl, isGeminiHost])
+
+
 
   useEffect(() => {
     if (!isYouTubeWatch) {
@@ -6218,6 +7766,10 @@ function UniversalMindDockButton(): JSX.Element {
 
     ensureInjected()
 
+    const retryTimeoutIds = [120, 300, 700, 1200, 2000, 3200].map((delayMs) =>
+      window.setTimeout(ensureInjected, delayMs)
+    )
+
     const observer = new MutationObserver(() => {
       ensureInjected()
     })
@@ -6227,19 +7779,30 @@ function UniversalMindDockButton(): JSX.Element {
     }
 
     const intervalId = window.setInterval(ensureInjected, 1000)
+    const youtubeNavigationEvents = ["yt-navigate-finish", "yt-page-data-fetched"]
+    const handleYouTubeNavigation = (): void => {
+      ensureInjected()
+    }
+    youtubeNavigationEvents.forEach((eventName) => {
+      window.addEventListener(eventName, handleYouTubeNavigation as EventListener)
+    })
 
     return () => {
       cancelled = true
+      retryTimeoutIds.forEach((timeoutId) => window.clearTimeout(timeoutId))
       observer.disconnect()
       window.clearInterval(intervalId)
+      youtubeNavigationEvents.forEach((eventName) => {
+        window.removeEventListener(eventName, handleYouTubeNavigation as EventListener)
+      })
     }
   }, [currentUrl, isYouTubeWatch])
 
   useEffect(() => {
-    if (!shouldShowForCurrentRoute) {
+    if (!shouldShowForCurrentRoute || (isGeminiHost && !isGeminiReady)) {
       setIsMenuOpen(false)
     }
-  }, [shouldShowForCurrentRoute])
+  }, [shouldShowForCurrentRoute, isGeminiHost, isGeminiReady])
 
   useEffect(() => {
     if (isYouTubeHost) {
@@ -6308,8 +7871,15 @@ function UniversalMindDockButton(): JSX.Element {
       isBusy: () => isBusyRef.current,
       debugKey: "__minddockLinkedinDebug",
       onTriggerClick: ({ triggerElement, postUrn, postRoot }) => {
+        const resolvedPostRoot = postRoot ?? resolveLinkedInPostRootFromTriggerElement(triggerElement)
+        const linkedInSnapshot = buildLinkedInCaptureSnapshotFromRoot(
+          resolvedPostRoot,
+          currentUrl,
+          postUrn
+        )
         setSelectedLinkedInPostUrn(postUrn)
-        setSelectedLinkedInPostRoot(postRoot)
+        setSelectedLinkedInPostRoot(resolvedPostRoot)
+        setSelectedLinkedInSnapshot(linkedInSnapshot)
         setFloatingPlacement(resolveInlineAnchorPlacement(triggerElement.getBoundingClientRect()))
         setMenuMode("root")
         setSearch("")
@@ -6320,7 +7890,7 @@ function UniversalMindDockButton(): JSX.Element {
     return () => {
       stopInlineTriggers()
     }
-  }, [isLinkedInRuntime])
+  }, [currentUrl, isLinkedInRuntime])
 
   useEffect(() => {
     if (!isRedditRuntime) {
@@ -6783,12 +8353,25 @@ function UniversalMindDockButton(): JSX.Element {
   ])
 
   const isIdleTrigger = captureState === "idle"
+  const shouldShowGeminiCapture = !isGeminiHost || shouldShowForCurrentRoute
   const shouldRenderFloatingButton =
-    !isInlineTriggerRuntime && shouldShowForCurrentRoute && !isYouTubeHost
+    !isInlineTriggerRuntime && shouldShowForCurrentRoute && !isYouTubeHost && shouldShowGeminiCapture
   const shouldRenderMenuPanel =
     (shouldRenderFloatingButton || isInlineTriggerRuntime) &&
     shouldShowForCurrentRoute &&
-    !isYouTubeHost
+    !isYouTubeHost &&
+    shouldShowGeminiCapture
+
+  const buttonBaseClass = isGoogleDocsHost
+    ? "inline-flex items-center justify-center rounded-full border border-white/70 bg-black/90 p-2 transition"
+    : "inline-flex items-center justify-center rounded-full border border-white/60 bg-black p-1.5 transition"
+  const buttonHoverClass = isBusy
+    ? "cursor-wait opacity-70"
+    : isGoogleDocsHost
+      ? "hover:border-white/70 hover:bg-black/80"
+      : "hover:border-white hover:bg-white/10"
+  const iconSizeClass = isGoogleDocsHost ? "size-5" : "size-4"
+  const accentIconSizeClass = isGoogleDocsHost ? "size-6" : "size-5"
 
   return (
     <div className="fixed z-[2147483646]" ref={containerRef} style={floatingPlacement.style}>
@@ -6798,10 +8381,7 @@ function UniversalMindDockButton(): JSX.Element {
         <div className="h-px w-px pointer-events-none" />
       ) : (
         <motion.button
-          className={clsx(
-            "inline-flex items-center justify-center rounded-full border border-white/60 bg-black p-1.5 transition",
-            isBusy ? "cursor-wait opacity-70" : "hover:border-white hover:bg-white/10"
-          )}
+          className={clsx(buttonBaseClass, buttonHoverClass)}
           disabled={isBusy}
           onClick={() => {
             setMenuMode("root")
@@ -6816,7 +8396,7 @@ function UniversalMindDockButton(): JSX.Element {
             }
             setIsMenuOpen((current) => !current)
           }}
-          title="MindDock — NotebookLM"
+          title="MindDock â€” NotebookLM"
           type="button"
           whileTap={{ scale: 0.97 }}>
           <motion.span
@@ -6828,17 +8408,17 @@ function UniversalMindDockButton(): JSX.Element {
             {isIdleTrigger ? (
               <img
                 alt="MindDock"
-                className="size-4 object-contain"
+                className={clsx(iconSizeClass, "object-contain")}
                 src={MINDDOCK_BUTTON_LOGO_SRC}
               />
             ) : captureState === "capturing" || captureState === "checking" ? (
-              <Loader2 className="size-4 animate-spin text-white" />
+              <Loader2 className={clsx(iconSizeClass, "animate-spin text-white")} />
             ) : captureState === "success" ? (
-              <Check className="size-4 text-emerald-400" />
+              <Check className={clsx(iconSizeClass, "text-emerald-400")} />
             ) : captureState === "error" ? (
-              <RefreshCw className="size-5 text-rose-400" />
+              <RefreshCw className={clsx(accentIconSizeClass, "text-rose-400")} />
             ) : (
-              <Book className="size-5 text-white" />
+              <Book className={clsx(accentIconSizeClass, "text-white")} />
             )}
           </motion.span>
         </motion.button>
@@ -6889,6 +8469,7 @@ function ensureMountPoint(): HTMLElement {
 
 function cleanupUniversalMindDockButton(): void {
   injectionManager?.stopAutoReinject()
+  youtubeSniperHardGuardStop?.()
 
   if (rebootstrapTimer !== null) {
     window.clearTimeout(rebootstrapTimer)
@@ -6960,6 +8541,7 @@ async function bootstrapUniversalMindDockButton(): Promise<void> {
 
   bootstrapPromise = (async () => {
     await waitForBody()
+    startYouTubeSniperHardGuard()
     if (mountedRoot) {
       return
     }

@@ -108,6 +108,9 @@ function normalizePlatformLabel(value: string): string {
     return "PERPLEXITY"
   }
 
+  if (normalizedValue.includes("youtube")) {
+    return "YOUTUBE"
+  }
   return rawValue.toUpperCase()
 }
 
@@ -3661,6 +3664,25 @@ class MessageRouter {
       .trim()
   }
 
+  private previewTranscriptUrl(rawUrl: unknown): string {
+    const normalized = String(rawUrl ?? "").trim()
+    if (!normalized) {
+      return "(empty)"
+    }
+    if (normalized.length <= 180) {
+      return normalized
+    }
+    return `${normalized.slice(0, 150)}...[${normalized.length} chars]`
+  }
+
+  private logSniperRouter(message: string, details?: Record<string, unknown>): void {
+    if (details) {
+      console.info(`[YT-SNIPER][ROUTER] ${message}`, details)
+      return
+    }
+    console.info(`[YT-SNIPER][ROUTER] ${message}`)
+  }
+
   private normalizeTranscriptBaseUrl(rawBaseUrl: unknown): string | null {
     let normalized = String(rawBaseUrl ?? "").trim()
     if (!normalized) {
@@ -4143,42 +4165,88 @@ class MessageRouter {
   ): Promise<string | null> {
     const candidateUrls = this.buildTimedTextFallbackUrls(videoId)
     let looseFallbackText: string | null = null
+    this.logSniperRouter("Starting timedtext fallback lookup.", {
+      videoId,
+      rangeStartMs,
+      rangeEndMs,
+      candidateCount: candidateUrls.length
+    })
 
-    for (const candidateUrl of candidateUrls) {
+    for (const [candidateIndex, candidateUrl] of candidateUrls.entries()) {
       try {
         const response = await fetch(candidateUrl, {
           method: "GET",
           credentials: "include"
         })
         if (!response.ok) {
+          this.logSniperRouter("Timedtext fallback candidate returned non-OK status.", {
+            videoId,
+            candidateIndex,
+            status: response.status,
+            urlPreview: this.previewTranscriptUrl(candidateUrl)
+          })
           continue
         }
 
         const rawBody = await response.text()
         const fromJson = this.extractCaptionTextFromJson3(rawBody, rangeStartMs, rangeEndMs)
         if (fromJson) {
+          this.logSniperRouter("Timedtext fallback resolved via json3 range parser.", {
+            videoId,
+            candidateIndex,
+            textLength: fromJson.length,
+            urlPreview: this.previewTranscriptUrl(candidateUrl)
+          })
           return fromJson
         }
 
         const fromXml = this.extractCaptionTextFromXml(rawBody, rangeStartMs, rangeEndMs)
         if (fromXml) {
+          this.logSniperRouter("Timedtext fallback resolved via XML range parser.", {
+            videoId,
+            candidateIndex,
+            textLength: fromXml.length,
+            urlPreview: this.previewTranscriptUrl(candidateUrl)
+          })
           return fromXml
         }
 
         const fromVtt = this.extractCaptionTextFromVttRange(rawBody, rangeStartMs, rangeEndMs)
         if (fromVtt) {
+          this.logSniperRouter("Timedtext fallback resolved via VTT range parser.", {
+            videoId,
+            candidateIndex,
+            textLength: fromVtt.length,
+            urlPreview: this.previewTranscriptUrl(candidateUrl)
+          })
           return fromVtt
         }
 
         const fromAny = this.extractAnyCaptionText(rawBody)
         if (fromAny && !looseFallbackText) {
           looseFallbackText = fromAny
+          this.logSniperRouter("Timedtext fallback captured loose transcript (without timing filter).", {
+            videoId,
+            candidateIndex,
+            textLength: fromAny.length,
+            urlPreview: this.previewTranscriptUrl(candidateUrl)
+          })
         }
-      } catch {
-        // ignore fallback URL errors and continue
+      } catch (error) {
+        this.logSniperRouter("Timedtext fallback candidate threw fetch/parse error.", {
+          videoId,
+          candidateIndex,
+          error: error instanceof Error ? error.message : String(error ?? "unknown"),
+          urlPreview: this.previewTranscriptUrl(candidateUrl)
+        })
       }
     }
 
+    this.logSniperRouter("Timedtext fallback finished.", {
+      videoId,
+      hasLooseFallbackText: Boolean(looseFallbackText),
+      looseFallbackTextLength: looseFallbackText?.length ?? 0
+    })
     return looseFallbackText
   }
 
@@ -4190,6 +4258,16 @@ class MessageRouter {
     const rangeStartMs = Math.max(0, Math.round(startSec * 1000))
     const rangeEndMs = Math.max(rangeStartMs, Math.round(endSec * 1000))
     const normalizedBaseUrl = this.normalizeTranscriptBaseUrl(baseUrl)
+    this.logSniperRouter("Fetching caption slice from baseUrl.", {
+      startSec,
+      endSec,
+      rangeStartMs,
+      rangeEndMs,
+      hasBaseUrl: Boolean(baseUrl),
+      hasNormalizedBaseUrl: Boolean(normalizedBaseUrl),
+      baseUrlPreview: this.previewTranscriptUrl(baseUrl),
+      normalizedBaseUrlPreview: this.previewTranscriptUrl(normalizedBaseUrl)
+    })
     if (!normalizedBaseUrl) {
       return null
     }
@@ -4204,7 +4282,7 @@ class MessageRouter {
     let lastErrorMessage = ""
     let fallbackTextWithoutTiming: string | null = null
 
-    for (const candidateUrl of candidateUrls) {
+    for (const [candidateIndex, candidateUrl] of candidateUrls.entries()) {
       try {
         const response = await fetch(candidateUrl, {
           method: "GET",
@@ -4212,38 +4290,68 @@ class MessageRouter {
         })
         if (!response.ok) {
           lastErrorMessage = `HTTP ${response.status}`
+          this.logSniperRouter("BaseUrl candidate returned non-OK status.", {
+            candidateIndex,
+            status: response.status,
+            urlPreview: this.previewTranscriptUrl(candidateUrl)
+          })
           continue
         }
 
         const rawBody = await response.text()
         const fromJson = this.extractCaptionTextFromJson3(rawBody, rangeStartMs, rangeEndMs)
         if (fromJson) {
+          this.logSniperRouter("BaseUrl candidate resolved via json3 range parser.", {
+            candidateIndex,
+            textLength: fromJson.length,
+            urlPreview: this.previewTranscriptUrl(candidateUrl)
+          })
           return fromJson
         }
 
         const fromXml = this.extractCaptionTextFromXml(rawBody, rangeStartMs, rangeEndMs)
         if (fromXml) {
+          this.logSniperRouter("BaseUrl candidate resolved via XML range parser.", {
+            candidateIndex,
+            textLength: fromXml.length,
+            urlPreview: this.previewTranscriptUrl(candidateUrl)
+          })
           return fromXml
         }
 
         const fromAnyFormat = this.extractAnyCaptionText(rawBody)
         if (fromAnyFormat && !fallbackTextWithoutTiming) {
           fallbackTextWithoutTiming = fromAnyFormat
+          this.logSniperRouter("BaseUrl candidate produced loose transcript (without timing filter).", {
+            candidateIndex,
+            textLength: fromAnyFormat.length,
+            urlPreview: this.previewTranscriptUrl(candidateUrl)
+          })
         }
       } catch (error) {
         lastErrorMessage =
           error instanceof Error ? error.message : String(error ?? "Erro ao buscar transcricao")
+        this.logSniperRouter("BaseUrl candidate threw fetch/parse error.", {
+          candidateIndex,
+          error: lastErrorMessage,
+          urlPreview: this.previewTranscriptUrl(candidateUrl)
+        })
       }
     }
 
     if (fallbackTextWithoutTiming) {
+      this.logSniperRouter("Returning loose transcript from baseUrl flow.", {
+        textLength: fallbackTextWithoutTiming.length
+      })
       return fallbackTextWithoutTiming
     }
 
     if (lastErrorMessage) {
+      this.logSniperRouter("BaseUrl flow exhausted with last error.", { lastErrorMessage })
       throw new Error(lastErrorMessage)
     }
 
+    this.logSniperRouter("BaseUrl flow exhausted with no transcript text.")
     return null
   }
 
@@ -4336,87 +4444,372 @@ class MessageRouter {
     }
 
     const watchUrl = `https://www.youtube.com/watch?v=${encodeURIComponent(normalizedVideoId)}&hl=pt-BR`
+    this.logSniperRouter("Resolving caption baseUrl from watch HTML.", {
+      videoId: normalizedVideoId,
+      watchUrl
+    })
     const response = await fetch(watchUrl, {
       method: "GET",
       credentials: "include"
     })
     if (!response.ok) {
+      this.logSniperRouter("Watch HTML request failed while resolving baseUrl.", {
+        videoId: normalizedVideoId,
+        status: response.status
+      })
       return null
     }
 
     const html = await response.text()
     const tracks = this.extractCaptionTracksFromWatchHtml(html)
-    return this.pickCaptionTrackBaseUrl(tracks)
+    const pickedBaseUrl = this.pickCaptionTrackBaseUrl(tracks)
+    this.logSniperRouter("Caption tracks parsed from watch HTML.", {
+      videoId: normalizedVideoId,
+      trackCount: tracks.length,
+      hasPickedBaseUrl: Boolean(pickedBaseUrl),
+      pickedBaseUrlPreview: this.previewTranscriptUrl(pickedBaseUrl)
+    })
+    return pickedBaseUrl
   }
 
   private async handleFetchSniperTranscript(payload: unknown): Promise<StandardResponse> {
     const record = this.asRecord(payload)
-    if (!record) {
-      return this.fail("Payload invalido para FETCH_SNIPER_TRANSCRIPT.")
-    }
+    if (!record) return this.fail("Payload invalido para FETCH_SNIPER_TRANSCRIPT.")
 
     const videoId = this.normalizeBoundedString(record.videoId, 128)
-    if (!videoId) {
-      return this.fail("videoId ausente para extrair transcricao.")
-    }
+    if (!videoId) return this.fail("videoId ausente para extrair transcricao.")
 
     const startSecRaw = Number(record.startSec)
     const endSecRaw = Number(record.endSec)
-    if (!Number.isFinite(startSecRaw) || !Number.isFinite(endSecRaw)) {
+    if (!Number.isFinite(startSecRaw) || !Number.isFinite(endSecRaw))
       return this.fail("Intervalo invalido para extrair transcricao.")
-    }
 
-    const startSec = Math.max(0, Math.min(startSecRaw, endSecRaw))
-    const endSec = Math.max(startSec, Math.max(startSecRaw, endSecRaw))
+    const safeStart = Math.max(0, Math.min(startSecRaw, endSecRaw))
+    const safeEnd = Math.max(safeStart, Math.max(startSecRaw, endSecRaw))
+    const allowDomTranscriptFallback = true
+    const rangeStartMs = Math.max(0, Math.round(safeStart * 1000))
+    const rangeEndMs = Math.max(rangeStartMs, Math.round(safeEnd * 1000))
+    const payloadBaseUrl = this.normalizeTranscriptBaseUrl(record.baseUrl)
 
-    const fromPayloadBaseUrl = this.normalizeTranscriptBaseUrl(record.baseUrl)
-    let resolvedBaseUrl = fromPayloadBaseUrl
-    if (!resolvedBaseUrl) {
-      try {
-        resolvedBaseUrl = await this.resolveCaptionBaseUrlForVideo(videoId)
-      } catch {
-        resolvedBaseUrl = null
-      }
-    }
-
-    if (!resolvedBaseUrl) {
-      const fallbackWithoutBaseUrl = await this.fetchCaptionSliceFromTimedTextFallback(
-        videoId,
-        Math.max(0, Math.round(startSec * 1000)),
-        Math.max(0, Math.round(endSec * 1000))
-      )
-      if (fallbackWithoutBaseUrl) {
-        return this.ok({ text: fallbackWithoutBaseUrl })
-      }
-      return this.fail("No transcript available for this video.")
-    }
+    this.logSniperRouter("Starting transcript extraction (network-first).", {
+      videoId,
+      safeStart,
+      safeEnd,
+      hasPayloadBaseUrl: Boolean(payloadBaseUrl)
+    })
 
     try {
-      const text = await this.fetchCaptionSliceFromBaseUrl(resolvedBaseUrl, startSec, endSec)
-      if (!text) {
-        const fallbackWithoutInterval = await this.fetchCaptionSliceFromTimedTextFallback(
-          videoId,
-          Math.max(0, Math.round(startSec * 1000)),
-          Math.max(0, Math.round(endSec * 1000))
-        )
-        if (fallbackWithoutInterval) {
-          return this.ok({ text: fallbackWithoutInterval })
-        }
-        return this.fail("Nenhum texto encontrado no intervalo selecionado.")
+      const tabs = await chrome.tabs.query({ active: true, currentWindow: true })
+      const tabId = tabs.find((tab) => tab.url?.includes("youtube.com/watch"))?.id ?? null
+      if (tabId) {
+        await chrome.scripting.executeScript({
+          target: { tabId },
+          world: "MAIN",
+          func: () => {
+            const selectors = [
+              'ytd-engagement-panel-section-list-renderer[target-id="PAmodern_transcript_view"]',
+              'ytd-engagement-panel-section-list-renderer[target-id="engagement-panel-searchable-transcript"]'
+            ]
+            for (const selector of selectors) {
+              for (const panel of document.querySelectorAll<HTMLElement>(selector)) {
+                panel.style.position = "fixed"
+                panel.style.top = "-10000px"
+                panel.style.left = "-10000px"
+                panel.style.opacity = "0"
+                panel.style.pointerEvents = "none"
+                panel.style.zIndex = "-1"
+              }
+            }
+          }
+        })
       }
-      return this.ok({ text })
-    } catch (error) {
-      const fallbackAfterError = await this.fetchCaptionSliceFromTimedTextFallback(
-        videoId,
-        Math.max(0, Math.round(startSec * 1000)),
-        Math.max(0, Math.round(endSec * 1000))
-      )
-      if (fallbackAfterError) {
-        return this.ok({ text: fallbackAfterError })
+    } catch {
+      // no-op
+    }
+
+    const baseUrlCandidates: string[] = []
+    if (payloadBaseUrl) {
+      baseUrlCandidates.push(payloadBaseUrl)
+    }
+
+    const watchHtmlBaseUrl = await this.resolveCaptionBaseUrlForVideo(videoId)
+    if (watchHtmlBaseUrl && !baseUrlCandidates.includes(watchHtmlBaseUrl)) {
+      baseUrlCandidates.push(watchHtmlBaseUrl)
+    }
+
+    for (const [candidateIndex, baseUrlCandidate] of baseUrlCandidates.entries()) {
+      try {
+        const textFromBaseUrl = await this.fetchCaptionSliceFromBaseUrl(baseUrlCandidate, safeStart, safeEnd)
+        if (textFromBaseUrl) {
+          this.logSniperRouter("Transcript resolved via baseUrl.", {
+            candidateIndex,
+            textLength: textFromBaseUrl.length,
+            baseUrlPreview: this.previewTranscriptUrl(baseUrlCandidate)
+          })
+          return this.ok({ text: textFromBaseUrl.trim(), eventsCount: 0 })
+        }
+      } catch (error) {
+        this.logSniperRouter("BaseUrl candidate failed.", {
+          candidateIndex,
+          baseUrlPreview: this.previewTranscriptUrl(baseUrlCandidate),
+          error: error instanceof Error ? error.message : String(error ?? "unknown")
+        })
+      }
+    }
+
+    const textFromTimedtext = await this.fetchCaptionSliceFromTimedTextFallback(videoId, rangeStartMs, rangeEndMs)
+    if (textFromTimedtext) {
+      this.logSniperRouter("Transcript resolved via timedtext fallback.", {
+        textLength: textFromTimedtext.length
+      })
+      return this.ok({ text: textFromTimedtext.trim(), eventsCount: 0 })
+    }
+
+    if (!allowDomTranscriptFallback) {
+      return this.fail("Nao foi possivel extrair a legenda sem abrir o painel de transcript do YouTube.")
+    }
+
+    this.logSniperRouter("Starting transcript extraction via DOM (Plano B).", { videoId, safeStart, safeEnd })
+
+    try {
+      const tabs = await chrome.tabs.query({ active: true, currentWindow: true })
+      const tabId = tabs.find((t) => t.url?.includes("youtube.com/watch"))?.id
+      if (!tabId) return this.fail("Aba do YouTube nao encontrada.")
+
+      const [result] = await chrome.scripting.executeScript({
+        target: { tabId },
+        world: "MAIN",
+        func: async (safeStart: number, safeEnd: number) => {
+          console.log("[SNIPER][FUNC] start:", safeStart, "end:", safeEnd)
+
+          const PANEL_MODERN = 'ytd-engagement-panel-section-list-renderer[target-id="PAmodern_transcript_view"]'
+          const PANEL_LEGACY =
+            'ytd-engagement-panel-section-list-renderer[target-id="engagement-panel-searchable-transcript"]'
+          const SEGMENT_NEW = "TRANSCRIPT-SEGMENT-VIEW-MODEL"
+          const SEGMENT_OLD = "ytd-transcript-segment-renderer"
+          const TS_NEW = ".ytwTranscriptSegmentViewModelTimestamp"
+          const TS_OLD = ".segment-timestamp"
+          const TXT_NEW = ".yt-core-attributed-string"
+          const TXT_OLD = ".segment-text"
+          const STYLE_ID = "__sniper_hide__"
+
+          const OPEN_LABELS = [
+            "Mostrar transcrição",
+            "Show transcript",
+            "Mostrar transcripción",
+            "Afficher la transcription",
+            "Transkript anzeigen",
+            "Transcript weergeven",
+            "Mostrar legendas",
+            "Visa transkription",
+            "Vis transskription",
+            "Näytä transkriptio"
+          ]
+          const CLOSE_LABELS = [
+            "Fechar transcrição",
+            "Close transcript",
+            "Cerrar transcripción",
+            "Fermer la transcription",
+            "Transkript schließen",
+            "Transcript verbergen"
+          ]
+
+          function timeToSeconds(raw: string): number {
+            const parts = raw.trim().split(":").map(Number)
+            if (parts.length === 2) return parts[0] * 60 + parts[1]
+            if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2]
+            return 0
+          }
+
+          function injectHideStyle(): void {
+            if (document.getElementById(STYLE_ID)) return
+            const style = document.createElement("style")
+            style.id = STYLE_ID
+            style.textContent = [
+              PANEL_MODERN +
+                " { position: fixed !important; top: -9999px !important; left: -9999px !important; opacity: 0 !important; pointer-events: none !important; }",
+              PANEL_LEGACY +
+                " { position: fixed !important; top: -9999px !important; left: -9999px !important; opacity: 0 !important; pointer-events: none !important; }",
+              "ytd-engagement-panel-section-list-renderer[visibility='ENGAGEMENT_PANEL_VISIBILITY_EXPANDED'] { position: fixed !important; top: -9999px !important; left: -9999px !important; opacity: 0 !important; pointer-events: none !important; }"
+            ].join("\n")
+            document.head.appendChild(style)
+          }
+
+          function removeHideStyle(): void {
+            document.getElementById(STYLE_ID)?.remove()
+          }
+
+          function waitForSegmentsAnyPanel(
+            timeout = 8000
+          ): Promise<{ segments: Element[]; isNewFormat: boolean } | null> {
+            return new Promise((resolve) => {
+              function check() {
+                for (const el of document.querySelectorAll("ytd-engagement-panel-section-list-renderer")) {
+                  const novo = Array.from(el.querySelectorAll(SEGMENT_NEW))
+                  if (novo.length > 0) return { segments: novo, isNewFormat: true }
+                  const velho = Array.from(el.querySelectorAll(SEGMENT_OLD))
+                  if (velho.length > 0) return { segments: velho, isNewFormat: false }
+                }
+                return null
+              }
+              const found = check()
+              if (found) return resolve(found)
+
+              let lastCount = 0
+              let stabilizeTimer: ReturnType<typeof setTimeout> | null = null
+
+              const observer = new MutationObserver(() => {
+                for (const el of document.querySelectorAll("ytd-engagement-panel-section-list-renderer")) {
+                  const novo = Array.from(el.querySelectorAll(SEGMENT_NEW))
+                  const velho = Array.from(el.querySelectorAll(SEGMENT_OLD))
+                  const segs = novo.length > 0 ? novo : velho
+                  const isNew = novo.length > 0
+                  if (segs.length > 0 && segs.length !== lastCount) {
+                    lastCount = segs.length
+                    if (stabilizeTimer) clearTimeout(stabilizeTimer)
+                    stabilizeTimer = setTimeout(() => {
+                      observer.disconnect()
+                      resolve({ segments: segs, isNewFormat: isNew })
+                    }, 800)
+                  }
+                }
+              })
+              observer.observe(document.body, { childList: true, subtree: true })
+              setTimeout(() => {
+                observer.disconnect()
+                resolve(null)
+              }, timeout)
+            })
+          }
+
+          Array.from(document.querySelectorAll<HTMLElement>("ytd-engagement-panel-section-list-renderer")).forEach((el) => {
+            el.style.position = "fixed"
+            el.style.top = "-10000px"
+            el.style.left = "-10000px"
+            el.style.opacity = "0"
+            el.style.pointerEvents = "none"
+            el.style.zIndex = "-1"
+          })
+          await new Promise((r) => setTimeout(r, 300))
+
+          injectHideStyle()
+          await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r as FrameRequestCallback)))
+
+          let openBtn: HTMLElement | null = null
+          openBtn =
+            Array.from(document.querySelectorAll<HTMLElement>("button[aria-label]")).find((b) => {
+              if (b.closest("ytd-engagement-panel-section-list-renderer")) return false
+              if (b.closest(".ytp-chrome-controls")) return false
+              if (b.closest(".ytp-right-controls")) return false
+              if (b.closest(".ytp-left-controls")) return false
+              const label = (b.getAttribute("aria-label") ?? "").toLowerCase()
+              return (
+                label.includes("transcript") ||
+                label.includes("transcri") ||
+                label.includes("字幕") ||
+                label.includes("자막") ||
+                label.includes("legenda") ||
+                label.includes("caption")
+              )
+            }) ?? null
+
+          if (!openBtn) {
+            for (const label of OPEN_LABELS) {
+              const all = Array.from(
+                document.querySelectorAll<HTMLElement>(`button[aria-label="${label}"]`)
+              ).filter((b) => !b.closest("ytd-engagement-panel-section-list-renderer") && !b.closest(".ytp-chrome-controls"))
+              if (all.length > 0) {
+                openBtn = all[0]
+                break
+              }
+            }
+          }
+
+          console.log("[SNIPER][FUNC] botao encontrado:", !!openBtn, openBtn?.getAttribute("aria-label"))
+
+          if (!openBtn) {
+            removeHideStyle()
+            return {
+              totalSegments: 0,
+              filteredSegments: 0,
+              text: "__ERROR__:Botão de transcrição não encontrado. O vídeo possui legendas?"
+            }
+          }
+
+          openBtn.click()
+
+          const found = await waitForSegmentsAnyPanel(8000)
+          console.log(
+            "[SNIPER][FUNC] formato:",
+            found?.isNewFormat ? "novo" : "legado",
+            "| segmentos:",
+            found?.segments.length ?? 0
+          )
+
+          if (!found || found.segments.length === 0) {
+            removeHideStyle()
+            return {
+              totalSegments: 0,
+              filteredSegments: 0,
+              text: "__ERROR__:Nenhum segmento encontrado. O vídeo possui legenda?"
+            }
+          }
+
+          const { segments, isNewFormat } = found
+          const tsSelector = isNewFormat ? TS_NEW : TS_OLD
+          const txtSelector = isNewFormat ? TXT_NEW : TXT_OLD
+          const lines: string[] = []
+
+          for (const seg of segments) {
+            const tsEl = seg.querySelector(tsSelector)
+            const txtEl = seg.querySelector(txtSelector)
+            if (!tsEl || !txtEl) continue
+            const seconds = timeToSeconds(tsEl.textContent ?? "")
+            const text = (txtEl.textContent ?? "").trim()
+            if (seconds >= safeStart && seconds <= safeEnd && text) lines.push(text)
+          }
+          console.log("[SNIPER][FUNC] segmentos no intervalo:", lines.length)
+
+          Array.from(document.querySelectorAll<HTMLElement>("ytd-engagement-panel-section-list-renderer")).forEach((el) => {
+            el.style.position = "fixed"
+            el.style.top = "-10000px"
+            el.style.left = "-10000px"
+            el.style.opacity = "0"
+            el.style.pointerEvents = "none"
+            el.style.zIndex = "-1"
+          })
+          removeHideStyle()
+
+          const text =
+            lines.length > 0 ? lines.join(" ") : "__ERROR__:Nenhuma legenda encontrada no intervalo selecionado."
+          return { totalSegments: segments.length, filteredSegments: lines.length, text }
+        },
+        args: [safeStart, safeEnd]
+      })
+
+      this.logSniperRouter("executeScript result received.", { resultType: typeof result?.result })
+
+      const payloadResult = result?.result as
+        | { text?: string; totalSegments?: number; filteredSegments?: number }
+        | undefined
+      if (!payloadResult) return this.fail("Falha ao executar script na pagina do YouTube.")
+
+      const text = String(payloadResult.text ?? "")
+      if (!text || text.startsWith("__ERROR__:")) {
+        const msg = text.replace("__ERROR__:", "").trim() || "Erro desconhecido."
+        this.logSniperRouter("DOM extraction returned error.", { msg })
+        return this.fail(msg)
       }
 
-      const details = error instanceof Error ? error.message : String(error ?? "Erro desconhecido")
-      return this.fail(`Falha ao extrair transcricao: ${details}`)
+      this.logSniperRouter("DOM extraction succeeded.", {
+        textLength: text.length,
+        filteredSegments: payloadResult.filteredSegments
+      })
+      return this.ok({ text: text.trim(), eventsCount: payloadResult.totalSegments ?? 0 })
+    } catch (err: unknown) {
+      const details = err instanceof Error ? err.message : String(err ?? "Erro desconhecido")
+      this.logSniperRouter("executeScript threw error.", { details })
+      return this.fail("executeScript falhou: " + details)
     }
   }
 
@@ -4841,5 +5234,3 @@ class MessageRouter {
 }
 
 export const router = new MessageRouter()
-
-

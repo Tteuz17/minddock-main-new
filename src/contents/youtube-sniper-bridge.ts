@@ -4,72 +4,115 @@ export const config = {
   run_at: 'document_idle',
 }
 
-// Roda no Main World — acesso total ao window da página
-// Captura videoId e baseUrl do player do YouTube
+// Runs in the YouTube main world to capture videoId and fresh caption baseUrl.
+
+function previewBaseUrl(rawBaseUrl: string): string {
+  const normalized = String(rawBaseUrl ?? '').trim()
+  if (!normalized) return '(empty)'
+  if (normalized.length <= 140) return normalized
+  return `${normalized.slice(0, 120)}...[${normalized.length} chars]`
+}
+
+function logBridge(message: string, details?: Record<string, unknown>) {
+  if (details) {
+    console.info(`[YT-SNIPER][BRIDGE] ${message}`, details)
+    return
+  }
+  console.info(`[YT-SNIPER][BRIDGE] ${message}`)
+}
 
 function extractAndSend() {
-  const videoId = new URLSearchParams(window.location.search).get('v');
+  const videoId = new URLSearchParams(window.location.search).get('v')
   if (!videoId) {
-    return;
+    logBridge('Skip extract: URL has no videoId query param.', { href: window.location.href })
+    return
   }
 
-  // Tenta pegar o baseUrl fresco do player
-  const playerEl = document.querySelector('#movie_player') as any;
-  let baseUrl = '';
+  logBridge('Starting extractAndSend.', { videoId })
+
+  const playerEl = document.querySelector('#movie_player') as any
+  let baseUrl = ''
 
   if (typeof playerEl?.getPlayerResponse === 'function') {
     try {
-      const pr = playerEl.getPlayerResponse();
-      const tracks = pr?.captions?.playerCaptionsTracklistRenderer?.captionTracks ?? [];
-      const track = tracks.find((t: any) => t.kind === 'asr') ?? tracks[0];
-      if (track?.baseUrl) {
-        baseUrl = track.baseUrl;
+      const playerResponse = playerEl.getPlayerResponse()
+      const tracks = playerResponse?.captions?.playerCaptionsTracklistRenderer?.captionTracks ?? []
+      const pickedTrack = tracks.find((track: any) => track.kind === 'asr') ?? tracks[0]
+      logBridge('Caption tracks from player response.', {
+        count: tracks.length,
+        pickedKind: String(pickedTrack?.kind ?? ''),
+        pickedLanguage: String(pickedTrack?.languageCode ?? ''),
+        hasPickedBaseUrl: Boolean(pickedTrack?.baseUrl),
+      })
+      if (pickedTrack?.baseUrl) {
+        baseUrl = String(pickedTrack.baseUrl)
       }
-    } catch (e) {
+    } catch (error) {
+      logBridge('Error while reading player response captions.', {
+        error: error instanceof Error ? error.message : String(error ?? 'unknown'),
+      })
     }
+  } else {
+    logBridge('movie_player.getPlayerResponse is unavailable.')
   }
 
-  // Fallback: ytInitialPlayerResponse
   if (!baseUrl) {
     try {
-      const pr = (window as any).ytInitialPlayerResponse;
-      const tracks = pr?.captions?.playerCaptionsTracklistRenderer?.captionTracks ?? [];
-      const track = tracks.find((t: any) => t.kind === 'asr') ?? tracks[0];
-      if (track?.baseUrl) {
-        baseUrl = track.baseUrl;
+      const playerResponse = (window as any).ytInitialPlayerResponse
+      const tracks = playerResponse?.captions?.playerCaptionsTracklistRenderer?.captionTracks ?? []
+      const pickedTrack = tracks.find((track: any) => track.kind === 'asr') ?? tracks[0]
+      logBridge('Caption tracks from ytInitialPlayerResponse fallback.', {
+        count: tracks.length,
+        pickedKind: String(pickedTrack?.kind ?? ''),
+        pickedLanguage: String(pickedTrack?.languageCode ?? ''),
+        hasPickedBaseUrl: Boolean(pickedTrack?.baseUrl),
+      })
+      if (pickedTrack?.baseUrl) {
+        baseUrl = String(pickedTrack.baseUrl)
       }
-    } catch (e) {
+    } catch (error) {
+      logBridge('Error while reading ytInitialPlayerResponse captions.', {
+        error: error instanceof Error ? error.message : String(error ?? 'unknown'),
+      })
     }
   }
 
   if (!baseUrl) {
-    return;
+    logBridge('No caption baseUrl found in player response or fallback.', { videoId })
+    return
   }
 
-  window.postMessage({
-    source: 'yt-sniper-bridge',
-    type: 'SNIPER_DATA',
-    payload: { videoId, baseUrl },
-  }, '*');
-
+  window.postMessage(
+    {
+      source: 'yt-sniper-bridge',
+      type: 'SNIPER_DATA',
+      payload: { videoId, baseUrl },
+    },
+    '*',
+  )
+  logBridge('SNIPER_DATA posted to isolated world.', {
+    videoId,
+    baseUrlPreview: previewBaseUrl(baseUrl),
+  })
 }
 
-// Execução inicial
 if (document.readyState === 'complete') {
-  extractAndSend();
+  logBridge('Document already complete; running initial extractAndSend.')
+  extractAndSend()
 } else {
-  window.addEventListener('load', extractAndSend, { once: true });
+  logBridge('Waiting for window.load to run initial extractAndSend.')
+  window.addEventListener('load', extractAndSend, { once: true })
 }
 
-// SPA: re-executa a cada navegação entre vídeos
 window.addEventListener('yt-navigate-finish', () => {
-  setTimeout(extractAndSend, 800);
-  setTimeout(extractAndSend, 2000);
-});
+  logBridge('yt-navigate-finish received; scheduling bridge refreshes.')
+  setTimeout(extractAndSend, 800)
+  setTimeout(extractAndSend, 2000)
+})
 
-// Responde requisições sob demanda do Isolated World
 window.addEventListener('message', (event) => {
-  if (event.data?.source !== 'yt-sniper-isolated') return;
-  if (event.data?.type !== 'REQUEST_SNIPER_DATA') return;
-  extractAndSend();
-});
+  if (event.data?.source !== 'yt-sniper-isolated') return
+  if (event.data?.type !== 'REQUEST_SNIPER_DATA') return
+  logBridge('REQUEST_SNIPER_DATA received from isolated world.')
+  extractAndSend()
+})

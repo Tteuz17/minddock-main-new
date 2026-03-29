@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
+﻿import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 import { createRoot, type Root } from "react-dom/client"
 import { ChevronDown, Download, Eye, FileText, Loader2, Search } from "lucide-react"
+import { jsPDF } from "jspdf"
 import { MESSAGE_ACTIONS, type StandardResponse } from "~/lib/contracts"
 import { base64ToBytes } from "~/lib/base64-bytes"
 import {
@@ -12,8 +13,8 @@ import {
   triggerDownload
 } from "~/lib/source-download"
 import { buildNotebookAccountKey, buildScopedStorageKey, resolveAuthUserFromUrl } from "~/lib/notebook-account-scope"
-import { EXCLUDED_FROM_EXPORT, VISUAL_TYPES, resolveFileExtension } from "../../src/background/studioArtifacts"
-import { queryDeepAll } from "./sourceDom"
+import { EXCLUDED_FROM_EXPORT, resolveFileExtension } from "../../src/background/studioArtifacts"
+import { queryDeepAll, resolveStudioLabelText } from "./sourceDom"
 import { useShadowPortal } from "./useShadowPortal"
 import {
   EXPORT_PREVIEW_CLOSE_EVENT,
@@ -22,24 +23,94 @@ import {
   type ExportPreviewOpenDetail
 } from "./ExportPreviewPanel"
 
-// REGRA ABSOLUTA: esses types SEMPRE vão para VISUAIS, sem exceção
-const FORCE_VISUAL_TYPES = new Set([
-  "Video Overview",
-  "Audio Overview",
-  "Infographic",
-  "Slides",
-  "Mind Map"
-])
-
 const CONTEXT_EVENT = "MINDDOCK_RPC_CONTEXT"
+const NATIVE_SLIDES_DOWNLOAD_EVENT = "MINDDOCK_NATIVE_SLIDES_DOWNLOAD_URL"
+const NATIVE_SLIDES_CAPTURE_ONLY_EVENT = "MINDDOCK_NATIVE_SLIDES_CAPTURE_ONLY"
+const NATIVE_SLIDES_DOWNLOAD_RE = /^https:\/\/contribution\.usercontent\.google\.com\/download\?/i
+
+const SLIDES_PDF_CACHE_TTL = 25_000
+const SLIDES_NATIVE_WAIT_TIMEOUT_MS = 3_500
+const TOAST_MIN_VISIBLE_MS = 650
+
+interface NativePdfEntry {
+  url: string
+  ts: number
+}
+
+const nativeSlidePdfCache = new Map<string, NativePdfEntry>()
+
+function resolveNativeSlidesNotebookKey(notebookId?: string | null): string {
+  const direct = String(notebookId ?? "").trim()
+  if (direct) return direct
+  const fromUrl = String(resolveNotebookIdFromUrl() ?? "").trim()
+  return fromUrl || "_default"
+}
+
+function rememberNativeSlidesPdfUrl(url: string, notebookId?: string | null): void {
+  const normalized = String(url ?? "").trim()
+  if (!normalized || !NATIVE_SLIDES_DOWNLOAD_RE.test(normalized)) return
+  const key = resolveNativeSlidesNotebookKey(notebookId)
+  nativeSlidePdfCache.set(key, { url: normalized, ts: Date.now() })
+  console.log("[MindDock][NativeSlidesURL] captured", { url: normalized, notebookId: key })
+}
+
+function consumeNativeSlidesPdfUrl(notebookId?: string | null, maxAgeMs = SLIDES_PDF_CACHE_TTL): string | null {
+  const key = resolveNativeSlidesNotebookKey(notebookId)
+  const fallbackKeys = Array.from(new Set([key, "_default"]))
+  let sourceKey: string | null = null
+  let entry: NativePdfEntry | undefined
+
+  for (const candidateKey of fallbackKeys) {
+    const candidate = nativeSlidePdfCache.get(candidateKey)
+    if (!candidate) continue
+    sourceKey = candidateKey
+    entry = candidate
+    break
+  }
+
+  if (!entry || !sourceKey) return null
+
+  if (Date.now() - entry.ts > maxAgeMs) {
+    nativeSlidePdfCache.delete(sourceKey)
+    return null
+  }
+
+  nativeSlidePdfCache.delete(sourceKey)
+  return entry.url
+}
+
+async function waitForNativeSlidesPdfUrl(
+  notebookId: string | undefined,
+  timeoutMs = SLIDES_NATIVE_WAIT_TIMEOUT_MS,
+  intervalMs = 300
+): Promise<string | null> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const url = consumeNativeSlidesPdfUrl(notebookId)
+    if (url) return url
+    await sleep(intervalMs)
+  }
+  return null
+}
 
 if (!(window as unknown as Record<string, unknown>).__minddock_rpc_listener_added) {
   ;(window as unknown as Record<string, unknown>).__minddock_rpc_listener_added = true
   window.addEventListener("message", (event) => {
     if (event.source !== window) return
-    const data = (event as MessageEvent).data as { source?: string; type?: string; payload?: unknown } | null
-    if (!data || data.source !== "minddock" || data.type !== CONTEXT_EVENT) return
-    ;(window as unknown as Record<string, unknown>).__minddock_rpc_context = data.payload
+    const data = (event as MessageEvent).data as
+      | { source?: string; type?: string; payload?: Record<string, unknown> | unknown }
+      | null
+    if (!data || data.source !== "minddock") return
+    if (data.type === CONTEXT_EVENT) {
+      ;(window as unknown as Record<string, unknown>).__minddock_rpc_context = data.payload
+      return
+    }
+    if (data.type === NATIVE_SLIDES_DOWNLOAD_EVENT) {
+      const payload = (data.payload ?? {}) as Record<string, unknown>
+      const url = String(payload.url ?? "")
+      const notebookId = String(payload.notebookId ?? "").trim()
+      if (url) rememberNativeSlidesPdfUrl(url, notebookId || undefined)
+    }
   })
 }
 
@@ -293,12 +364,56 @@ const SHADOW_CSS = `
   .source-item--visual { grid-template-columns: 1fr auto; cursor: default; }
   .source-item--disabled { opacity: 0.6; cursor: default; }
   .source-item--disabled:hover { border-color: transparent; background: transparent; }
+  .source-sections {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .source-section {
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 10px;
+    background: #0a0a0a;
+    padding: 8px;
+  }
+  .source-section-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin: 2px 4px 8px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid rgba(255,255,255,0.08);
+  }
   .source-section-title {
-    margin: 10px 6px 6px;
+    margin: 0;
     font-size: 11px;
     letter-spacing: 0.08em;
     text-transform: uppercase;
     color: #9da7b8;
+  }
+  .source-section-count {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 20px;
+    min-width: 22px;
+    padding: 0 7px;
+    border-radius: 999px;
+    border: 1px solid rgba(255,255,255,0.18);
+    background: #111;
+    color: #d5dbe6;
+    font-size: 11px;
+    font-weight: 600;
+  }
+  .source-section-list {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .source-section-title--split {
+    margin-top: 14px;
+    padding-top: 10px;
+    border-top: 1px solid rgba(255,255,255,0.1);
   }
   .source-download-btn {
     border: 1px solid rgba(255,255,255,0.16);
@@ -402,6 +517,50 @@ const SHADOW_CSS = `
     color: #fecaca;
   }
 
+  .studio-toast {
+    margin: 10px 20px 0;
+    border-radius: 10px;
+    border: 1px solid rgba(255,255,255,0.16);
+    background: #0b0b0b;
+    padding: 10px 12px;
+  }
+  .studio-toast--running { border-color: rgba(250,204,21,0.42); background: #120f02; }
+  .studio-toast--success { border-color: rgba(74,222,128,0.45); background: #06120a; }
+  .studio-toast--error { border-color: rgba(248,113,113,0.45); background: #1a0707; }
+  .studio-toast-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    font-size: 12px;
+    font-weight: 600;
+    color: #e8edf7;
+    margin-bottom: 6px;
+  }
+  .studio-toast-msg {
+    font-size: 12px;
+    line-height: 1.5;
+    color: #b9c2d0;
+    margin-bottom: 8px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .studio-toast-track {
+    height: 6px;
+    border-radius: 999px;
+    background: rgba(255,255,255,0.08);
+    overflow: hidden;
+  }
+  .studio-toast-fill {
+    height: 100%;
+    border-radius: inherit;
+    background: #facc15;
+    transition: width 220ms ease;
+  }
+  .studio-toast--success .studio-toast-fill { background: #4ade80; }
+  .studio-toast--error .studio-toast-fill { background: #f87171; }
+
   .footer {
     display: grid;
     grid-template-columns: 240px 1fr;
@@ -477,6 +636,14 @@ const SHADOW_CSS = `
 
 type StudioFormat = "markdown" | "text" | "pdf" | "docx"
 
+type StudioExportToastStatus = "idle" | "running" | "success" | "error"
+
+interface StudioExportToastState {
+  status: StudioExportToastStatus
+  message: string
+  progress: number
+}
+
 interface StudioCacheItem {
   id?: string
   title?: string
@@ -508,6 +675,7 @@ const STUDIO_STORAGE_SYNC_KEY_BASE = "minddock_cached_studio_items_synced_at"
 const ACCOUNT_EMAIL_KEY = "nexus_notebook_account_email"
 const AUTH_USER_KEY = "nexus_auth_user"
 const STUDIO_FETCH_MESSAGE = "MINDDOCK_FETCH_STUDIO_ARTIFACTS"
+const STUDIO_BINARY_FETCH_MESSAGE = "MINDDOCK_FETCH_BINARY_ASSET"
 const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i
 
 function resolveNotebookIdFromUrl(): string | null {
@@ -530,10 +698,11 @@ function collectUuidCandidatesFromElement(el: Element): { id: string; score: num
   for (const attr of attrs) {
     const raw = el.getAttribute(attr)
     if (!raw) continue
-    const matches = raw.match(UUID_RE)
-    if (!matches) continue
+    const matches = raw.match(new RegExp(UUID_RE.source, "gi")) ?? []
+    if (matches.length === 0) continue
 
     const name = attr.toLowerCase()
+    const isAmbiguous = matches.length > 1
     for (const id of matches) {
       let score = 0
       if (name.includes("artifact")) score += 6
@@ -542,6 +711,8 @@ function collectUuidCandidatesFromElement(el: Element): { id: string; score: num
       if (name.includes("id")) score += 2
       if (raw.trim() === id) score += 3
       if (raw.length < 90) score += 1
+      if (isAmbiguous) score -= 6
+      if (raw.length > 220) score -= 2
       candidates.push({ id, score })
     }
   }
@@ -552,17 +723,42 @@ function resolveStudioArtifactIdFromRow(row: HTMLElement): string | null {
   const notebookId = resolveNotebookIdFromUrl()
   const candidates: { id: string; score: number }[] = []
 
-  const push = (el: Element) => {
-    candidates.push(...collectUuidCandidatesFromElement(el))
+  const push = (el: Element, proximityBonus = 0) => {
+    const next = collectUuidCandidatesFromElement(el)
+    next.forEach((candidate) => {
+      candidates.push({ id: candidate.id, score: candidate.score + proximityBonus })
+    })
   }
 
-  push(row)
-  row.querySelectorAll("*").forEach((el) => push(el))
+  push(row, 8)
+  row.querySelectorAll("*").forEach((el) => push(el, 4))
+
+  const owner = row.closest<HTMLElement>("[role='listitem'], li, button, [role='button'], a")
+  if (owner && owner !== row) {
+    push(owner, 6)
+    owner.querySelectorAll("*").forEach((el) => push(el, 2))
+  }
 
   const filtered = candidates.filter((candidate) => candidate.id !== notebookId)
-  filtered.sort((a, b) => b.score - a.score)
+  const bestById = new Map<string, number>()
+  for (const candidate of filtered) {
+    const current = bestById.get(candidate.id) ?? Number.NEGATIVE_INFINITY
+    if (candidate.score > current) {
+      bestById.set(candidate.id, candidate.score)
+    }
+  }
+  const ranked = Array.from(bestById.entries())
+    .map(([id, score]) => ({ id, score }))
+    .sort((a, b) => b.score - a.score)
 
-  return filtered[0]?.id ?? null
+  if (ranked.length === 0) return null
+  if ((ranked[0]?.score ?? 0) < 4) return null
+  if (ranked.length > 1) {
+    const delta = (ranked[0]?.score ?? 0) - (ranked[1]?.score ?? 0)
+    if (delta < 1) return null
+  }
+
+  return ranked[0]?.id ?? null
 }
 
 function collectStudioIdsFromDom(): string[] {
@@ -620,15 +816,7 @@ function resolveRpcContextFromWindow() {
 }
 
 function bgLog(data: unknown) {
-  try {
-    if (!chrome?.runtime?.sendMessage) return
-    chrome.runtime.sendMessage({ type: "BG_LOG", data }, () => {
-      const err = chrome.runtime?.lastError
-      if (err?.message) {
-        console.warn("[BG_LOG][sendMessage error]", err.message)
-      }
-    })
-  } catch {}
+  void data
 }
 
 function toExcerpt(value: unknown, max = 160): string {
@@ -637,7 +825,7 @@ function toExcerpt(value: unknown, max = 160): string {
     .replace(/^#{1,6}\s+/gm, "")
     .replace(/\s+/g, " ")
     .trim()
-  return clean.length > max ? `${clean.slice(0, max).trim()}…` : clean
+  return clean.length > max ? `${clean.slice(0, max).trim()}Ã¢â‚¬Â¦` : clean
 }
 
 async function requestStudioArtifacts(
@@ -700,9 +888,95 @@ async function requestStudioArtifacts(
     response?.data?.items ??
     []
 
-  console.log("[studioUI] items", items.length, items[0])
-
   return Array.isArray(items) ? (items as StudioCacheItem[]) : []
+}
+
+async function requestBackgroundBinaryAsset(
+  url: string,
+  options?: { atToken?: string; authUser?: string | number | null; mode?: "buffer" | "download"; filename?: string }
+): Promise<
+  | { bytes: Uint8Array; mimeType?: string; size?: number }
+  | { downloaded: true; downloadId: number; mimeType?: string; size?: number; filename?: string }
+  | null
+> {
+  console.log("[MindDock][StudioBinaryFetch][CS] request", {
+    url,
+    hasToken: Boolean(options?.atToken),
+    authUser: options?.authUser ?? null,
+    mode: options?.mode ?? "buffer",
+    filename: options?.filename ?? null
+  })
+
+  const response = await new Promise<any>((resolve) => {
+    chrome.runtime.sendMessage(
+      {
+        type: STUDIO_BINARY_FETCH_MESSAGE,
+        payload: {
+          url,
+          atToken: options?.atToken,
+          authUser: options?.authUser,
+          mode: options?.mode,
+          filename: options?.filename
+        },
+        data: {
+          url,
+          atToken: options?.atToken,
+          authUser: options?.authUser,
+          mode: options?.mode,
+          filename: options?.filename
+        }
+      },
+      (resp) => resolve(resp ?? {})
+    )
+  })
+
+  if (!response?.success) {
+    console.warn("[MindDock][StudioBinaryFetch][CS] response-fail", {
+      url,
+      error: response?.error ?? null
+    })
+    return null
+  }
+  const payload = response.payload ?? response.data ?? response
+  if (payload?.downloaded === true) {
+    const downloadId = Number(payload?.downloadId)
+    if (Number.isFinite(downloadId)) {
+      console.log("[MindDock][StudioBinaryFetch][CS] background-direct-download", {
+        url,
+        downloadId,
+        size: typeof payload?.size === "number" ? payload.size : undefined,
+        mimeType: typeof payload?.mimeType === "string" ? payload.mimeType : undefined,
+        filename: typeof payload?.filename === "string" ? payload.filename : undefined
+      })
+      return {
+        downloaded: true,
+        downloadId,
+        size: typeof payload?.size === "number" ? payload.size : undefined,
+        mimeType: typeof payload?.mimeType === "string" ? payload.mimeType : undefined,
+        filename: typeof payload?.filename === "string" ? payload.filename : undefined
+      }
+    }
+  }
+
+  const base64 = String(payload?.bytesBase64 ?? "").trim()
+  if (!base64) {
+    console.warn("[MindDock][StudioBinaryFetch][CS] empty-bytes", { url })
+    return null
+  }
+
+  const bytes = base64ToBytes(base64)
+  const mimeType = typeof payload?.mimeType === "string" ? payload.mimeType : undefined
+  console.log("[MindDock][StudioBinaryFetch][CS] success", {
+    url,
+    size: bytes.byteLength,
+    mimeType: mimeType ?? null
+  })
+
+  return {
+    bytes,
+    mimeType,
+    size: typeof payload?.size === "number" ? payload.size : undefined
+  }
 }
 
 const STUDIO_FORMAT_OPTIONS: Array<{ id: StudioFormat; label: string; sub: string; noTranslate?: boolean }> = [
@@ -713,20 +987,20 @@ const STUDIO_FORMAT_OPTIONS: Array<{ id: StudioFormat; label: string; sub: strin
 ]
 
 const STUDIO_TYPE_LABELS: Record<string, string> = {
-  "1": "Áudio Overview",
+  "1": "ÃƒÂudio Overview",
   "2": "Guia de Estudo",
   "3": "Briefing",
   "4": "Quiz",
-  "5": "Sumário",
+  "5": "SumÃƒÂ¡rio",
   "6": "Mind Map",
   "7": "FAQ",
   "8": "Linha do Tempo",
   "9": "Blog Post",
-  "10": "Infográfico",
+  "10": "InfogrÃƒÂ¡fico",
   "11": "Tabela de Dados",
   "12": "Slides",
   "13": "Flashcards",
-  "14": "Vídeo Overview"
+  "14": "VÃƒÂ­deo Overview"
 }
 
 const STUDIO_ROW_BLOCKLIST = [
@@ -753,7 +1027,7 @@ const STUDIO_CONTENT_BLOCKLIST = [
   "notebooklm"
 ]
 
-const STUDIO_META_PATTERN = /(fontes?|sources?|postagem|guia de estudo|ha\s+\d|há\s+\d|dias?|hours?|horas?|minutos?|mins?)/i
+const STUDIO_META_PATTERN = /(fontes?|sources?|postagem|guia de estudo|ha\s+\d|hÃƒÂ¡\s+\d|dias?|hours?|horas?|minutos?|mins?)/i
 
 const STUDIO_ICON_TOKENS = new Set([
   "audio",
@@ -874,7 +1148,7 @@ function resolveStudioMeta(item: StudioCacheItem): string | undefined {
   if (!parts.length && type) {
     parts.push(type)
   }
-  return parts.length ? parts.join(" • ") : undefined
+  return parts.length ? parts.join(" Ã¢â‚¬Â¢ ") : undefined
 }
 
 function normalizeStudioCacheEntry(item: StudioCacheItem): StudioEntry | null {
@@ -888,8 +1162,12 @@ function normalizeStudioCacheEntry(item: StudioCacheItem): StudioEntry | null {
   const content = normalizeStorageValue(item.content) || undefined
   const url = normalizeStorageValue(item.url) || undefined
   const mimeType = normalizeStorageValue(item.mimeType) || undefined
-  const type = normalizeStorageValue(item.type) || undefined
+  const explicitType = normalizeStorageValue(item.type) || undefined
+  const inferredType = inferTypeFromSignals(title, item.meta, content)
+  const type = explicitType || inferredType
   const kind = item.kind === "asset" || item.kind === "text" ? item.kind : undefined
+  const mimeLooksVisual = /^(video|audio|image)\//iu.test(mimeType ?? "") || mimeType === "application/pdf"
+  const inferredAsset = Boolean((url || mimeType) && (isVisualTypeLabel(type) || mimeLooksVisual))
 
   return {
     id,
@@ -899,7 +1177,7 @@ function normalizeStudioCacheEntry(item: StudioCacheItem): StudioEntry | null {
     type,
     url,
     mimeType,
-    kind: kind ?? (url || mimeType ? "asset" : "text")
+    kind: kind ?? (inferredAsset ? "asset" : "text")
   }
 }
 
@@ -940,10 +1218,7 @@ async function loadStudioEntriesFromStorage(): Promise<{
 
   const normalized = rawItems.map(normalizeStudioCacheEntry).filter(Boolean) as StudioEntry[]
   const safeFiltered = applyStudioFilter(normalized)
-  const debugText = buildStudioDebugText(rawItems, normalized, safeFiltered, usedKey)
-  console.group("[MindDock][Studio][Debug]")
-  console.log(debugText)
-  console.groupEnd()
+  void buildStudioDebugText(rawItems, normalized, safeFiltered, usedKey)
 
   if (usedKey && safeFiltered.length > 0 && safeFiltered.length !== normalized.length) {
     chrome.storage.local.set(
@@ -964,7 +1239,7 @@ function isNoiseLine(line: string): boolean {
   if (!trimmed) {
     return true
   }
-  if (/^[•·•\-|]+$/.test(trimmed)) {
+  if (/^[Ã¢â‚¬Â¢Ã‚Â·Ã¢â‚¬Â¢\-|]+$/.test(trimmed)) {
     return true
   }
   const normalized = normalizeMatchText(trimmed)
@@ -978,7 +1253,7 @@ function isNoiseLine(line: string): boolean {
 }
 
 function cleanStudioTitle(rawTitle: string, meta?: string): string {
-  let title = rawTitle.replace(/[•·|]+/g, " ").replace(/\s+/g, " ").trim()
+  let title = rawTitle.replace(/[Ã¢â‚¬Â¢Ã‚Â·|]+/g, " ").replace(/\s+/g, " ").trim()
   if (meta && title.includes(meta)) {
     title = title.replace(meta, "").trim()
   }
@@ -1106,7 +1381,7 @@ function extractStudioRowInfo(rawText: string): { title: string; meta: string } 
     rawText.match(/\bpostagem\b.*$/i) ??
     rawText.match(/\bguia\s+de\s+estudo\b.*$/i) ??
     rawText.match(/\bha\s+\d+\b.*$/i) ??
-    rawText.match(/\bhá\s+\d+\b.*$/i)
+    rawText.match(/\bhÃƒÂ¡\s+\d+\b.*$/i)
 
   if (!metaMatch || typeof metaMatch.index !== "number") {
     return null
@@ -1114,7 +1389,7 @@ function extractStudioRowInfo(rawText: string): { title: string; meta: string } 
 
   const meta = metaMatch[0].trim()
   const title = cleanStudioTitle(
-    rawText.slice(0, metaMatch.index).replace(/[•·\-\|]+$/u, "").trim(),
+    rawText.slice(0, metaMatch.index).replace(/[Ã¢â‚¬Â¢Ã‚Â·\-\|]+$/u, "").trim(),
     meta
   )
   if (!title || title.length < 4) {
@@ -1239,10 +1514,13 @@ function resolveStudioResultListContainer(): HTMLElement | null {
     let score = 0
     for (const row of rows) {
       const info = extractStudioRowInfoFromElement(row)
-      if (!info) {
-        continue
+      if (info) {
+        score += 1
       }
-      score += 1
+      const rowId = resolveStudioArtifactIdFromRow(row)
+      if (rowId && UUID_RE.test(String(rowId))) {
+        score += 2
+      }
     }
 
     if (score >= 2 && (!best || score > best.score)) {
@@ -1267,7 +1545,7 @@ function pickTitleFromLines(lines: string[]): string {
     .filter((line) => !isIconLabelLine(line))
     .filter((line) => !isTemplateLikeTitle(line))
     .filter((line) => line.length >= 4)
-    .filter((line) => /[A-Za-z\u00c0-\u00ff]/u.test(line))
+    .filter((line) => /\p{L}/u.test(line))
 
   if (candidates.length === 0) {
     return ""
@@ -1275,12 +1553,235 @@ function pickTitleFromLines(lines: string[]): string {
   return candidates.sort((a, b) => b.length - a.length)[0]
 }
 
-function readStudioTitlesFromDom(): StudioEntry[] {
-  const rows = Array.from(
-    document.querySelectorAll(
-      "[data-testid*='studio'], .studio-result-row, .artifact-row, .result-row, [role='listitem']"
+const ICON_TYPE_MAP: Record<string, string> = {
+  audio_magic_eraser: "Audio Overview",
+  subscriptions: "Video Overview",
+  flowchart: "Mind Map",
+  stacked_bar_chart: "Infographic",
+  table_view: "Data Table",
+  table_chart: "Data Table",
+  table_chart_view: "Data Table",
+  table_rows: "Data Table",
+  table_rows_narrow: "Data Table",
+  dataset: "Data Table",
+  table: "Data Table",
+  database: "Data Table",
+  cards_star: "Flashcards",
+  auto_tab_group: "Briefing",
+  tablet: "Slides",
+  quiz: "Quiz",
+  video_audio_call: "Briefing",
+  video_youtube: "Video Overview",
+  drive_presentation: "Slides",
+  drive_pdf: "Data Table",
+  view_timeline: "Timeline",
+  timeline: "Timeline",
+  movie: "Video Overview"
+}
+
+function queryDeepSingle(
+  selector: string,
+  root: Element | Document | ShadowRoot = document
+): HTMLElement | null {
+  const direct = root.querySelector<HTMLElement>(selector)
+  if (direct) return direct
+  for (const el of Array.from(root.querySelectorAll("*"))) {
+    const shadow = (el as HTMLElement).shadowRoot
+    if (shadow) {
+      const found = queryDeepSingle(selector, shadow)
+      if (found) return found
+    }
+  }
+  return null
+}
+
+function queryDeepAllWithin(
+  selectors: readonly string[],
+  root: Element | Document | ShadowRoot
+): HTMLElement[] {
+  const queue: Array<Element | Document | ShadowRoot> = [root]
+  const seenRoots = new Set<Element | Document | ShadowRoot>()
+  const seenElements = new Set<Element>()
+  const out: HTMLElement[] = []
+
+  while (queue.length > 0) {
+    const current = queue.shift()!
+    if (seenRoots.has(current)) continue
+    seenRoots.add(current)
+
+    for (const selector of selectors) {
+      try {
+        const nodes = Array.from(current.querySelectorAll(selector))
+        for (const node of nodes) {
+          if (!(node instanceof HTMLElement)) continue
+          if (seenElements.has(node)) continue
+          seenElements.add(node)
+          out.push(node)
+        }
+      } catch {
+        // ignore invalid selectors
+      }
+    }
+
+    for (const el of Array.from(current.querySelectorAll("*"))) {
+      const shadow = (el as HTMLElement).shadowRoot
+      if (shadow && !seenRoots.has(shadow)) {
+        queue.push(shadow)
+      }
+    }
+  }
+
+  return out
+}
+
+function normalizeIconToken(value: string): string {
+  return String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+}
+
+function inferTypeFromIcon(row: HTMLElement): string | undefined {
+  const iconNodes = queryDeepAllWithin(
+    [
+      "mat-icon.artifact-icon",
+      "mat-icon[class*='artifact']",
+      "mat-icon",
+      ".material-symbols-outlined",
+      "[class*='material-symbols']",
+      "[data-icon]",
+      "[icon-name]"
+    ],
+    row
+  )
+
+  for (const icon of iconNodes) {
+    const candidates = [
+      icon.textContent ?? "",
+      icon.getAttribute("fonticon") ?? "",
+      icon.getAttribute("icon-name") ?? "",
+      icon.getAttribute("data-icon") ?? "",
+      icon.getAttribute("aria-label") ?? "",
+      icon.getAttribute("title") ?? ""
+    ]
+    for (const raw of candidates) {
+      const key = normalizeIconToken(raw)
+      if (!key) continue
+      const mapped = ICON_TYPE_MAP[key]
+      if (mapped) return mapped
+    }
+  }
+
+  return undefined
+}
+
+function resolveTypeFromElementIconContext(element: Element | null): string | undefined {
+  if (!element) return undefined
+
+  const scanNodes: Element[] = []
+  const pushScan = (node: Element | null) => {
+    if (!node) return
+    scanNodes.push(node)
+    scanNodes.push(
+      ...Array.from(
+        node.querySelectorAll(
+          "mat-icon, .material-symbols-outlined, [class*='material-symbols'], [data-icon], [icon-name], [fonticon]"
+        )
+      )
     )
-  ) as HTMLElement[]
+  }
+
+  pushScan(element)
+  let parent = element.parentElement
+  for (let i = 0; i < 4 && parent; i += 1) {
+    pushScan(parent)
+    parent = parent.parentElement
+  }
+
+  for (const node of scanNodes) {
+    if (!(node instanceof HTMLElement)) continue
+    const candidates = [
+      node.textContent ?? "",
+      node.getAttribute("fonticon") ?? "",
+      node.getAttribute("icon-name") ?? "",
+      node.getAttribute("data-icon") ?? "",
+      node.getAttribute("aria-label") ?? "",
+      node.getAttribute("title") ?? ""
+    ]
+    for (const raw of candidates) {
+      const key = normalizeIconToken(raw)
+      if (!key) continue
+      const mapped = ICON_TYPE_MAP[key]
+      if (mapped) return mapped
+    }
+  }
+
+  return undefined
+}
+
+function readStudioTypeHintsByIdFromDom(targetIds: Iterable<string>): Map<string, string> {
+  const ids = new Set<string>()
+  for (const value of targetIds) {
+    const id = String(value ?? "").trim()
+    if (UUID_RE.test(id)) ids.add(id.toLowerCase())
+  }
+  if (ids.size === 0) return new Map()
+
+  const notebookId = (resolveNotebookIdFromUrl() ?? "").toLowerCase()
+  const bestById = new Map<string, { type: string; score: number }>()
+  const allElements = Array.from(document.querySelectorAll("*"))
+
+  for (const element of allElements) {
+    if (!(element instanceof Element)) continue
+
+    const attrNames = element.getAttributeNames?.() ?? []
+    if (attrNames.length === 0) continue
+
+    for (const attr of attrNames) {
+      const raw = element.getAttribute(attr)
+      if (!raw) continue
+
+      const uuidHits = raw.match(new RegExp(UUID_RE.source, "gi")) ?? []
+      if (uuidHits.length !== 1) continue
+
+      const hit = uuidHits[0].toLowerCase()
+      if (!ids.has(hit) || (notebookId && hit === notebookId)) continue
+
+      const mappedType = resolveTypeFromElementIconContext(element)
+      if (!mappedType) continue
+
+      let score = 0
+      const attrKey = attr.toLowerCase()
+      if (attrKey.includes("artifact")) score += 6
+      if (attrKey.includes("result")) score += 4
+      if (attrKey.includes("studio")) score += 3
+      if (attrKey.includes("id")) score += 2
+      if (String(raw).trim().toLowerCase() === hit) score += 2
+      if (isVisibleElement(element as HTMLElement)) score += 1
+      if (normalizeTypeToken(mappedType) === "data table") score += 2
+
+      const current = bestById.get(hit)
+      if (!current || score > current.score) {
+        bestById.set(hit, { type: mappedType, score })
+      }
+    }
+  }
+
+  return new Map(Array.from(bestById.entries()).map(([id, data]) => [id, data.type]))
+}
+
+function readStudioTitlesFromDom(): StudioEntry[] {
+  const root = resolveStudioResultListContainer()
+  if (!root) {
+    return []
+  }
+
+  const rows = queryDeepAll<HTMLElement>(["[role='listitem']", "li[role='listitem']", "li"], root).filter(
+    isVisibleElement
+  )
 
   const entries: StudioEntry[] = []
   const seen = new Set<string>()
@@ -1292,26 +1793,32 @@ function readStudioTitlesFromDom(): StudioEntry[] {
 
     const artifactId = resolveStudioArtifactIdFromRow(row)
 
-    const titleElement =
-      row.querySelector<HTMLElement>("[data-testid*='title'], .title, h3, h4, h5") ?? row
-    const rawTitle = extractVisibleText(titleElement)
-
+    const rowInfo = extractStudioRowInfoFromElement(row)
+    const rawRowText = extractVisibleText(row)
     const metaElement = row.querySelector<HTMLElement>(".meta, .subtitle, [data-testid*='meta']")
-    const meta = metaElement
-      ? extractVisibleText(metaElement)
-      : resolveMetaFromRowText(extractVisibleText(row))
+    const meta =
+      rowInfo?.meta ??
+      (metaElement ? extractVisibleText(metaElement) : resolveMetaFromRowText(rawRowText))
+    const hasMetaSignal = looksLikeStudioMetaSignal(meta)
 
-    let title = cleanStudioTitle(rawTitle, meta)
+    let title = rowInfo?.title ?? ""
     if (!title) {
-      title = rawTitle ? pickTitleFromLines(extractTextLinesFromRow(row)) : ""
+      const titleElement = row.querySelector<HTMLElement>("[data-testid*='title'], .title, h3, h4, h5")
+      const rawTitle = titleElement ? extractVisibleText(titleElement) : ""
+      title = cleanStudioTitle(rawTitle, meta)
+      if (!title) {
+        title = pickTitleFromLines(extractTextLinesFromRow(row))
+      }
     }
 
     const hasTitle = Boolean(title && title.trim().length > 0)
     if (hasTitle) {
       if (/^[a-z_]+$/i.test(title)) continue
       if (isTemplateLikeTitle(title)) continue
+      if (!looksLikeSidebarEntryTitle(title)) continue
     }
 
+    if (!artifactId && !hasMetaSignal) continue
     if (!artifactId && !hasTitle) continue
 
     const key = artifactId ?? `${title.toLowerCase()}::${meta.toLowerCase()}`
@@ -1322,6 +1829,7 @@ function readStudioTitlesFromDom(): StudioEntry[] {
       row.closest<HTMLElement>("[role='listitem'], li") ??
       row.closest<HTMLElement>("button, [role='button'], a") ??
       row
+    const iconType = inferTypeFromIcon(row)
 
     entries.push({
       id:
@@ -1329,15 +1837,258 @@ function readStudioTitlesFromDom(): StudioEntry[] {
         (typeof crypto !== "undefined" && "randomUUID" in crypto
           ? crypto.randomUUID()
           : `studio-dom-${hashString(key)}`),
-      title: hasTitle ? title : "Carregando resultado do Estúdio...",
+      title: hasTitle ? title : "Carregando resultado do Estudio...",
       meta,
-      type: meta,
+      type: iconType ?? meta,
       content: "",
       node: clickable
     })
   }
 
   return entries
+}
+
+function resolveStudioScrollHost(root: HTMLElement): HTMLElement | null {
+  const candidates: HTMLElement[] = [root]
+
+  let parent: HTMLElement | null = root.parentElement
+  for (let i = 0; i < 8 && parent; i += 1) {
+    candidates.push(parent)
+    parent = parent.parentElement
+  }
+
+  candidates.push(...queryDeepAll<HTMLElement>(["div", "section", "main", "aside", "ul", "ol"], root))
+
+  let best: { element: HTMLElement; depth: number } | null = null
+  for (const candidate of candidates) {
+    if (!isVisibleElement(candidate)) continue
+    const style = window.getComputedStyle(candidate)
+    const overflow = `${style.overflowY} ${style.overflow}`
+    if (!/(auto|scroll|overlay)/i.test(overflow)) continue
+    const depth = candidate.scrollHeight - candidate.clientHeight
+    if (depth < 120) continue
+    if (!best || depth > best.depth) {
+      best = { element: candidate, depth }
+    }
+  }
+
+  return best?.element ?? null
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function flushUiFrame(): Promise<void> {
+  return new Promise((resolve) => {
+    window.requestAnimationFrame(() => resolve())
+  })
+}
+
+async function readStudioTitlesByIdFromDomDeep(targetIds: Iterable<string>): Promise<Map<string, string>> {
+  const canonicalByLower = new Map<string, string>()
+  for (const raw of targetIds) {
+    const id = String(raw ?? "").trim()
+    if (!UUID_RE.test(id)) continue
+    canonicalByLower.set(id.toLowerCase(), id)
+  }
+
+  const found = new Map<string, string>()
+  if (canonicalByLower.size === 0) return found
+
+  const resolveCanonical = (value: string): string | null => {
+    const match = String(value ?? "").match(UUID_RE)
+    if (!match) return null
+    const lower = match[0].toLowerCase()
+    return canonicalByLower.get(lower) ?? null
+  }
+
+  const unresolvedLowerIds = (): string[] =>
+    Array.from(canonicalByLower.entries())
+      .filter(([, canonical]) => !found.has(canonical))
+      .map(([lower]) => lower)
+
+  const resolveTitleFromOwner = (owner: HTMLElement | null): string => {
+    if (!owner) return ""
+
+    const info = extractStudioRowInfoFromElement(owner)
+    if (info?.title && looksLikeSidebarEntryTitle(info.title)) {
+      return info.title
+    }
+
+    const fromLines = pickTitleFromLines(extractTextLinesFromRow(owner))
+    if (fromLines && looksLikeSidebarEntryTitle(fromLines)) {
+      return fromLines
+    }
+
+    const raw = extractVisibleText(owner)
+    const lineCandidates = raw
+      .split("\n")
+      .map((line) => cleanStudioTitle(line))
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .filter((line) => !isStudioMetaLine(line))
+      .filter((line) => !isIconLabelLine(line))
+      .filter((line) => !isTemplateLikeTitle(line))
+      .filter((line) => looksLikeSidebarEntryTitle(line))
+
+    return lineCandidates[0] ?? ""
+  }
+
+  const matchIdsInElementByAttributes = (element: Element): string[] => {
+    const matches = new Set<string>()
+    const nodes: Element[] = [element, ...Array.from(element.querySelectorAll("*"))]
+    for (const node of nodes) {
+      const attrs = node.getAttributeNames?.() ?? []
+      for (const attr of attrs) {
+        const value = node.getAttribute(attr)
+        if (!value) continue
+        const idsInValue = value.match(new RegExp(UUID_RE.source, "gi")) ?? []
+        if (idsInValue.length !== 1) {
+          continue
+        }
+        const canonical = resolveCanonical(idsInValue[0])
+        if (canonical) {
+          matches.add(canonical)
+        }
+      }
+    }
+    return Array.from(matches)
+  }
+
+  const collectVisibleRows = (searchRoot?: Element | Document) => {
+    const rows = queryDeepAll<HTMLElement>(
+      ["[role='listitem']", "li[role='listitem']", "li"],
+      searchRoot ?? document
+    ).filter((row) => isVisibleElement(row) && !row.closest("#minddock-studio-export-root"))
+
+    for (const row of rows) {
+      const title = resolveTitleFromOwner(row)
+      if (!title) continue
+
+      const resolvedId = resolveStudioArtifactIdFromRow(row)
+      const canonicalFromRow = resolvedId ? resolveCanonical(resolvedId) : null
+      if (canonicalFromRow) {
+        found.set(canonicalFromRow, title)
+        if (found.size >= canonicalByLower.size) return
+        continue
+      }
+
+      const unresolvedMatches = matchIdsInElementByAttributes(row).filter((id) => !found.has(id))
+      if (unresolvedMatches.length !== 1) continue
+      found.set(unresolvedMatches[0], title)
+      if (found.size >= canonicalByLower.size) return
+    }
+  }
+
+  const scanContainerByAttributes = (container: HTMLElement) => {
+    const unresolved = unresolvedLowerIds()
+    if (unresolved.length === 0) return
+
+    const nodes: Element[] = [container, ...Array.from(container.querySelectorAll("*"))]
+    for (const node of nodes) {
+      const attrs = node.getAttributeNames?.() ?? []
+      if (attrs.length === 0) continue
+
+      for (const attr of attrs) {
+        const value = node.getAttribute(attr)
+        if (!value) continue
+        const idsInValue = value.match(new RegExp(UUID_RE.source, "gi")) ?? []
+        if (idsInValue.length !== 1) continue
+        const canonical = resolveCanonical(idsInValue[0])
+        if (!canonical) continue
+
+        const owner =
+          node.closest<HTMLElement>(
+            "[role='listitem'], li, button, [role='button'], a, article, section, div"
+          ) ?? (node as HTMLElement)
+
+        const ownerResolvedId = resolveStudioArtifactIdFromRow(owner)
+        const ownerCanonicalId = ownerResolvedId ? resolveCanonical(ownerResolvedId) : null
+        if (ownerCanonicalId && ownerCanonicalId !== canonical) {
+          continue
+        }
+
+        const title = resolveTitleFromOwner(owner)
+        if (title) {
+          found.set(canonical, title)
+        }
+      }
+
+      if (found.size >= canonicalByLower.size) return
+    }
+  }
+
+  const root = resolveStudioResultListContainer()
+  if (root) {
+    collectVisibleRows(root)
+  } else {
+    collectVisibleRows(document)
+  }
+
+  if (found.size >= canonicalByLower.size) return found
+  if (root) {
+    scanContainerByAttributes(root)
+  }
+  if (found.size >= canonicalByLower.size) return found
+
+  if (root) {
+    const scrollHost = resolveStudioScrollHost(root)
+    if (scrollHost) {
+      const initialTop = scrollHost.scrollTop
+      const maxTop = Math.max(0, scrollHost.scrollHeight - scrollHost.clientHeight)
+      const step = Math.max(140, Math.floor(scrollHost.clientHeight * 0.8))
+
+      for (let top = 0; top <= maxTop && found.size < canonicalByLower.size; top += step) {
+        scrollHost.scrollTop = top
+        await sleep(80)
+        collectVisibleRows(root)
+        scanContainerByAttributes(root)
+      }
+
+      scrollHost.scrollTop = initialTop
+      await sleep(50)
+      collectVisibleRows(root)
+      scanContainerByAttributes(root)
+    }
+  }
+
+  if (found.size >= canonicalByLower.size) return found
+
+  const globalScrollHosts = queryDeepAll<HTMLElement>(["div", "section", "main", "aside", "ul", "ol"])
+    .filter((candidate) => !candidate.closest("#minddock-studio-export-root"))
+    .filter(isVisibleElement)
+    .map((candidate) => {
+      const style = window.getComputedStyle(candidate)
+      const overflow = `${style.overflowY} ${style.overflow}`
+      const depth = candidate.scrollHeight - candidate.clientHeight
+      const isScrollable = /(auto|scroll|overlay)/i.test(overflow) && depth > 120
+      return isScrollable ? { candidate, depth } : null
+    })
+    .filter(Boolean) as Array<{ candidate: HTMLElement; depth: number }>
+
+  globalScrollHosts.sort((a, b) => b.depth - a.depth)
+  for (const hostInfo of globalScrollHosts.slice(0, 10)) {
+    if (found.size >= canonicalByLower.size) break
+    const host = hostInfo.candidate
+    const hostInitialTop = host.scrollTop
+    const hostMaxTop = Math.max(0, host.scrollHeight - host.clientHeight)
+    const hostStep = Math.max(140, Math.floor(host.clientHeight * 0.8))
+
+    for (let top = 0; top <= hostMaxTop && found.size < canonicalByLower.size; top += hostStep) {
+      host.scrollTop = top
+      await sleep(70)
+      collectVisibleRows(host)
+      scanContainerByAttributes(host)
+    }
+
+    host.scrollTop = hostInitialTop
+    await sleep(40)
+    collectVisibleRows(host)
+    scanContainerByAttributes(host)
+  }
+
+  return found
 }
 
 function resolveStudioEntries(): StudioEntry[] {
@@ -1557,6 +2308,126 @@ function isLikelyContentText(text: string): boolean {
   return maxLength >= 60 || avgLength >= 32
 }
 
+function looksLikeTableStructure(element: HTMLElement, rawText: string): boolean {
+  const cellCount = element.querySelectorAll("th,td,[role='cell'],[role='columnheader']").length
+  const rowCount = element.querySelectorAll("tr,[role='row']").length
+  if (cellCount >= 6 && rowCount >= 2) {
+    return true
+  }
+
+  const lines = rawText
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+  if (lines.length < 6) {
+    return false
+  }
+
+  const normalized = normalizeTypeToken(rawText)
+  const hasTableKeywords = /(pilar|etapa|descricao|ferramentas|visualizacao|fonte|recomendadas)/.test(normalized)
+  const columnLikeLines = lines.filter((line) => /\s{2,}/.test(line)).length
+  return hasTableKeywords && columnLikeLines >= 2
+}
+
+function buildMarkdownTableTextFromRows(rows: string[][]): string | null {
+  const normalizedRows = rows
+    .map((row) => row.map((cell) => normalizeEntryText(cell).replace(/\s+/g, " ").trim()))
+    .filter((row) => row.some((cell) => cell.length > 0))
+  if (normalizedRows.length < 2) return null
+
+  const header = normalizedRows[0]
+  if (header.length < 2) return null
+
+  const width = header.length
+  const bodyRows = normalizedRows.slice(1).map((row) => {
+    const next = row.slice(0, width)
+    while (next.length < width) next.push("")
+    return next
+  })
+  if (bodyRows.length === 0) return null
+
+  const esc = (value: string) => value.replace(/\|/g, "\\|")
+  const lines: string[] = []
+  lines.push(`| ${header.map(esc).join(" | ")} |`)
+  lines.push(`| ${header.map(() => "---").join(" | ")} |`)
+  bodyRows.forEach((row) => {
+    lines.push(`| ${row.map(esc).join(" | ")} |`)
+  })
+  return lines.join("\n").trim()
+}
+
+function extractStructuredTableTextFromElement(element: HTMLElement): string | null {
+  let best = ""
+
+  const nativeTables = Array.from(element.querySelectorAll<HTMLTableElement>("table")).filter((table) =>
+    isVisibleElement(table as unknown as HTMLElement)
+  )
+  for (const table of nativeTables) {
+    const rows = Array.from(table.querySelectorAll<HTMLTableRowElement>("tr"))
+      .map((row) =>
+        Array.from(row.querySelectorAll<HTMLElement>("th,td"))
+          .map((cell) => String(cell.innerText || cell.textContent || ""))
+      )
+      .filter((row) => row.some((cell) => cell.trim().length > 0))
+    const markdown = buildMarkdownTableTextFromRows(rows)
+    if (markdown && markdown.length > best.length) {
+      best = markdown
+    }
+  }
+
+  const roleTables = Array.from(element.querySelectorAll<HTMLElement>("[role='table'], [role='grid']")).filter(
+    isVisibleElement
+  )
+  for (const tableLike of roleTables) {
+    const rows = Array.from(tableLike.querySelectorAll<HTMLElement>("[role='row']"))
+      .map((row) =>
+        Array.from(row.querySelectorAll<HTMLElement>("[role='columnheader'], [role='cell']"))
+          .map((cell) => String(cell.innerText || cell.textContent || ""))
+      )
+      .filter((row) => row.some((cell) => cell.trim().length > 0))
+    const markdown = buildMarkdownTableTextFromRows(rows)
+    if (markdown && markdown.length > best.length) {
+      best = markdown
+    }
+  }
+
+  return best || null
+}
+
+function scoreStudioContentCandidate(value: string): number {
+  const text = String(value ?? "").trim()
+  if (!text || looksLikeUrl(text)) return -1
+
+  let score = text.length
+  const normalized = normalizeTypeToken(text)
+  if (/\|\s*:?-{3,}:?\s*\|/.test(text) || /(pilar|etapa|descricao|ferramentas|visualizacao|fonte)/.test(normalized)) {
+    score += 1800
+  }
+
+  const lines = text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+  if (lines.length >= 12) score += 450
+  if (text.length < 180) score -= 600
+  return score
+}
+
+function pickBestStudioHydratedContent(candidates: Array<string | null | undefined>): string | null {
+  let best: string | null = null
+  let bestScore = -1
+  for (const candidate of candidates) {
+    const text = String(candidate ?? "").trim()
+    if (!text) continue
+    const score = scoreStudioContentCandidate(text)
+    if (score > bestScore) {
+      bestScore = score
+      best = text
+    }
+  }
+  return best
+}
+
 function resolveStudioViewerContent(): string {
   const candidates = queryDeepAll<HTMLElement>([
     ".artifact-content",
@@ -1584,19 +2455,22 @@ function resolveStudioViewerContent(): string {
       continue
     }
 
-    const rawText = normalizeEntryText(candidate.innerText || candidate.textContent || "")
-    if (rawText.length < 200) {
+    const rawTextBase = normalizeEntryText(candidate.innerText || candidate.textContent || "")
+    const tableText = extractStructuredTableTextFromElement(candidate)
+    const rawText = tableText && tableText.length > rawTextBase.length ? tableText : rawTextBase
+    const hasTable = Boolean(tableText) || looksLikeTableStructure(candidate, rawTextBase)
+    if (rawText.length < 200 && !hasTable) {
       continue
     }
     const normalized = normalizeMatchText(rawText)
     if (STUDIO_CONTENT_BLOCKLIST.some((token) => normalized.includes(token))) {
       continue
     }
-    if (!isLikelyContentText(rawText)) {
+    if (!hasTable && !isLikelyContentText(rawText)) {
       continue
     }
 
-    const score = rawText.length + rect.width * 0.5
+    const score = rawText.length + rect.width * 0.5 + (hasTable ? 2200 : 0)
     if (score > bestScore) {
       bestScore = score
       bestText = rawText
@@ -1609,6 +2483,243 @@ function resolveStudioViewerContent(): string {
 function looksLikeFlashcardsEntry(entry: StudioEntry): boolean {
   const haystack = normalizeMatchText(`${entry.title} ${entry.meta ?? ""} ${entry.type ?? ""}`)
   return haystack.includes("flashcard") || haystack.includes("cartao") || haystack.includes("cards")
+}
+
+function clickStudioEntryNode(node: HTMLElement): void {
+  const target =
+    node.closest<HTMLElement>("[role='listitem'], li, button, [role='button'], a") ??
+    node
+  target.click()
+}
+
+function enableNativeSlidesCaptureOnlyMode(ttlMs = 3200): void {
+  const ttl = Number.isFinite(ttlMs) ? Math.max(300, Math.min(10000, Math.trunc(ttlMs))) : 3200
+  try {
+    const globalRecord = window as unknown as Record<string, unknown>
+    globalRecord.__mdNativeDlCaptureOnlyUntil = Date.now() + ttl
+  } catch {}
+
+  try {
+    window.dispatchEvent(
+      new CustomEvent(NATIVE_SLIDES_CAPTURE_ONLY_EVENT, {
+        detail: { ttlMs: ttl }
+      })
+    )
+  } catch {}
+
+  try {
+    window.postMessage(
+      {
+        source: "minddock",
+        type: NATIVE_SLIDES_CAPTURE_ONLY_EVENT,
+        payload: { ttlMs: ttl }
+      },
+      "*"
+    )
+  } catch {}
+}
+
+function clickElementBestEffort(target: HTMLElement): void {
+  try {
+    target.dispatchEvent(
+      new MouseEvent("click", {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        view: window
+      })
+    )
+  } catch {}
+  try {
+    target.click()
+  } catch {}
+}
+
+function isInsideMindDockUi(element: HTMLElement): boolean {
+  if (
+    element.closest(
+      "#minddock-studio-export-root, #minddock-source-actions-root, #minddock-source-filters-root, #minddock-conversation-export-root"
+    )
+  ) {
+    return true
+  }
+
+  const rootNode = element.getRootNode()
+  if (rootNode instanceof ShadowRoot) {
+    const host = rootNode.host as HTMLElement | null
+    if (host?.hasAttribute("data-minddock-shadow-host")) {
+      return true
+    }
+  }
+
+  return false
+}
+
+function isLikelyNotebookViewerControl(element: HTMLElement): boolean {
+  let node: HTMLElement | null = element
+  for (let depth = 0; depth < 8 && node; depth += 1) {
+    const id = String(node.id ?? "").toLowerCase()
+    const cls = typeof node.className === "string" ? node.className.toLowerCase() : ""
+    const testId = String(node.getAttribute("data-testid") ?? "").toLowerCase()
+    const role = String(node.getAttribute("role") ?? "").toLowerCase()
+    const merged = `${id} ${cls} ${testId} ${role}`
+    if (/(artifact|viewer|result|preview|dock_to_right|labs)/.test(merged)) {
+      return true
+    }
+    if (/(minddock|source|fontes)/.test(merged)) {
+      return false
+    }
+    node = node.parentElement
+  }
+  return false
+}
+
+function resolveArtifactLibraryItemByTitle(title: string): HTMLElement | null {
+  const normalizedTitle = normalizeTypeToken(String(title ?? ""))
+  if (!normalizedTitle) return null
+  const normalizedPrefix = normalizedTitle.slice(0, 40)
+  const items = queryDeepAll<HTMLElement>(["artifact-library-item"]).filter(
+    (item) => isVisibleElement(item) && !isInsideMindDockUi(item)
+  )
+
+  let best: { item: HTMLElement; score: number } | null = null
+
+  for (const item of items) {
+    const labelNode = queryDeepAllWithin(
+      [".mdc-button__label", "[class*='artifact-item-label']", "[class*='item-title']"],
+      item
+    ).find((node) => node instanceof HTMLElement && isVisibleElement(node))
+    const rawText = String(labelNode?.innerText || labelNode?.textContent || item.innerText || item.textContent || "")
+    const normalizedText = normalizeTypeToken(rawText)
+    if (!normalizedText) continue
+
+    let score = 0
+    if (normalizedText === normalizedTitle) score += 200
+    if (normalizedText.includes(normalizedTitle)) score += 160
+    if (normalizedTitle.includes(normalizedText)) score += 80
+    if (normalizedPrefix && normalizedText.includes(normalizedPrefix)) score += 70
+    if (normalizedText.includes("slides")) score += 25
+    if (/slides/i.test(String(item.getAttribute("aria-description") ?? ""))) score += 80
+
+    if (score <= 0) continue
+    if (!best || score > best.score) {
+      best = { item, score }
+    }
+  }
+
+  return best?.item ?? null
+}
+
+function resolveMoreVertButtonForItem(item: HTMLElement): HTMLElement | null {
+  const iconNodes = queryDeepAllWithin(
+    ["mat-icon", ".material-icons", "[class*='material-symbols']", "[class*='google-symbols']"],
+    item
+  )
+
+  for (const icon of iconNodes) {
+    const token = String(icon.textContent ?? "").trim()
+    if (token !== "more_vert") continue
+    const button = icon.closest<HTMLElement>("button, [role='button']")
+    if (button && isVisibleElement(button) && !isInsideMindDockUi(button)) {
+      return button
+    }
+  }
+
+  return null
+}
+
+function resolvePdfMenuButton(): HTMLElement | null {
+  const menuPanels = queryDeepAll<HTMLElement>([".mat-mdc-menu-panel", ".mat-menu-panel", "[role='menu']"]).filter(
+    (panel) => isVisibleElement(panel) && !isInsideMindDockUi(panel)
+  )
+
+  for (const panel of menuPanels) {
+    const buttons = queryDeepAllWithin(
+      ["button[role='menuitem']", "[mat-menu-item]", "button", "[role='menuitem']"],
+      panel
+    ).filter((button) => button instanceof HTMLElement && isVisibleElement(button))
+
+    for (const button of buttons) {
+      if (isInsideMindDockUi(button)) continue
+      const icons = queryDeepAllWithin(
+        ["mat-icon", ".material-icons", "[class*='material-symbols']", "[class*='google-symbols']"],
+        button
+      )
+      for (const icon of icons) {
+        const token = String(icon.textContent ?? "").trim()
+        if (token === "picture_as_pdf") {
+          return button
+        }
+      }
+    }
+  }
+
+  return null
+}
+
+function resolveNativeSlidesDownloadTrigger(entryTitle: string): HTMLElement | null {
+  const item = resolveArtifactLibraryItemByTitle(entryTitle)
+  if (!item) return null
+  return resolveMoreVertButtonForItem(item)
+}
+
+function resolveStudioLiveNodeById(id: string): HTMLElement | null {
+  if (!UUID_RE.test(String(id))) return null
+  const liveEntry = readStudioTitlesFromDom().find((entry) => String(entry.id) === String(id))
+  return (liveEntry?.node as HTMLElement | undefined) ?? null
+}
+
+async function captureNativeSlidesPdfUrlForEntry(entry: StudioEntry, timeoutMs = 2200): Promise<boolean> {
+  const targetNode =
+    (entry.node instanceof HTMLElement && entry.node.isConnected ? entry.node : null) ??
+    resolveStudioLiveNodeById(String(entry.id ?? ""))
+
+  if (targetNode) {
+    const previousViewerContent = resolveStudioViewerContent()
+    clickStudioEntryNode(targetNode)
+    await sleep(120)
+    await waitForStudioContentUpdate(previousViewerContent, 900)
+  }
+
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const moreButton = resolveNativeSlidesDownloadTrigger(String(entry.title ?? ""))
+    if (!moreButton) {
+      await sleep(180)
+      continue
+    }
+
+    enableNativeSlidesCaptureOnlyMode(timeoutMs + 1200)
+    clickElementBestEffort(moreButton)
+
+    const menuDeadline = Date.now() + 3200
+    let pdfButton: HTMLElement | null = null
+    while (Date.now() < menuDeadline) {
+      pdfButton = resolvePdfMenuButton()
+      if (pdfButton) break
+      await sleep(90)
+    }
+
+    if (!pdfButton) {
+      await sleep(160)
+      continue
+    }
+
+    enableNativeSlidesCaptureOnlyMode(timeoutMs + 1200)
+    pdfButton.addEventListener(
+      "click",
+      (event) => {
+        event.preventDefault()
+        event.stopPropagation()
+        event.stopImmediatePropagation()
+      },
+      { once: true, capture: true }
+    )
+    clickElementBestEffort(pdfButton)
+    await sleep(220)
+    return true
+  }
+
+  return false
 }
 
 function scrapeOpenNoteContent(): { title: string; content: string } | null {
@@ -1772,8 +2883,438 @@ function looksLikeUrl(value: string): boolean {
   return /^https?:\/\//iu.test(value) || value.startsWith("//")
 }
 
+function normalizeAssetUrl(value: string): string {
+  const trimmed = String(value ?? "").trim().replace(/\\\//g, "/")
+  if (!trimmed) return ""
+  if (trimmed.startsWith("//")) return `https:${trimmed}`
+  if (trimmed.startsWith("/")) {
+    try {
+      return new URL(trimmed, window.location.origin).toString()
+    } catch {
+      return trimmed
+    }
+  }
+  return trimmed
+}
+
+const TELEMETRY_HOST_PATTERNS = [
+  /(^|\.)play\.google\.com$/i,
+  /(^|\.)analytics\.google\.com$/i,
+  /(^|\.)google-analytics\.com$/i,
+  /(^|\.)doubleclick\.net$/i,
+  /(^|\.)googletagmanager\.com$/i,
+  /(^|\.)googlesyndication\.com$/i
+]
+
+function isBlockedTelemetryUrl(value: string): boolean {
+  const normalized = normalizeAssetUrl(value)
+  if (!looksLikeUrl(normalized)) return true
+
+  try {
+    const parsed = new URL(normalized)
+    const host = parsed.hostname.toLowerCase()
+    const path = parsed.pathname.toLowerCase()
+    const full = `${host}${path}${parsed.search}`.toLowerCase()
+
+    if (TELEMETRY_HOST_PATTERNS.some((pattern) => pattern.test(host))) return true
+    if (host === "play.google.com" && path.startsWith("/log")) return true
+    if (path.includes("/collect") || path.includes("/log")) {
+      if (host.includes("google") || host.includes("analytics") || host.includes("doubleclick")) return true
+    }
+    if (full.includes("serviceLogin?continue=") || full.includes("accounts.google.com/servicelogin")) return true
+
+    return false
+  } catch {
+    return true
+  }
+}
+
+function hasStrongAssetSignal(url: string): boolean {
+  const lower = String(url ?? "").toLowerCase()
+  if (!lower) return false
+  if (/\.(pdf|png|jpe?g|webp|gif|mp4|webm|mov|mp3|wav|ogg)(?:[?#]|$)/i.test(lower)) return true
+  if (/(?:^|[?&])mime=(application\/pdf|image\/|video\/|audio\/)/i.test(lower)) return true
+  if (/application%2fpdf|video%2f|audio%2f|image%2f/i.test(lower)) return true
+  if (/(?:^|[?&])(alt=media|download=|response-content-type=)/i.test(lower)) return true
+  if (/googleusercontent\.com|googlevideo\.com|\/notebooklm\/|\/rd-notebook\//i.test(lower)) return true
+  return false
+}
+
+function isLikelySlidesAssetCandidateUrl(url: string): boolean {
+  const normalized = normalizeAssetUrl(url)
+  if (isBlockedTelemetryUrl(normalized)) return false
+  if (hasStrongAssetSignal(normalized)) return true
+  const lower = normalized.toLowerCase()
+  if (/slides?|presentation|deck|drive_presentation|tablet/i.test(lower)) return true
+  return false
+}
+
+function resolveEntryAssetUrl(entry: Pick<StudioEntry, "url" | "content">): string | undefined {
+  const candidates: string[] = []
+  const push = (value?: string) => {
+    const normalized = normalizeAssetUrl(String(value ?? ""))
+    if (normalized && !isBlockedTelemetryUrl(normalized)) candidates.push(normalized)
+  }
+
+  push(entry.url ?? "")
+
+  const rawContent = String(entry.content ?? "").trim()
+  if (!rawContent) {
+    return candidates.find((value) => looksLikeUrl(value))
+  }
+
+  push(rawContent)
+
+  const uriMatch = rawContent.match(/"(?:url|uri)"\s*:\s*"([^"]+)"/i)
+  if (uriMatch?.[1]) {
+    push(uriMatch[1])
+  }
+
+  const rawMatches = rawContent.match(/(?:https?:\/\/|\/\/)[^\s"'<>]+/gi) ?? []
+  rawMatches.forEach((match) => push(match))
+
+  const escapedMatches = rawContent.match(/https?:\\\/\\\/[^\s"'<>]+/gi) ?? []
+  escapedMatches.forEach((match) => push(match.replace(/\\\//g, "/")))
+
+  const unique = Array.from(new Set(candidates))
+  const mediaFirst = unique.find((value) => looksLikeUrl(value) && isDownloadableAssetUrl(value))
+  if (mediaFirst) return mediaFirst
+
+  const anyUrl = unique.find((value) => looksLikeUrl(value) && !isBlockedTelemetryUrl(value))
+  if (anyUrl) return anyUrl
+
+  return undefined
+}
+
+function isPdfSignature(bytes: Uint8Array): boolean {
+  return (
+    bytes.length >= 5 &&
+    bytes[0] === 0x25 &&
+    bytes[1] === 0x50 &&
+    bytes[2] === 0x44 &&
+    bytes[3] === 0x46 &&
+    bytes[4] === 0x2d
+  )
+}
+
+function normalizeFetchedMimeType(value?: string): string {
+  return String(value ?? "")
+    .toLowerCase()
+    .split(";")[0]
+    .trim()
+    .replace(/^"+|"+$/g, "")
+}
+
+function normalizeTypeToken(value?: string): string {
+  const base = String(value ?? "").trim().toLowerCase()
+  if (!base) return ""
+  return base.normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+}
+
+function isSlidesLikeEntryType(type?: string): boolean {
+  const token = normalizeTypeToken(type)
+  if (!token) return false
+  return (
+    token === "8" ||
+    token === "12" ||
+    token === "slides" ||
+    token === "tablet" ||
+    token === "timeline" ||
+    token === "linha do tempo" ||
+    token === "apresentacao" ||
+    token === "apresentacao de slides"
+  )
+}
+
+const EXCLUDED_TYPE_CODES = new Set(["4", "11", "13"])
+const EXCLUDED_TYPE_TOKENS = new Set([
+  "quiz",
+  "data table",
+  "tabela de dados",
+  "flashcards",
+  "flashcard"
+])
+const HARD_BLOCKED_STUDIO_TITLE_PATTERNS: RegExp[] = [
+  /\bmetodos?\s+e\s+ferramentas\b.*\blanding\s+pages\b.*\bcom\s+ia\b/i
+]
+
+function isExcludedTypeValue(value?: string): boolean {
+  const raw = String(value ?? "").trim()
+  if (!raw) return false
+  if (EXCLUDED_FROM_EXPORT.has(raw)) return true
+  if (EXCLUDED_TYPE_CODES.has(raw)) return true
+
+  const normalized = normalizeTypeToken(raw)
+  if (EXCLUDED_TYPE_TOKENS.has(normalized)) return true
+
+  const mapped = STUDIO_TYPE_LABELS[raw]
+  if (mapped && EXCLUDED_TYPE_TOKENS.has(normalizeTypeToken(mapped))) {
+    return true
+  }
+  return false
+}
+
+function isHardBlockedStudioTitle(title?: string): boolean {
+  const normalizedTitle = normalizeTypeToken(title)
+  if (!normalizedTitle) return false
+  return HARD_BLOCKED_STUDIO_TITLE_PATTERNS.some((pattern) => pattern.test(normalizedTitle))
+}
+
+const KNOWN_STUDIO_TYPE_TOKENS = new Set([
+  "audio overview",
+  "video overview",
+  "mind map",
+  "timeline",
+  "linha do tempo",
+  "briefing",
+  "faq",
+  "sumario",
+  "slides",
+  "infographic",
+  "infografico",
+  "blog post",
+  "study guide",
+  "guia de estudo",
+  "data table",
+  "tabela de dados",
+  "quiz",
+  "flashcards",
+  "flashcard"
+])
+
+function isKnownStudioTypeValue(value?: string): boolean {
+  const raw = String(value ?? "").trim()
+  if (!raw) return false
+  if (STUDIO_TYPE_LABELS[raw]) return true
+  if (isExcludedTypeValue(raw)) return true
+  if (isVisualTypeCode(raw) || isVisualTypeLabel(raw)) return true
+
+  const normalized = normalizeTypeToken(raw)
+  if (!normalized) return false
+  return KNOWN_STUDIO_TYPE_TOKENS.has(normalized)
+}
+
+function resolvePreferredType(existingType?: string, incomingType?: string): string | undefined {
+  const existing = String(existingType ?? "").trim()
+  const incoming = String(incomingType ?? "").trim()
+  if (!existing) return incoming || undefined
+  if (!incoming) return existing || undefined
+
+  const existingStrong = isKnownStudioTypeValue(existing)
+  const incomingStrong = isKnownStudioTypeValue(incoming)
+  if (!existingStrong && incomingStrong) return incoming
+  if (existingStrong && !incomingStrong) return existing
+  if (!existingStrong && !incomingStrong) return incoming
+
+  const existingExcluded = isExcludedTypeValue(existing)
+  const incomingExcluded = isExcludedTypeValue(incoming)
+  const existingVisual = isVisualTypeCode(existing) || isVisualTypeLabel(existing)
+  const incomingVisual = isVisualTypeCode(incoming) || isVisualTypeLabel(incoming)
+  if (existingExcluded !== incomingExcluded) {
+    // Se o tipo novo e visual valido (ex: Slides), ele deve destravar
+    // classificacoes antigas excluidas/ruins.
+    if (!incomingExcluded && incomingVisual) return incoming
+    if (!existingExcluded && existingVisual) return existing
+    return incomingExcluded ? incoming : existing
+  }
+
+  if (existingVisual !== incomingVisual) {
+    return incoming
+  }
+
+  const existingNumeric = /^\d+$/.test(existing)
+  const incomingNumeric = /^\d+$/.test(incoming)
+  if (existingNumeric !== incomingNumeric) {
+    return incomingNumeric ? incoming : existing
+  }
+
+  return incoming
+}
+
+function looksLikeDataTableContent(value?: string): boolean {
+  const text = normalizeEntryText(String(value ?? ""))
+  if (!text || text.length < 120) return false
+
+  const markdownTablePattern =
+    /\n\|\s*[^|\n]+(\|\s*[^|\n]+)+\s*\|\n\|\s*:?-{3,}:?(\s*\|\s*:?-{3,}:?)+\s*\|/u
+  if (markdownTablePattern.test(`\n${text}`)) {
+    return true
+  }
+
+  const lines = text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(0, 80)
+  if (lines.length < 4) return false
+
+  let structuredLines = 0
+  for (const line of lines) {
+    const byPipe = line.split("|").map((part) => part.trim()).filter(Boolean).length
+    const byTab = line.split("\t").map((part) => part.trim()).filter(Boolean).length
+    const byGap = line.split(/\s{2,}/u).map((part) => part.trim()).filter(Boolean).length
+    const cells = Math.max(byPipe, byTab, byGap)
+    if (cells >= 4) {
+      structuredLines += 1
+    }
+  }
+
+  if (structuredLines >= 3) {
+    return true
+  }
+
+  const normalized = normalizeTypeToken(text)
+  const tableKeywords = [
+    "pilar",
+    "etapa",
+    "descricao",
+    "ferramentas",
+    "visualizacao",
+    "fonte",
+    "categoria",
+    "indicador",
+    "metrica",
+    "coluna"
+  ]
+  const keywordHits = tableKeywords.reduce(
+    (count, keyword) => count + (normalized.includes(keyword) ? 1 : 0),
+    0
+  )
+  return keywordHits >= 3 && structuredLines >= 2
+}
+
+function isExcludedStudioEntry(entry: Pick<StudioEntry, "type" | "title" | "meta" | "content">): boolean {
+  if (isHardBlockedStudioTitle(entry.title)) return true
+  const explicitType = String(entry.type ?? "").trim()
+  if (explicitType) {
+    if (isExcludedTypeValue(explicitType)) return true
+    // Alguns Data Table chegam como Blog Post (type=9). SÃƒÂ³ nesse caso aplicamos
+    // a heurÃƒÂ­stica por conteÃƒÂºdo para evitar falso positivo em Guia de Estudo.
+    const normalizedType = normalizeTypeToken(explicitType)
+    const mappedType = normalizeTypeToken(STUDIO_TYPE_LABELS[explicitType] ?? "")
+    const isBlogPostLike =
+      explicitType === "9" ||
+      normalizedType === "blog post" ||
+      mappedType === "blog post"
+    if (isBlogPostLike && looksLikeDataTableContent(entry.content)) return true
+    return false
+  }
+
+  // Sem tipo explÃƒÂ­cito, usa apenas tÃƒÂ­tulo/meta (nunca conteÃƒÂºdo) para evitar
+  // falso positivo em documentos longos.
+  const titleMeta = normalizeTypeToken(`${entry.title ?? ""} ${entry.meta ?? ""}`)
+  if (/data table|tabela de dados/.test(titleMeta)) return true
+  if (/quiz/.test(titleMeta)) return true
+  if (/flashcard|cartao|cartoes/.test(titleMeta)) return true
+  return false
+}
+
+function inferTypeFromSignals(title?: string, meta?: string, content?: string): string | undefined {
+  const haystack = normalizeTypeToken(`${title ?? ""} ${meta ?? ""} ${content ?? ""}`)
+  if (!haystack) return undefined
+  if (/quiz|answer key|glossary/.test(haystack)) return "Quiz"
+  if (/flashcard|cartao|cartoes/.test(haystack)) return "Flashcards"
+  if (/data table|tabela de dados/.test(haystack)) return "Data Table"
+  if (/mind map|mapa mental/.test(haystack)) return "Mind Map"
+  if (/video overview/.test(haystack)) return "Video Overview"
+  if (/audio overview/.test(haystack)) return "Audio Overview"
+  if (/slides?/.test(haystack)) return "Slides"
+  if (/infograph|infograf/.test(haystack)) return "Infographic"
+  return undefined
+}
+
+const VISUAL_TYPE_CODES = new Set(["1", "3", "5", "6", "7", "8", "10", "12", "14"])
+
+function isVisualTypeCode(type?: string): boolean {
+  const token = String(type ?? "").trim()
+  if (!token) return false
+  return VISUAL_TYPE_CODES.has(token)
+}
+
+function isVisualTypeLabel(type?: string): boolean {
+  const normalized = normalizeTypeToken(type)
+  if (!normalized) return false
+  return (
+    normalized === "video overview" ||
+    normalized === "audio overview" ||
+    normalized === "slides" ||
+    normalized === "infographic" ||
+    normalized === "mind map" ||
+    normalized === "infografico" ||
+    normalized === "mapa mental" ||
+    normalized === "briefing" ||
+    normalized === "timeline" ||
+    normalized === "linha do tempo" ||
+    normalized === "sumario"
+  )
+}
+
+function isVisualAssetEntry(entry: StudioEntry): boolean {
+  const kind = String(entry.kind ?? "").trim().toLowerCase()
+  const mime = String(entry.mimeType ?? "").trim().toLowerCase()
+  const type = normalizeTypeToken(entry.type)
+  const contentText = typeof entry.content === "string" ? entry.content.trim() : ""
+
+  const assetUrl =
+    resolveEntryAssetUrl(entry) ||
+    (typeof entry.url === "string" ? entry.url : "") ||
+    (typeof entry.content === "string" ? entry.content : "")
+
+  const hasUrl = /^(https?:)?\/\//i.test(assetUrl)
+  const hasVisualUrl = isDownloadableAssetUrl(assetUrl)
+  const isVisualMime = /^(video|audio|image)\//u.test(mime) || mime === "application/pdf"
+  const isVisualType = isVisualTypeLabel(type)
+  const isVisualCode = isVisualTypeCode(entry.type)
+
+  if (hasVisualUrl) return true
+  if (hasUrl && (kind === "asset" || !contentText || looksLikeUrl(contentText))) return true
+  if (kind === "asset") return hasUrl || isVisualMime || isVisualType || isVisualCode
+  if (isVisualMime || isVisualType || isVisualCode) return true
+  return false
+}
+
+function shouldTreatEntryAsAssetForExport(entry: StudioEntry): boolean {
+  if (isVisualAssetEntry(entry)) return true
+  const assetUrl = resolveEntryAssetUrl(entry)
+  if (!assetUrl) return false
+
+  const contentText = typeof entry.content === "string" ? entry.content.trim() : ""
+  const kind = String(entry.kind ?? "").trim().toLowerCase()
+
+  if (kind === "asset") return true
+  if (isDownloadableAssetUrl(assetUrl)) return true
+  if (!contentText || looksLikeUrl(contentText)) return true
+  return false
+}
+
+function isStudioLoadingTitle(title?: string): boolean {
+  const normalized = normalizeTypeToken(title)
+  if (!normalized) return true
+  return normalized.includes("carregando resultado do estudio")
+}
+
+function shouldApplyDeepProbeTitle(entry: StudioEntry, nextTitle: string): boolean {
+  const candidate = String(nextTitle ?? "").trim()
+  if (!candidate || !looksLikeSidebarEntryTitle(candidate)) {
+    return false
+  }
+  if (candidate === entry.title) {
+    return false
+  }
+  if (isStudioLoadingTitle(entry.title)) {
+    return true
+  }
+  if (isVisualAssetEntry(entry)) {
+    return true
+  }
+  if (isVisualTypeCode(entry.type)) {
+    return true
+  }
+  return false
+}
+
 async function downloadAssetEntry(entry: StudioEntry): Promise<void> {
-  const url = entry.url || (looksLikeUrl(entry.content ?? "") ? entry.content : undefined)
+  const url = resolveEntryAssetUrl(entry)
   if (!url) return
   const ext = resolveFileExtension(entry.type ?? "", url)
   const filename = `${String(entry.title ?? "studio").replace(/[^a-z0-9]/gi, "_")}.${ext}`
@@ -1809,7 +3350,7 @@ async function downloadAssetEntries(entries: StudioEntry[]): Promise<void> {
   if (entries.length === 0) return
   const usedNames = new Set<string>()
   for (const entry of entries) {
-    const url = entry.url || (looksLikeUrl(entry.content ?? "") ? entry.content : undefined)
+    const url = resolveEntryAssetUrl(entry)
     if (!url) continue
     const base = buildMindDuckFilenameBase("Studio", entry.title)
     const extension = resolveAssetExtension(entry)
@@ -1836,8 +3377,8 @@ function buildStudioEntryBlock(
   const lines: string[] = []
   const isLoading = Boolean(options?.isLoading)
 
-  const isVisual = VISUAL_TYPES.has(entry.type ?? "")
-  const isExcluded = EXCLUDED_FROM_EXPORT.has(entry.type ?? "")
+  const isVisual = isVisualAssetEntry(entry)
+  const isExcluded = isExcludedStudioEntry(entry)
 
   if (isVisual || isExcluded) return ""
 
@@ -1856,10 +3397,10 @@ function buildStudioEntryBlock(
     lines.push(contentText)
   } else if (isLoading) {
     lines.push("")
-    lines.push("(carregando conteúdo...)")
+    lines.push("(carregando conteÃƒÂºdo...)")
   } else {
     lines.push("")
-    lines.push("(sem conteúdo carregado)")
+    lines.push("(sem conteÃƒÂºdo carregado)")
   }
 
   return lines.join("\n").trim()
@@ -1948,6 +3489,54 @@ async function buildPdfBytesViaBackground(text: string): Promise<Uint8Array> {
   return base64ToBytes(base64)
 }
 
+async function imageBlobToPdfBlob(imageBlob: Blob): Promise<Blob> {
+  const obj = URL.createObjectURL(imageBlob)
+  try {
+    const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const el = new Image()
+      el.onload = () => resolve(el)
+      el.onerror = () => reject(new Error("image decode failed"))
+      el.src = obj
+    })
+
+    const width = image.naturalWidth || image.width || 1
+    const height = image.naturalHeight || image.height || 1
+
+    const canvas = document.createElement("canvas")
+    canvas.width = width
+    canvas.height = height
+    const ctx = canvas.getContext("2d")
+    if (!ctx) throw new Error("canvas context unavailable")
+    ctx.fillStyle = "#ffffff"
+    ctx.fillRect(0, 0, width, height)
+    ctx.drawImage(image, 0, 0, width, height)
+    const jpgDataUrl = canvas.toDataURL("image/jpeg", 0.92)
+
+    const pxToPt = 72 / 96
+    const pageWidthPt = width * pxToPt
+    const pageHeightPt = height * pxToPt
+
+    const pdf = new jsPDF({
+      orientation: pageWidthPt >= pageHeightPt ? "l" : "p",
+      unit: "pt",
+      format: [pageWidthPt, pageHeightPt],
+      compress: true
+    })
+
+    pdf.addImage(jpgDataUrl, "JPEG", 0, 0, pageWidthPt, pageHeightPt, undefined, "FAST")
+    return pdf.output("blob")
+  } finally {
+    URL.revokeObjectURL(obj)
+  }
+}
+
+async function buildPdfBytesFromImageBytes(bytes: Uint8Array, mimeType?: string): Promise<Uint8Array> {
+  const safeMime = String(mimeType ?? "").toLowerCase().startsWith("image/") ? String(mimeType) : "image/png"
+  const blob = new Blob([toArrayBuffer(bytes)], { type: safeMime })
+  const pdfBlob = await imageBlobToPdfBlob(blob)
+  return new Uint8Array(await pdfBlob.arrayBuffer())
+}
+
 function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer
 }
@@ -1986,11 +3575,24 @@ function isDownloadableAssetUrl(value: string | undefined): boolean {
   if (!value) {
     return false
   }
+  if (isBlockedTelemetryUrl(value)) {
+    return false
+  }
   const lower = value.toLowerCase()
+  if (lower.startsWith("//")) {
+    return isDownloadableAssetUrl(`https:${lower}`)
+  }
   if (/\.(png|jpe?g|gif|webp|svg|mp3|wav|ogg|m4a|aac|flac|mp4|mkv|webm|mov|avi|pdf)(\?|#|$)/u.test(lower)) {
     return true
   }
   if (lower.includes("alt=media") || lower.includes("download=")) {
+    return true
+  }
+  if (
+    /googleusercontent\.com|=m22\b|=m140\b|video%2f(mp4|webm)|audio%2f(mp4|mpeg|mp3)|application%2fpdf|\/video\/|\/audio\/|\/image\//u.test(
+      lower
+    )
+  ) {
     return true
   }
   return false
@@ -2001,7 +3603,7 @@ const CHAT_SIGNAL_PHRASES = [
   "create a detailed briefing document",
   "include quotes from the original",
   "designed to address this topic",
-  "inclua citações",
+  "inclua citaÃƒÂ§ÃƒÂµes",
   "crie um briefing detalhado",
   "responda a esta pergunta"
 ]
@@ -2014,7 +3616,7 @@ const STUDIO_TEMPLATE_BLOCKLIST = [
   "mind map",
   "infographic",
   "infografico",
-  "infográfico"
+  "infogrÃƒÂ¡fico"
 ]
 
 function isTemplateLikeTitle(title: string): boolean {
@@ -2023,6 +3625,22 @@ function isTemplateLikeTitle(title: string): boolean {
     return false
   }
   return STUDIO_TEMPLATE_BLOCKLIST.some((template) => normalized.includes(template))
+}
+
+function looksLikeSidebarEntryTitle(value: string): boolean {
+  const title = String(value ?? "").trim()
+  if (!title) return false
+  if (title.length < 4 || title.length > 120) return false
+  if (/^[a-z]{2}[_-][a-z]{2}$/i.test(title)) return false
+  if (!/\p{L}/u.test(title)) return false
+  if (/^[\d\s).:-]+$/u.test(title)) return false
+
+  const words = title.split(/\s+/u).filter(Boolean)
+  if (words.length > 14) return false
+  if (/[.!?]\s/u.test(title)) return false
+  if (/,\s/u.test(title) && words.length > 8) return false
+
+  return true
 }
 
 const MAX_STUDIO_JSON_DEPTH = 4
@@ -2099,7 +3717,7 @@ function isValidStudioEntry(entry: StudioEntry): boolean {
   const metaKey = metaValue.toLowerCase()
   const UUID_RE_VALIDATE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
-  // Itens com UUID real vieram do gArtLc — título já é confiável
+  // Itens com UUID real vieram do gArtLc Ã¢â‚¬â€ tÃƒÂ­tulo jÃƒÂ¡ ÃƒÂ© confiÃƒÂ¡vel
   if (UUID_RE_VALIDATE.test(entry.id ?? "")) {
     return String(entry.title ?? "").trim().length >= 3
   }
@@ -2107,7 +3725,7 @@ function isValidStudioEntry(entry: StudioEntry): boolean {
   const hasMeta = metaValue.length > 0 && !STUDIO_INVALID_META.has(metaKey) && looksLikeStudioMetaSignal(metaValue)
   const contentValue = entry.content?.trim() ?? ""
   const hasContent = contentValue.length > 0
-  const hasAsset = entry.kind === "asset" && isDownloadableAssetUrl(entry.url)
+  const hasAsset = isVisualAssetEntry(entry)
   if (!hasMeta && !hasAsset && !hasContent) {
     return false
   }
@@ -2154,7 +3772,7 @@ function describeInvalidStudioEntry(entry: StudioEntry): string {
   const hasType = Boolean(entry.type && entry.type.trim())
   const contentValue = entry.content?.trim() ?? ""
   const hasContent = contentValue.length > 0
-  const hasAsset = entry.kind === "asset" && isDownloadableAssetUrl(entry.url)
+  const hasAsset = isVisualAssetEntry(entry)
   if (!hasMeta && !hasAsset && !hasContent) {
     return "no-signal"
   }
@@ -2216,10 +3834,7 @@ function buildStudioDebugText(
 }
 
 function extensionFromMime(mimeType?: string): string | null {
-  const normalized = String(mimeType ?? "").toLowerCase()
-  if (!normalized) {
-    return null
-  }
+  const mime = String(mimeType ?? "").toLowerCase().split(";")[0].trim()
   const mapping: Record<string, string> = {
     "application/pdf": "pdf",
     "image/png": "png",
@@ -2235,14 +3850,31 @@ function extensionFromMime(mimeType?: string): string | null {
     "video/webm": "webm",
     "video/quicktime": "mov"
   }
-  return mapping[normalized] ?? null
+  return mapping[mime] ?? null
 }
 
-function resolveAssetExtension(entry: StudioEntry): string {
-  const urlExt = extractExtensionFromUrl(entry.url ?? "")
+function resolveAssetExtension(entry: StudioEntry, assetUrl?: string, fetchedMimeType?: string): string {
+  const u = normalizeAssetUrl(assetUrl ?? resolveEntryAssetUrl(entry) ?? "")
+  const slidesLike = isSlidesLikeEntryType(entry.type)
+  if (slidesLike) return "pdf"
+  const urlExt = extractExtensionFromUrl(u)
   if (urlExt) return urlExt
 
-  const mimeExt = extensionFromMime(entry.mimeType)
+  const lowerUrl = u.toLowerCase()
+  if (/googlevideo\.com|videoplayback|(?:^|[?&])mime=video\//i.test(lowerUrl) || /=m22|=m18|=m137|=m136|=m135/i.test(lowerUrl)) {
+    return "mp4"
+  }
+  if (/(?:^|[?&])mime=audio\//i.test(lowerUrl) || /=m140|=m141|=m4a/i.test(lowerUrl)) {
+    return "mp4"
+  }
+  if (/(?:^|[?&])mime=image\//i.test(lowerUrl)) {
+    return "png"
+  }
+  if (/(?:^|[?&])mime=application\/pdf/i.test(lowerUrl) || lowerUrl.includes("application%2fpdf")) {
+    return "pdf"
+  }
+
+  const mimeExt = extensionFromMime(fetchedMimeType) ?? extensionFromMime(entry.mimeType)
   if (mimeExt) return mimeExt
 
   const type = String(entry.type ?? "").toLowerCase()
@@ -2251,7 +3883,6 @@ function resolveAssetExtension(entry: StudioEntry): string {
   if (type.includes("mind map")) return "png"
   if (type.includes("audio")) return "mp4"
   if (type.includes("video")) return "mp4"
-
   return "bin"
 }
 
@@ -2268,13 +3899,315 @@ function buildUniqueStudioFilename(base: string, extension: string, usedNames: S
   return filename
 }
 
-async function fetchBinaryFile(url: string): Promise<Uint8Array> {
-  const response = await fetch(url, { credentials: "include" })
-  if (!response.ok) {
-    throw new Error(`Falha ao exportar asset do Studio (${response.status}).`)
+function withAuthUserIfGoogle(url: string, authUser?: string | number | null): string {
+  try {
+    const parsed = new URL(url)
+    const host = parsed.hostname.toLowerCase()
+    const isGoogle = host.endsWith("google.com") || host.endsWith("googleusercontent.com")
+    if (!isGoogle || parsed.searchParams.has("authuser")) {
+      return url
+    }
+    if (authUser === null || authUser === undefined || String(authUser).trim() === "") {
+      return url
+    }
+    parsed.searchParams.set("authuser", String(authUser))
+    return parsed.toString()
+  } catch {
+    return url
   }
-  const buffer = await response.arrayBuffer()
-  return new Uint8Array(buffer)
+}
+
+function appendAtTokenToUrl(url: string, atToken?: string): string {
+  if (!atToken) return url
+  try {
+    const parsed = new URL(url)
+    parsed.searchParams.set("at", atToken)
+    return parsed.toString()
+  } catch {
+    return url
+  }
+}
+
+function buildDirectDownloadCandidates(
+  assetUrl: string,
+  opts?: { atToken?: string; authUser?: string | number | null }
+): string[] {
+  const normalized = normalizeAssetUrl(assetUrl)
+  const withAuth = withAuthUserIfGoogle(normalized, opts?.authUser)
+  const withAtOnAuth = appendAtTokenToUrl(withAuth, opts?.atToken)
+  const withAtOnBase = appendAtTokenToUrl(normalized, opts?.atToken)
+  return Array.from(new Set([normalized, withAuth, withAtOnAuth, withAtOnBase])).filter(Boolean)
+}
+
+async function tryChromeDirectDownload(urls: string[], filename: string): Promise<boolean> {
+  if (!chrome?.downloads?.download || urls.length === 0) return false
+
+  for (const targetUrl of urls) {
+    const downloadId = await new Promise<number | null>((resolve) => {
+      chrome.downloads.download(
+        { url: targetUrl, filename, saveAs: false },
+        (id) => {
+          const runtimeError = chrome.runtime?.lastError
+          if (runtimeError) {
+            console.warn("[MindDock][StudioExportDecision] direct-download-attempt-failed", {
+              url: targetUrl,
+              error: runtimeError.message
+            })
+            resolve(null)
+            return
+          }
+          resolve(typeof id === "number" ? id : null)
+        }
+      )
+    })
+
+    if (downloadId !== null) return true
+  }
+
+  return false
+}
+
+async function fetchBinaryFile(
+  url: string,
+  opts?: { atToken?: string; authUser?: string | number | null; mode?: "buffer" | "download"; filename?: string }
+): Promise<
+  | { bytes: Uint8Array; mimeType?: string; size?: number }
+  | { downloaded: true; downloadId: number; mimeType?: string; size?: number; filename?: string }
+> {
+  const baseUrl = normalizeAssetUrl(url)
+  if (!looksLikeUrl(baseUrl)) throw new Error("URL invalida para asset.")
+
+  try {
+    const bgResult = await requestBackgroundBinaryAsset(baseUrl, {
+      atToken: opts?.atToken,
+      authUser: opts?.authUser,
+      mode: opts?.mode,
+      filename: opts?.filename
+    })
+    if (bgResult && "downloaded" in bgResult && bgResult.downloaded) {
+      console.log("[MindDock][StudioBinaryFetch][CS] background-direct-download-success", {
+        url: baseUrl,
+        downloadId: bgResult.downloadId,
+        size: bgResult.size,
+        mimeType: bgResult.mimeType ?? null
+      })
+      return bgResult
+    }
+    if (bgResult) {
+      console.log("[MindDock][StudioBinaryFetch][CS] using-background-result", {
+        url: baseUrl,
+        size: bgResult.bytes.byteLength,
+        mimeType: bgResult.mimeType ?? null
+      })
+      return bgResult
+    }
+  } catch {
+    // fallback para tentativas locais já existentes
+  }
+
+  console.warn("[MindDock][StudioBinaryFetch][CS] fallback-local-fetch", { url: baseUrl })
+
+  const urlWithAuthUser = withAuthUserIfGoogle(baseUrl, opts?.authUser)
+  const candidates = Array.from(new Set([baseUrl, urlWithAuthUser]))
+
+  let lastStatus: number | null = null
+  let lastErr: unknown = null
+
+  for (const candidate of candidates) {
+    if (opts?.atToken) {
+      try {
+        const r = await fetch(candidate, {
+          credentials: "include",
+          headers: { Authorization: `Bearer ${opts.atToken}` }
+        })
+        if (r.ok) {
+          const ab = await r.arrayBuffer()
+          return {
+            bytes: new Uint8Array(ab),
+            mimeType: r.headers.get("content-type") ?? undefined,
+            size: ab.byteLength
+          }
+        }
+        lastStatus = r.status
+      } catch (e) {
+        lastErr = e
+      }
+    }
+
+    try {
+      const r = await fetch(candidate, { credentials: "include" })
+      if (r.ok) {
+        const ab = await r.arrayBuffer()
+        return {
+          bytes: new Uint8Array(ab),
+          mimeType: r.headers.get("content-type") ?? undefined,
+          size: ab.byteLength
+        }
+      }
+      lastStatus = r.status
+    } catch (e) {
+      lastErr = e
+    }
+
+    if (opts?.atToken) {
+      try {
+        const u = new URL(candidate)
+        u.searchParams.set("at", opts.atToken)
+        const r = await fetch(u.toString(), { credentials: "include" })
+        if (r.ok) {
+          const ab = await r.arrayBuffer()
+          return {
+            bytes: new Uint8Array(ab),
+            mimeType: r.headers.get("content-type") ?? undefined,
+            size: ab.byteLength
+          }
+        }
+        lastStatus = r.status
+      } catch (e) {
+        lastErr = e
+      }
+    }
+
+    try {
+      const r = await fetch(candidate)
+      if (r.ok) {
+        const ab = await r.arrayBuffer()
+        return {
+          bytes: new Uint8Array(ab),
+          mimeType: r.headers.get("content-type") ?? undefined,
+          size: ab.byteLength
+        }
+      }
+      lastStatus = r.status
+    } catch (e) {
+      lastErr = e
+    }
+  }
+
+  if (lastStatus !== null) throw new Error(`All fetch attempts failed. Last status: ${lastStatus}`)
+  if (lastErr instanceof Error) throw lastErr
+  throw new Error("Falha ao baixar asset visual.")
+}
+
+function shouldExportAsBinaryAsset(entry: StudioEntry): { ok: boolean; assetUrl?: string; reason?: string } {
+  const assetUrl = resolveEntryAssetUrl(entry)
+  const type = String(entry.type ?? "").toLowerCase()
+  const mime = String(entry.mimeType ?? "").toLowerCase()
+  const kind = String(entry.kind ?? "").toLowerCase()
+  const content = String(entry.content ?? "").trim().toLowerCase()
+
+  const visualTypeByCodeOrLabel = isVisualTypeCode(entry.type) || isVisualTypeLabel(entry.type)
+  const visualMime = /^(video|audio|image)\//i.test(mime) || mime === "application/pdf"
+  const kindAsset = kind === "asset"
+  const contentLooksUrl = /^https?:\/\//i.test(content) || content.startsWith("//")
+
+  if (!assetUrl) {
+    const noUrlLooksVisual = visualTypeByCodeOrLabel || visualMime || kindAsset
+    return { ok: false, reason: noUrlLooksVisual ? "no-url-visual" : "no-url" }
+  }
+
+  const lowerUrl = assetUrl.toLowerCase()
+
+  const urlLooksBinary =
+    lowerUrl.includes("googleusercontent") ||
+    /\.(png|jpg|jpeg|gif|webp|pdf|mp4|webm|mov|mp3|wav|ogg)(\?|#|$)/i.test(lowerUrl) ||
+    lowerUrl.includes("=m22") ||
+    lowerUrl.includes("alt=media")
+
+  const visualType =
+    type.includes("slides") ||
+    type.includes("infographic") ||
+    type.includes("mind map") ||
+    type.includes("video overview") ||
+    type.includes("audio overview") ||
+    type.includes("video") ||
+    type.includes("audio") ||
+    type.includes("image")
+
+  const ok = urlLooksBinary || visualType || visualTypeByCodeOrLabel || visualMime || kindAsset || contentLooksUrl
+  const reason = ok
+    ? [
+        urlLooksBinary ? "url-binary" : "",
+        visualType ? "type-visual" : "",
+        visualTypeByCodeOrLabel ? "type-code-or-label" : "",
+        visualMime ? "mime-visual" : "",
+        kindAsset ? "kind-asset" : "",
+        contentLooksUrl ? "content-url" : ""
+      ]
+        .filter(Boolean)
+        .join(",")
+    : "no-binary-signal"
+
+  return { ok, assetUrl, reason }
+}
+
+function logStudioExportDecision(entry: StudioEntry, mode: "binary" | "text", extra?: string) {
+  console.log("[MindDock][StudioExportDecision]", {
+    id: entry.id,
+    title: entry.title,
+    type: entry.type,
+    mimeType: entry.mimeType,
+    kind: entry.kind,
+    url: entry.url,
+    contentPreview: typeof entry.content === "string" ? entry.content.slice(0, 120) : "",
+    mode,
+    extra
+  })
+}
+
+function getErrorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message
+  if (typeof error === "string") return error
+  try {
+    return JSON.stringify(error)
+  } catch {
+    return String(error)
+  }
+}
+
+function mergeEntriesWithRefreshedArtifacts(
+  baseEntries: StudioEntry[],
+  rawItems: StudioCacheItem[]
+): StudioEntry[] {
+  const normalized = rawItems.map(normalizeStudioCacheEntry).filter(Boolean) as StudioEntry[]
+  if (normalized.length === 0) return baseEntries
+
+  const byId = new Map(normalized.map((entry) => [entry.id, entry]))
+  const byTitle = new Map<string, StudioEntry[]>()
+  for (const entry of normalized) {
+    const key = normalizeTypeToken(entry.title)
+    if (!key) continue
+    const list = byTitle.get(key) ?? []
+    list.push(entry)
+    byTitle.set(key, list)
+  }
+
+  return baseEntries.map((entry) => {
+    const direct = byId.get(entry.id)
+    const titleKey = normalizeTypeToken(entry.title)
+    const byTitleCandidate = titleKey
+      ? (byTitle.get(titleKey) ?? []).find((candidate) => Boolean(resolveEntryAssetUrl(candidate))) ??
+        (byTitle.get(titleKey) ?? [])[0]
+      : undefined
+
+    const incoming = direct ?? byTitleCandidate
+    if (!incoming) return entry
+
+    let mergedContent = entry.content ?? incoming.content
+    if (!resolveEntryAssetUrl(entry) && typeof incoming.content === "string" && looksLikeUrl(incoming.content.trim())) {
+      mergedContent = incoming.content
+    }
+
+    return {
+      ...entry,
+      type: resolvePreferredType(entry.type, incoming.type),
+      kind: entry.kind ?? incoming.kind,
+      content: mergedContent,
+      url: entry.url ?? incoming.url,
+      mimeType: entry.mimeType ?? incoming.mimeType,
+      node: entry.node ?? incoming.node
+    }
+  })
 }
 
 function buildEntryDraft(entry: StudioEntry, index: number, format: StudioFormat, draftMap: Record<string, string>) {
@@ -2288,35 +4221,207 @@ function buildEntryDraft(entry: StudioEntry, index: number, format: StudioFormat
 async function buildStudioExportFiles(
   entries: StudioEntry[],
   format: StudioFormat,
-  draftMap: Record<string, string>
-): Promise<Array<{ filename: string; bytes: Uint8Array; isAsset?: boolean }>> {
+  draftMap: Record<string, string>,
+  diagnostics?: { traceId?: string }
+): Promise<{ files: Array<{ filename: string; bytes: Uint8Array; isAsset?: boolean }>; directDownloads: number }> {
   const usedNames = new Set<string>()
   const encoder = new TextEncoder()
   const files: Array<{ filename: string; bytes: Uint8Array; isAsset?: boolean }> = []
+  let directDownloads = 0
+  const traceId = diagnostics?.traceId
 
   for (const [index, entry] of entries.entries()) {
-    if (entry.kind === "asset") {
-      const base = buildMindDuckFilenameBase("Studio", entry.title)
-      const extension = resolveAssetExtension(entry)
-      const filename = buildUniqueStudioFilename(base, extension, usedNames)
+    const binary = shouldExportAsBinaryAsset(entry)
 
-      if (!entry.url) {
-        const placeholder = `Arquivo binario do Studio nao encontrado para: ${entry.title}`
-        files.push({ filename: `${filename}.txt`, bytes: encoder.encode(placeholder), isAsset: true })
-        continue
-      }
+    if (binary.ok && binary.assetUrl) {
+      logStudioExportDecision(entry, "binary", binary.reason)
+      const base = buildMindDuckFilenameBase("Studio", entry.title)
+      let finalUrl = binary.assetUrl
+      const fetchStartedAt = performance.now()
+      const isSlidesLike = isSlidesLikeEntryType(entry.type)
 
       try {
-        const bytes = await fetchBinaryFile(entry.url)
+        const authUser = resolveAuthUserFromUrl(window.location.href)
+        if (finalUrl.includes("googleusercontent.com") || finalUrl.includes("google.com")) {
+          const u = new URL(finalUrl)
+          if (!u.searchParams.has("authuser") && authUser !== null && authUser !== undefined) {
+            u.searchParams.set("authuser", String(authUser))
+            finalUrl = u.toString()
+          }
+        }
+      } catch {}
+
+      try {
+        const rpcContext = resolveRpcContextFromWindow()
+        const atToken = typeof rpcContext?.at === "string" ? rpcContext.at : undefined
+        const authUser = resolveAuthUserFromUrl(window.location.href)
+        const filenameHint = `${sanitizeFilename(base)}.${resolveAssetExtension(entry, finalUrl, entry.mimeType)}`
+        const notebookIdForSlides = isSlidesLike ? (resolveNotebookIdFromUrl() ?? undefined) : undefined
+        const nativeSlidesUrl = isSlidesLike ? consumeNativeSlidesPdfUrl(notebookIdForSlides) : null
+
+        if (traceId) {
+            console.log(`[MindDock][StudioExportTrace][${traceId}] binary-fetch-start`, {
+              id: entry.id,
+              title: entry.title,
+              type: entry.type ?? null,
+              kind: entry.kind ?? null,
+              mimeType: entry.mimeType ?? null,
+              url: finalUrl,
+              reason: binary.reason ?? null,
+              hasToken: Boolean(atToken),
+              mode: "buffer"
+            })
+          }
+
+        if (isSlidesLike) {
+          let effectiveNativeSlidesUrl = nativeSlidesUrl
+          if (!effectiveNativeSlidesUrl) {
+            if (traceId) {
+              console.log(`[MindDock][StudioExportTrace][${traceId}] slides-native-auto-capture-start`, {
+                id: entry.id,
+                title: entry.title
+              })
+            }
+            const triggered = await captureNativeSlidesPdfUrlForEntry(entry, 2200)
+            if (triggered) {
+              console.log("[MindDock][Slides] trigger disparado, aguardando URL nativa...", {
+                id: entry.id,
+                title: entry.title,
+                notebookId: notebookIdForSlides ?? null
+              })
+              effectiveNativeSlidesUrl = await waitForNativeSlidesPdfUrl(notebookIdForSlides, SLIDES_NATIVE_WAIT_TIMEOUT_MS, 180)
+            }
+            if (traceId) {
+              console.log(`[MindDock][StudioExportTrace][${traceId}] slides-native-auto-capture-finish`, {
+                id: entry.id,
+                title: entry.title,
+                triggered,
+                captured: Boolean(effectiveNativeSlidesUrl)
+              })
+            }
+          }
+
+          if (!effectiveNativeSlidesUrl) {
+            throw new Error("URL nativa de download do Slides nao foi capturada a tempo.")
+          }
+
+          console.log("[MindDock][Slides] trying native download url", {
+            id: entry.id,
+            title: entry.title,
+            nativeUrl: effectiveNativeSlidesUrl
+          })
+          const nativePdfResult = await fetchBinaryFile(effectiveNativeSlidesUrl, {
+            atToken,
+            authUser,
+            mode: "buffer",
+            filename: `${sanitizeFilename(base)}.pdf`
+          })
+          if ("downloaded" in nativePdfResult && nativePdfResult.downloaded) {
+            throw new Error("Download direto retornado para Slides quando era esperado buffer PDF.")
+          }
+          if (!isPdfSignature(nativePdfResult.bytes)) {
+            throw new Error("Conteudo nativo de Slides nao possui assinatura PDF valida.")
+          }
+          const nativeFilename = buildUniqueStudioFilename(base, "pdf", usedNames)
+          files.push({ filename: nativeFilename, bytes: nativePdfResult.bytes, isAsset: true })
+          console.log("[MindDock][Slides] saved native multi-page pdf", {
+            id: entry.id,
+            title: entry.title,
+            size: nativePdfResult.bytes.byteLength
+          })
+          if (traceId) {
+            console.log(`[MindDock][StudioExportTrace][${traceId}] slides-native-pdf-success`, {
+              id: entry.id,
+              title: entry.title,
+              filename: nativeFilename,
+              size: nativePdfResult.bytes.byteLength,
+              nativeUrl: effectiveNativeSlidesUrl,
+              elapsedMs: Math.round(performance.now() - fetchStartedAt)
+            })
+          }
+          continue
+        }
+
+        const preferDirectDownload = entries.length === 1
+        const fetchResult = await fetchBinaryFile(finalUrl, {
+          atToken,
+          authUser,
+          mode: preferDirectDownload ? "download" : undefined,
+          filename: filenameHint
+        })
+
+        if ("downloaded" in fetchResult && fetchResult.downloaded) {
+          directDownloads += 1
+          console.log("[MindDock][StudioExportDecision] binary-direct-background-download", {
+            title: entry.title,
+            downloadId: fetchResult.downloadId,
+            size: fetchResult.size ?? null,
+            mimeType: fetchResult.mimeType ?? null
+          })
+          if (traceId) {
+            console.log(`[MindDock][StudioExportTrace][${traceId}] binary-fetch-direct-download`, {
+              id: entry.id,
+              title: entry.title,
+              downloadId: fetchResult.downloadId,
+              elapsedMs: Math.round(performance.now() - fetchStartedAt),
+              size: fetchResult.size ?? null,
+              mimeType: fetchResult.mimeType ?? null
+            })
+          }
+          continue
+        }
+
+        const bytes = fetchResult.bytes
+        const effectiveMimeType = fetchResult.mimeType
+        const extension = resolveAssetExtension(entry, finalUrl, effectiveMimeType)
+        const filename = buildUniqueStudioFilename(base, extension, usedNames)
         files.push({ filename, bytes, isAsset: true })
-      } catch {
+        if (traceId) {
+          console.log(`[MindDock][StudioExportTrace][${traceId}] binary-fetch-buffer-success`, {
+            id: entry.id,
+            title: entry.title,
+            filename,
+            extension,
+            elapsedMs: Math.round(performance.now() - fetchStartedAt),
+            size: bytes.byteLength,
+            mimeType: effectiveMimeType ?? null
+          })
+        }
+      } catch (err) {
+        if (isSlidesLike) {
+          const message = getErrorMessage(err)
+          console.error("[MindDock][StudioExportDecision] slides-pdf-required-no-fallback", {
+            id: entry.id,
+            title: entry.title,
+            type: entry.type,
+            url: finalUrl,
+            error: message
+          })
+          throw new Error(`Slides deve ser exportado em PDF. ${message}`)
+        }
+
         const urlFilename = buildUniqueStudioFilename(base, "url", usedNames)
-        const shortcut = `[InternetShortcut]\nURL=${entry.url}\n`
+        const shortcut = `[InternetShortcut]\nURL=${finalUrl}\n`
         files.push({ filename: urlFilename, bytes: encoder.encode(shortcut), isAsset: true })
+        console.warn("[MindDock][StudioExportDecision] binary-fallback-url", entry.title, err)
+        if (traceId) {
+          console.warn(`[MindDock][StudioExportTrace][${traceId}] binary-fetch-fallback-url`, {
+            id: entry.id,
+            title: entry.title,
+            type: entry.type ?? null,
+            kind: entry.kind ?? null,
+            mimeType: entry.mimeType ?? null,
+            url: finalUrl,
+            elapsedMs: Math.round(performance.now() - fetchStartedAt),
+            error: getErrorMessage(err),
+            fallbackFilename: urlFilename
+          })
+        }
       }
       continue
     }
 
+    logStudioExportDecision(entry, "text", binary.reason)
     const body = buildEntryDraft(entry, index, format, draftMap)
     const base = buildMindDuckFilenameBase("Studio", entry.title)
 
@@ -2344,11 +4449,12 @@ async function buildStudioExportFiles(
     files.push({ filename, bytes: pdfBytes })
   }
 
-  return files
+  return { files, directDownloads }
 }
 
 function StudioModal({ onClose }: { onClose: () => void }) {
   const stopProp = (e: React.MouseEvent) => e.stopPropagation()
+  const modalTitle = resolveStudioLabelText() ?? "Studio"
   const [format, setFormat] = useState<StudioFormat>("markdown")
   const [entries, setEntries] = useState<StudioEntry[]>([])
   const [listEntries, setListEntries] = useState<StudioEntry[]>([])
@@ -2360,6 +4466,11 @@ function StudioModal({ onClose }: { onClose: () => void }) {
   const [isExporting, setIsExporting] = useState(false)
   const [isHydrating, setIsHydrating] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [exportToast, setExportToast] = useState<StudioExportToastState>({
+    status: "idle",
+    message: "",
+    progress: 0
+  })
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [isLoading, setIsLoading] = useState(true)
   const selectAllCheckboxRef = useRef<HTMLInputElement | null>(null)
@@ -2376,6 +4487,9 @@ function StudioModal({ onClose }: { onClose: () => void }) {
   const firstFrameLoggedRef = useRef(false)
   const fetchInFlightRef = useRef(false)
   const finalProbeRef = useRef(false)
+  const deepTitleProbeInFlightRef = useRef(false)
+  const userSelectionTouchedRef = useRef(false)
+  const previewHydrationKeyRef = useRef("")
 
   const listIds = useMemo(() => {
     const unique = new Set<string>()
@@ -2390,51 +4504,111 @@ function StudioModal({ onClose }: { onClose: () => void }) {
   const hasIds = listIds.length > 0
 
   const mergedEntries = useMemo(() => {
-    if (!hasIds) {
-      return []
-    }
+    if (!hasIds) return []
     const byId = new Map(entries.map((entry) => [entry.id, entry]))
-    return listEntries.map((entry) => {
+
+    // itens que vieram da lista DOM
+    const merged = listEntries.map((entry) => {
       const cached = byId.get(entry.id)
       if (!cached) return entry
-      const cachedType = cached.type ?? ""
-      const isAssetInCache = cached.kind === "asset" || Boolean(cached.url)
-      const finalType = FORCE_VISUAL_TYPES.has(cachedType) ? cachedType : entry.type || cachedType
+      const incomingKind = cached.kind ?? entry.kind
+      const incomingType = resolvePreferredType(cached.type, entry.type)
+      const incomingIsText =
+        incomingKind === "text" ||
+        (incomingType
+          ? !(isVisualTypeLabel(incomingType) || isVisualTypeCode(incomingType))
+          : false)
       return {
         ...entry,
         ...cached,
         title: entry.title,
-        type: finalType,
-        kind: FORCE_VISUAL_TYPES.has(cachedType) ? "asset" : cached.kind || entry.kind,
-        url: isAssetInCache && cached.url ? cached.url : entry.url ?? cached.url,
-        mimeType: isAssetInCache && cached.mimeType ? cached.mimeType : entry.mimeType ?? cached.mimeType
+        type: incomingType,
+        kind: incomingIsText ? "text" : incomingKind,
+        content: cached.content ?? entry.content,
+        // nunca zera URL/MIME automaticamente; manter payload antigo evita perder asset visual
+        url: cached.url ?? entry.url,
+        mimeType: cached.mimeType ?? entry.mimeType,
       }
     })
+
+    // cache-only permitido: itens textuais fora da lista DOM (ex.: resultados ainda nao renderizados)
+    const listIdSet = new Set(listEntries.map((e) => e.id))
+    const listTitleSet = new Set(
+      listEntries
+        .map((entry) => normalizeTypeToken(entry.title))
+        .filter(Boolean)
+    )
+    const cacheOnlyText = entries.filter((entry) => {
+      if (!entry.id || listIdSet.has(entry.id)) return false
+      const title = String(entry.title ?? "").trim()
+      if (!looksLikeSidebarEntryTitle(title)) return false
+      if (listTitleSet.has(normalizeTypeToken(title))) return false
+      const probe: StudioEntry = { ...entry, title }
+      if (isVisualAssetEntry(probe)) return false
+      if (isExcludedStudioEntry(probe)) return false
+      if (isLikelyChatEntry(probe)) return false
+      return !isTemplateLikeTitle(title)
+    })
+    const mergedIdSet = new Set(merged.map((entry) => String(entry.id ?? "").trim()).filter(Boolean))
+    const cacheOnlyVisual = entries.filter((entry) => {
+      const id = String(entry.id ?? "").trim()
+      if (!id || listIdSet.has(id) || mergedIdSet.has(id)) return false
+      const title = String(entry.title ?? "").trim()
+      if (!looksLikeSidebarEntryTitle(title)) return false
+
+      const probe: StudioEntry = { ...entry, title }
+      if (isExcludedStudioEntry(probe)) return false
+      if (!isVisualAssetEntry(probe)) return false
+      if (isLikelyChatEntry(probe)) return false
+      if (isTemplateLikeTitle(title)) return false
+      return true
+    })
+
+    return [...merged, ...cacheOnlyText, ...cacheOnlyVisual]
   }, [entries, listEntries, hasIds])
 
-  const displayEntries = isLoading || !hasIds ? [] : mergedEntries
-  const FORCE_VISUAL_TYPES_SET = new Set(["Video Overview", "Audio Overview", "Infographic", "Slides", "Mind Map"])
-  const visualEntries = useMemo(
-    () => displayEntries.filter((entry) => FORCE_VISUAL_TYPES_SET.has(entry.type ?? "")),
-    [displayEntries]
-  )
-  const visualIds = useMemo(() => new Set(visualEntries.map((entry) => entry.id)), [visualEntries])
+  const displayEntries = !hasIds ? [] : mergedEntries
+  const visualEntries = useMemo(() => {
+    const documentIdSet = new Set(
+      displayEntries
+        .filter((entry) => !isVisualAssetEntry(entry) && !isExcludedStudioEntry(entry))
+        .map((entry) => String(entry.id ?? "").trim())
+        .filter(Boolean)
+    )
+
+    const seen = new Set<string>()
+    return displayEntries
+      .filter((entry) => isVisualAssetEntry(entry))
+      .filter((entry) => !isExcludedStudioEntry(entry))
+      .filter((entry) => {
+        const id = String(entry.id ?? "").trim()
+        if (!id) return true
+        return !documentIdSet.has(id)
+      })
+      .filter((entry) => {
+        const id = String(entry.id ?? "").trim()
+        const key = id || normalizeTypeToken(entry.title)
+        if (!key) return true
+        if (seen.has(key)) return false
+        seen.add(key)
+        return true
+      })
+  }, [displayEntries])
   const documentEntries = useMemo(
     () =>
       displayEntries.filter(
         (entry) =>
-          !visualIds.has(entry.id) &&
-          !FORCE_VISUAL_TYPES.has(entry.type ?? "") &&
-          !EXCLUDED_FROM_EXPORT.has(entry.type ?? "")
+          !isVisualAssetEntry(entry) &&
+          !isExcludedStudioEntry(entry)
       ),
-    [displayEntries, visualIds]
+    [displayEntries]
   )
   const excludedEntries = useMemo(
     () =>
       displayEntries.filter(
-        (entry) => EXCLUDED_FROM_EXPORT.has(entry.type ?? "") && !visualIds.has(entry.id)
+        (entry) => isExcludedStudioEntry(entry) && !isVisualAssetEntry(entry)
       ),
-    [displayEntries, visualIds]
+    [displayEntries]
   )
   const previewEntries = documentEntries
 
@@ -2475,28 +4649,154 @@ function StudioModal({ onClose }: { onClose: () => void }) {
   }, [])
 
   useEffect(() => {
+    if (exportToast.status !== "running") {
+      return
+    }
+    const timer = window.setInterval(() => {
+      setExportToast((current) => {
+        if (current.status !== "running") return current
+        const nextProgress = Math.min(92, current.progress + (current.progress < 60 ? 8 : 4))
+        return { ...current, progress: nextProgress }
+      })
+    }, 240)
+    return () => window.clearInterval(timer)
+  }, [exportToast.status])
+
+  useEffect(() => {
+    if (exportToast.status === "idle" || exportToast.status === "running") {
+      return
+    }
+    const timer = window.setTimeout(() => {
+      setExportToast({ status: "idle", message: "", progress: 0 })
+    }, exportToast.status === "error" ? 5200 : 3000)
+    return () => window.clearTimeout(timer)
+  }, [exportToast.status])
+
+  useEffect(() => {
     let active = true
 
-    loadStudioEntriesFromStorage()
-      .then((result) => {
-        if (!active) {
-          return
-        }
-        if (result) {
-          scopedKeysRef.current = result.scopedKeys
-          if (result.entries.length > 0) {
-            setEntries(result.entries)
-            return
-          }
-        }
+    const seedFromDom = (): boolean => {
+      const domSeed = readStudioTitlesFromDom()
+        .filter((entry) => UUID_RE.test(String(entry.id)) && String(entry.title ?? "").trim().length >= 3)
+        .map((entry) => ({
+          id: String(entry.id),
+          title: String(entry.title).trim(),
+          meta: entry.meta || "Resultado do EstÃºdio",
+          type: entry.type,
+          content: "",
+          url: undefined,
+          mimeType: undefined,
+          node: entry.node,
+          kind: "text" as const
+        }))
 
-        setEntries([])
-      })
-      .catch(() => {
-        if (active) {
-          setEntries([])
+      if (domSeed.length === 0) return false
+      setListEntries((prev) => {
+        const prevById = new Map(prev.map((entry) => [entry.id, entry]))
+        const nextById = new Map(prevById)
+        for (const entry of domSeed) {
+          const old = nextById.get(entry.id)
+          nextById.set(entry.id, old ? { ...old, ...entry, node: entry.node || old.node } : entry)
         }
+        const domOrder = new Map(domSeed.map((entry, idx) => [entry.id, idx]))
+        return Array.from(nextById.values())
+          .filter((entry) => String(entry.id ?? "").trim().length > 0 && String(entry.title ?? "").trim().length >= 3)
+          .sort((a, b) => {
+            const ai = domOrder.has(a.id) ? domOrder.get(a.id)! : Number.MAX_SAFE_INTEGER
+            const bi = domOrder.has(b.id) ? domOrder.get(b.id)! : Number.MAX_SAFE_INTEGER
+            if (ai !== bi) return ai - bi
+            return String(a.title ?? "").localeCompare(String(b.title ?? ""), "pt-BR", { sensitivity: "base" })
+          })
       })
+      setEntries((prev) => {
+        const prevById = new Map(prev.map((entry) => [entry.id, entry]))
+        const nextById = new Map(prevById)
+        for (const entry of domSeed) {
+          const old = prevById.get(entry.id)
+          if (!old) {
+            nextById.set(entry.id, entry)
+            continue
+          }
+          nextById.set(entry.id, {
+            ...old,
+            ...entry,
+            title: entry.title,
+            type: resolvePreferredType(old.type, entry.type),
+            kind: old.kind || entry.kind,
+            content: old.content || entry.content,
+            url: old.url || entry.url,
+            mimeType: old.mimeType || entry.mimeType,
+            node: old.node || entry.node
+          })
+        }
+        const domOrder = new Map(domSeed.map((entry, idx) => [entry.id, idx]))
+        return Array.from(nextById.values())
+          .filter((entry) => String(entry.id ?? "").trim().length > 0 && String(entry.title ?? "").trim().length >= 3)
+          .sort((a, b) => {
+            const ai = domOrder.has(a.id) ? domOrder.get(a.id)! : Number.MAX_SAFE_INTEGER
+            const bi = domOrder.has(b.id) ? domOrder.get(b.id)! : Number.MAX_SAFE_INTEGER
+            if (ai !== bi) return ai - bi
+            return String(a.title ?? "").localeCompare(String(b.title ?? ""), "pt-BR", { sensitivity: "base" })
+          })
+      })
+      setIsLoading(false)
+      return true
+    }
+
+    seedFromDom()
+
+    const tryLoad = async (attempt: number) => {
+      const result = await loadStudioEntriesFromStorage()
+      if (!active) return
+      if (result) {
+        scopedKeysRef.current = result.scopedKeys
+      }
+      if (result && result.entries.length > 0) {
+        setEntries((prev) => {
+          const prevById = new Map(prev.map((entry) => [entry.id, entry]))
+          const nextById = new Map(prevById)
+          for (const entry of result.entries) {
+            const old = nextById.get(entry.id)
+            if (!old) {
+              nextById.set(entry.id, entry)
+              continue
+            }
+            const incomingKind = entry.kind ?? old.kind
+            const incomingType = resolvePreferredType(old.type, entry.type)
+            nextById.set(entry.id, {
+              ...old,
+              ...entry,
+              title: old.title || entry.title,
+              type: incomingType,
+              kind: incomingKind,
+              content: entry.content ?? old.content,
+              url: entry.url ?? old.url,
+              mimeType: entry.mimeType ?? old.mimeType,
+              node: old.node || entry.node
+            })
+          }
+          const incomingOrder = new Map(result.entries.map((entry, idx) => [entry.id, idx]))
+          return Array.from(nextById.values())
+            .filter((entry) => String(entry.id ?? "").trim().length > 0 && String(entry.title ?? "").trim().length >= 3)
+            .sort((a, b) => {
+              const ai = incomingOrder.has(a.id) ? incomingOrder.get(a.id)! : Number.MAX_SAFE_INTEGER
+              const bi = incomingOrder.has(b.id) ? incomingOrder.get(b.id)! : Number.MAX_SAFE_INTEGER
+              if (ai !== bi) return ai - bi
+              return String(a.title ?? "").localeCompare(String(b.title ?? ""), "pt-BR", { sensitivity: "base" })
+            })
+        })
+        setIsLoading(false)
+        return
+      }
+      // tenta novamente atÃ© 3x com intervalo curto para nÃ£o atrasar a UI
+      if (attempt < 3) {
+        setTimeout(() => tryLoad(attempt + 1), 250 * attempt)
+      } else if (!seedFromDom()) {
+        setIsLoading(false)
+      }
+    }
+
+    tryLoad(1)
 
     return () => {
       active = false
@@ -2515,6 +4815,9 @@ function StudioModal({ onClose }: { onClose: () => void }) {
       if (!scopedKeys.length) {
         return
       }
+      const listTitleById = new Map(
+        listEntries.map((entry) => [String(entry.id ?? ""), String(entry.title ?? "").trim()] as const)
+      )
 
       for (const key of scopedKeys) {
         if (!changes[key]) {
@@ -2535,15 +4838,39 @@ function StudioModal({ onClose }: { onClose: () => void }) {
         setEntries((prev) => {
           if (nextEntries.length === 0) return prev
           const prevById = new Map(prev.map((e) => [e.id, e]))
-          return nextEntries.map((e) => {
-            const old = prevById.get(e.id)
-            if (!old) return e
-            return { ...old, ...e, content: e.content || old.content, url: e.url || old.url }
-          })
+          const nextById = new Map(prevById)
+          for (const e of nextEntries) {
+            const old = nextById.get(e.id)
+            if (!old) {
+              nextById.set(e.id, e)
+              continue
+            }
+            const incomingKind = e.kind ?? old.kind
+            const incomingType = resolvePreferredType(old.type, e.type)
+            nextById.set(e.id, {
+              ...old,
+              ...e,
+              // mantÃ©m o tÃ­tulo jÃ¡ exibido na lista do NotebookLM quando disponÃ­vel
+              title: listTitleById.get(e.id) || old.title || e.title,
+              content: e.content ?? old.content,
+              url: e.url ?? old.url,
+              mimeType: e.mimeType ?? old.mimeType,
+              type: incomingType,
+              kind: incomingKind,
+              node: old.node || e.node
+            })
+          }
+          const incomingOrder = new Map(nextEntries.map((entry, idx) => [entry.id, idx]))
+          return Array.from(nextById.values())
+            .filter((entry) => String(entry.id ?? "").trim().length > 0 && String(entry.title ?? "").trim().length >= 3)
+            .sort((a, b) => {
+              const ai = incomingOrder.has(a.id) ? incomingOrder.get(a.id)! : Number.MAX_SAFE_INTEGER
+              const bi = incomingOrder.has(b.id) ? incomingOrder.get(b.id)! : Number.MAX_SAFE_INTEGER
+              if (ai !== bi) return ai - bi
+              return String(a.title ?? "").localeCompare(String(b.title ?? ""), "pt-BR", { sensitivity: "base" })
+            })
         })
-        console.group("[MindDock][Studio][Debug]")
-        console.log(buildStudioDebugText(nextValue as StudioCacheItem[], normalized, nextEntries, key))
-        console.groupEnd()
+        void buildStudioDebugText(nextValue as StudioCacheItem[], normalized, nextEntries, key)
         break
       }
     }
@@ -2557,7 +4884,7 @@ function StudioModal({ onClose }: { onClose: () => void }) {
         chrome.storage.onChanged.removeListener(handleStorageChange)
       }
     }
-  }, [showPreviewOverlay])
+  }, [showPreviewOverlay, listEntries])
 
   useEffect(() => {
     const notebookId = resolveNotebookIdFromUrl()
@@ -2585,10 +4912,15 @@ function StudioModal({ onClose }: { onClose: () => void }) {
         setIsRefreshing(false)
         contentBootstrapRef.current = false
         probeBootstrapRef.current = false
-        setListEntries([])
-        setEntries([])
-        setIsLoading(true)
-        bgLog({ tag: "studio-list-empty" })
+        const hasCurrentData = listEntries.length > 0 || entries.length > 0
+        if (!hasCurrentData) {
+          setListEntries([])
+          setEntries([])
+          setIsLoading(true)
+        } else {
+          setIsLoading(false)
+        }
+        bgLog({ tag: "studio-list-empty", keptCurrentData: hasCurrentData })
         return
       }
 
@@ -2597,14 +4929,71 @@ function StudioModal({ onClose }: { onClose: () => void }) {
         setIsRefreshing(false)
         contentBootstrapRef.current = false
         probeBootstrapRef.current = false
-        setListEntries([])
-        setEntries([])
-        setIsLoading(true)
-        bgLog({ tag: "studio-list-empty", reason: "no-items" })
+        const hasCurrentData = listEntries.length > 0 || entries.length > 0
+        if (!hasCurrentData) {
+          setListEntries([])
+          setEntries([])
+          setIsLoading(true)
+        } else {
+          setIsLoading(false)
+        }
+        bgLog({ tag: "studio-list-empty", reason: "no-items", keptCurrentData: hasCurrentData })
         return
       }
 
-      const mapped = (items as Array<{
+      const payloadIds = (items as Array<{ id?: unknown }>)
+        .map((item) => String(item?.id ?? ""))
+        .filter((id) => UUID_RE.test(id))
+      const domTypeHintsById = readStudioTypeHintsByIdFromDom(payloadIds)
+      const domStudioEntriesRaw = readStudioTitlesFromDom()
+      const domStudioEntries = (domStudioEntriesRaw.length > 0 ? domStudioEntriesRaw : resolveStudioListEntries()).filter(
+        (entry) => String(entry.title ?? "").trim().length >= 3
+      )
+      const domTitleById = new Map(
+        domStudioEntries
+          .filter((entry) => UUID_RE.test(String(entry.id)))
+          .map((entry) => [String(entry.id), String(entry.title).trim()])
+      )
+      const domTypeById = new Map(
+        domStudioEntries
+          .filter((entry) => UUID_RE.test(String(entry.id)))
+          .map((entry) => [String(entry.id), String(entry.type ?? "").trim()] as const)
+          .filter(([, type]) => type.length > 0)
+      )
+      const domTypeByTitle = new Map<string, string>()
+      for (const entry of domStudioEntries) {
+        const typeValue = String(entry.type ?? "").trim()
+        if (!typeValue || !isKnownStudioTypeValue(typeValue)) continue
+        const titleKey = normalizeTypeToken(String(entry.title ?? ""))
+        if (!titleKey) continue
+        const current = domTypeByTitle.get(titleKey)
+        if (!current) {
+          domTypeByTitle.set(titleKey, typeValue)
+          continue
+        }
+        const currentIsBlogPost = normalizeTypeToken(current) === "blog post"
+        const nextIsBlogPost = normalizeTypeToken(typeValue) === "blog post"
+        if (currentIsBlogPost && !nextIsBlogPost) {
+          domTypeByTitle.set(titleKey, typeValue)
+        }
+      }
+      const domNodeById = new Map(
+        domStudioEntries
+          .filter((entry) => UUID_RE.test(String(entry.id)))
+          .map((entry) => [String(entry.id), entry.node] as const)
+      )
+      const existingListTitleById = new Map(
+        listEntries
+          .map((entry) => [String(entry.id ?? ""), String(entry.title ?? "").trim()] as const)
+          .filter(([id, title]) => UUID_RE.test(id) && looksLikeSidebarEntryTitle(title))
+      )
+      const existingListNodeById = new Map(
+        listEntries
+          .map((entry) => [String(entry.id ?? ""), entry.node] as const)
+          .filter(([id]) => UUID_RE.test(id))
+      )
+
+      const mappedRaw = (items as Array<{
         id: string
         title: string
         type?: number | string
@@ -2612,48 +5001,152 @@ function StudioModal({ onClose }: { onClose: () => void }) {
       }>)
         .filter((item) => String(item.title ?? "").trim().length >= 3)
         .map((item) => {
+          const resolvedId = String(item.id)
+          const rpcTitle = String(item.title ?? "").trim()
+          const titleFromDomById = domTitleById.get(resolvedId)
+          const titleFromExistingList = existingListTitleById.get(resolvedId)
           const typeKey = item.type !== undefined ? String(item.type) : undefined
           const typeLabel = item.typeLabel ?? (typeKey ? STUDIO_TYPE_LABELS[typeKey] : undefined)
+          const isVisualItem =
+            isVisualTypeLabel(typeLabel) ||
+            isVisualTypeCode(typeKey) ||
+            isVisualTypeLabel(typeKey)
+          const resolvedTitle = isVisualItem
+            ? (titleFromDomById ??
+                titleFromExistingList ??
+                rpcTitle)
+            : rpcTitle
+          const inferredType = inferTypeFromSignals(resolvedTitle)
+          const domTypeCandidate =
+            domTypeById.get(resolvedId) ??
+            domTypeHintsById.get(String(resolvedId).toLowerCase()) ??
+            domTypeByTitle.get(normalizeTypeToken(titleFromDomById)) ??
+            domTypeByTitle.get(normalizeTypeToken(titleFromExistingList)) ??
+            domTypeByTitle.get(normalizeTypeToken(resolvedTitle)) ??
+            domTypeByTitle.get(normalizeTypeToken(rpcTitle))
+          const rpcTypeToken = normalizeTypeToken(typeLabel ?? typeKey)
+          const rpcHasExplicitType = Boolean(String(typeKey ?? "").trim() || String(typeLabel ?? "").trim())
+          const rpcIsBlogPostLike = String(typeKey ?? "").trim() === "9" || rpcTypeToken === "blog post"
+          const domTypeToken = normalizeTypeToken(domTypeCandidate)
+          const safeDomType =
+            domTypeCandidate && isKnownStudioTypeValue(domTypeCandidate)
+              ? !rpcHasExplicitType
+                ? domTypeCandidate
+                : rpcIsBlogPostLike && (domTypeToken === "data table" || domTypeToken === "tabela de dados")
+                  ? domTypeCandidate
+                  : undefined
+              : undefined
+          const resolvedTypeBase = isVisualItem
+            ? (typeKey ?? typeLabel ?? inferredType)
+            : (typeLabel ?? typeKey ?? inferredType)
+          const resolvedType = safeDomType ?? resolvedTypeBase
 
           return {
-            id: String(item.id),
-            title: String(item.title).trim(),
-            meta: typeLabel ? `Resultado do Estúdio · ${typeLabel}` : "Resultado do Estúdio",
-            type: typeLabel ?? typeKey,
+            id: resolvedId,
+            title: resolvedTitle,
+            meta: typeLabel ? `Resultado do EstÃƒÂºdio Ã‚Â· ${typeLabel}` : "Resultado do EstÃƒÂºdio",
+            type: resolvedType,
             content: "",
             url: undefined,
             mimeType: undefined,
-            node: undefined,
+            node: domNodeById.get(resolvedId) ?? existingListNodeById.get(resolvedId),
             kind: "text" as const
           }
         })
+      const seenMappedIds = new Set<string>()
+      const mapped = mappedRaw.filter((entry) => {
+        if (!entry.id || seenMappedIds.has(entry.id)) return false
+        seenMappedIds.add(entry.id)
+        return true
+      })
       if (mapped.length > 0) {
         lastStudioListAtRef.current = Date.now()
         contentBootstrapRef.current = false
         probeBootstrapRef.current = false
-        setListEntries(mapped)
+        const probeIds = mapped.map((entry) => entry.id)
+        setListEntries((prev) => {
+          const prevById = new Map(prev.map((entry) => [entry.id, entry]))
+          const nextById = new Map(prevById)
+          for (const entry of mapped) {
+            const old = nextById.get(entry.id)
+            nextById.set(entry.id, old ? { ...old, ...entry, node: entry.node || old.node } : entry)
+          }
+          const mappedOrder = new Map(mapped.map((entry, idx) => [entry.id, idx]))
+          return Array.from(nextById.values())
+            .filter((entry) => String(entry.id ?? "").trim().length > 0 && String(entry.title ?? "").trim().length >= 3)
+            .sort((a, b) => {
+              const ai = mappedOrder.has(a.id) ? mappedOrder.get(a.id)! : Number.MAX_SAFE_INTEGER
+              const bi = mappedOrder.has(b.id) ? mappedOrder.get(b.id)! : Number.MAX_SAFE_INTEGER
+              if (ai !== bi) return ai - bi
+              return String(a.title ?? "").localeCompare(String(b.title ?? ""), "pt-BR", { sensitivity: "base" })
+            })
+        })
         setEntries((prev) => {
           const prevById = new Map(prev.map((e) => [e.id, e]))
-          const merged = mapped.map((entry) => {
-            const existing = prevById.get(entry.id)
-            if (!existing) return entry
-            const existingType = existing.type ?? ""
-            const isAssetInCache = existing.kind === "asset" || Boolean(existing.url)
-            const finalType = FORCE_VISUAL_TYPES.has(existingType) ? existingType : entry.type || existingType
-            return {
+          const nextById = new Map(prevById)
+          for (const entry of mapped) {
+            const existing = nextById.get(entry.id)
+            if (!existing) {
+              nextById.set(entry.id, entry)
+              continue
+            }
+            const incomingType = resolvePreferredType(existing.type, entry.type)
+            const incomingKind = entry.kind ?? existing.kind
+            const incomingIsText =
+              incomingKind === "text" ||
+              (incomingType
+                ? !(isVisualTypeLabel(incomingType) || isVisualTypeCode(incomingType))
+                : true)
+            nextById.set(entry.id, {
               ...existing,
               ...entry,
               title: entry.title,
-              type: finalType,
-              kind: FORCE_VISUAL_TYPES.has(existingType) ? "asset" : existing.kind || entry.kind,
-              url: isAssetInCache && existing.url ? existing.url : entry.url ?? existing.url,
-              mimeType: isAssetInCache && existing.mimeType ? existing.mimeType : entry.mimeType ?? existing.mimeType
-            }
-          })
-          const hasPayload = merged.some((entry) => entry.content || entry.url)
+              type: incomingType,
+              kind: incomingIsText ? "text" : (existing.kind || incomingKind),
+              content: existing.content || entry.content,
+              url: existing.url || entry.url,
+              mimeType: existing.mimeType || entry.mimeType,
+              node: existing.node || entry.node,
+            })
+          }
+          const mappedOrder = new Map(mapped.map((entry, idx) => [entry.id, idx]))
+          const next = Array.from(nextById.values())
+            .filter((entry) => String(entry.id ?? "").trim().length > 0 && String(entry.title ?? "").trim().length >= 3)
+            .sort((a, b) => {
+              const ai = mappedOrder.has(a.id) ? mappedOrder.get(a.id)! : Number.MAX_SAFE_INTEGER
+              const bi = mappedOrder.has(b.id) ? mappedOrder.get(b.id)! : Number.MAX_SAFE_INTEGER
+              if (ai !== bi) return ai - bi
+              return String(a.title ?? "").localeCompare(String(b.title ?? ""), "pt-BR", { sensitivity: "base" })
+            })
+          const hasPayload = next.some((entry) => entry.content || entry.url)
           setIsLoading(!hasPayload)
-          return merged
+          return next
         })
+        if (probeIds.length > 0 && !deepTitleProbeInFlightRef.current) {
+          deepTitleProbeInFlightRef.current = true
+          void sleep(120)
+            .then(() => readStudioTitlesByIdFromDomDeep(probeIds))
+            .then((titleById) => {
+              if (titleById.size === 0) return
+              setListEntries((prev) =>
+                prev.map((entry) => {
+                  const nextTitle = titleById.get(entry.id)
+                  if (!nextTitle || !shouldApplyDeepProbeTitle(entry, nextTitle)) return entry
+                  return { ...entry, title: nextTitle }
+                })
+              )
+              setEntries((prev) =>
+                prev.map((entry) => {
+                  const nextTitle = titleById.get(entry.id)
+                  if (!nextTitle || !shouldApplyDeepProbeTitle(entry, nextTitle)) return entry
+                  return { ...entry, title: nextTitle }
+                })
+              )
+            })
+            .finally(() => {
+              deepTitleProbeInFlightRef.current = false
+            })
+        }
         bgLog({
           tag: "studio-list-updated",
           count: mapped.length,
@@ -2666,7 +5159,7 @@ function StudioModal({ onClose }: { onClose: () => void }) {
 
     window.addEventListener("message", onMessage)
     return () => window.removeEventListener("message", onMessage)
-  }, [entries])
+  }, [entries, listEntries])
 
   const applyStudioItems = useCallback((rawItems: StudioCacheItem[], ids?: string[]) => {
     const normalized = rawItems
@@ -2677,20 +5170,44 @@ function StudioModal({ onClose }: { onClose: () => void }) {
       return
     }
     lastStudioListAtRef.current = Date.now()
+    const listTitleById = new Map(
+      listEntries.map((entry) => [String(entry.id ?? ""), String(entry.title ?? "").trim()] as const)
+    )
     setEntries((prev) => {
       const prevById = new Map(prev.map((entry) => [entry.id, entry]))
-      return nextEntries.map((entry) => {
-        const old = prevById.get(entry.id)
-        if (!old) return entry
-        return {
+      const nextById = new Map(prevById)
+      for (const entry of nextEntries) {
+        const old = nextById.get(entry.id)
+        if (!old) {
+          nextById.set(entry.id, entry)
+          continue
+        }
+        const incomingKind = entry.kind ?? old.kind
+        const incomingType = resolvePreferredType(old.type, entry.type)
+        nextById.set(entry.id, {
           ...old,
           ...entry,
-          content: entry.content || old.content,
-          url: entry.url || old.url
-        }
-      })
+          // mantÃ©m o tÃ­tulo vindo da lista/DOM sempre que jÃ¡ existir
+          title: listTitleById.get(entry.id) || old.title || entry.title,
+          content: entry.content ?? old.content,
+          url: entry.url ?? old.url,
+          mimeType: entry.mimeType ?? old.mimeType,
+          type: incomingType,
+          kind: incomingKind,
+          node: old.node || entry.node
+        })
+      }
+      const incomingOrder = new Map(nextEntries.map((entry, idx) => [entry.id, idx]))
+      return Array.from(nextById.values())
+        .filter((entry) => String(entry.id ?? "").trim().length > 0 && String(entry.title ?? "").trim().length >= 3)
+        .sort((a, b) => {
+          const ai = incomingOrder.has(a.id) ? incomingOrder.get(a.id)! : Number.MAX_SAFE_INTEGER
+          const bi = incomingOrder.has(b.id) ? incomingOrder.get(b.id)! : Number.MAX_SAFE_INTEGER
+          if (ai !== bi) return ai - bi
+          return String(a.title ?? "").localeCompare(String(b.title ?? ""), "pt-BR", { sensitivity: "base" })
+        })
     })
-  }, [])
+  }, [listEntries])
 
   useEffect(() => {
     if (!hasIds) {
@@ -2759,7 +5276,7 @@ function StudioModal({ onClose }: { onClose: () => void }) {
         fetchInFlightRef.current = false
         setIsLoading(false)
       })
-  }, [applyStudioItems, hasIds, listIds, mergedEntries])
+  }, [applyStudioItems, hasIds, listIds])
 
   useEffect(() => {
     if (!hasIds) {
@@ -2774,32 +5291,43 @@ function StudioModal({ onClose }: { onClose: () => void }) {
   useEffect(() => {
     if (firstFrameLoggedRef.current) return
     firstFrameLoggedRef.current = true
-    requestAnimationFrame(() => {
-      console.log("[studioModal][first-frame]", {
-        count: displayEntries.length,
-        titles: displayEntries.map((entry) => entry.title).slice(0, 100),
-        ids: displayEntries.map((entry) => entry.id).slice(0, 100)
-      })
-
-      const suspicious = displayEntries.filter((entry) => {
-        const title = (entry.title ?? "").trim().toLowerCase()
-        return !title || title === "studio" || (!entry.content && !entry.url)
-      })
-      console.log("[studioModal][first-frame][suspects]", suspicious)
-    })
+    requestAnimationFrame(() => {})
   }, [displayEntries])
 
   useEffect(() => {
-    if (!selectionInitRef.current) {
-      if (documentEntries.length === 0) {
+    const allowed = new Set<string>()
+    documentEntries.forEach((entry) => {
+      if (entry.id) {
+        allowed.add(entry.id)
+      }
+    })
+    visualEntries.forEach((entry) => {
+      if (entry.id) {
+        allowed.add(entry.id)
+      }
+    })
+
+    if (!selectionInitRef.current || !userSelectionTouchedRef.current) {
+      if (allowed.size === 0) {
         return
       }
-      setSelectedIds(new Set(documentEntries.map((entry) => entry.id)))
+      setSelectedIds((prev) => {
+        if (prev.size === allowed.size) {
+          let equal = true
+          for (const id of allowed) {
+            if (!prev.has(id)) {
+              equal = false
+              break
+            }
+          }
+          if (equal) return prev
+        }
+        return new Set(allowed)
+      })
       selectionInitRef.current = true
       return
     }
     setSelectedIds((prev) => {
-      const allowed = new Set(documentEntries.map((entry) => entry.id))
       let changed = false
       const next = new Set<string>()
       prev.forEach((id) => {
@@ -2811,7 +5339,7 @@ function StudioModal({ onClose }: { onClose: () => void }) {
       })
       return changed ? next : prev
     })
-  }, [documentEntries])
+  }, [documentEntries, visualEntries])
 
   const normalizedSearch = sourceSearch.trim().toLowerCase()
   const filterBySearch = useCallback(
@@ -2838,16 +5366,26 @@ function StudioModal({ onClose }: { onClose: () => void }) {
     () => filterBySearch(excludedEntries),
     [excludedEntries, filterBySearch]
   )
-  const FORCE_VISUAL = new Set(["Video Overview", "Audio Overview", "Infographic", "Slides", "Mind Map"])
   const selectableEntries = useMemo(
     () =>
       filteredDocumentEntries.filter(
-        (entry) =>
-          !EXCLUDED_FROM_EXPORT.has(entry.type ?? "") &&
-          !FORCE_VISUAL.has(entry.type ?? "")
+        (entry) => !isExcludedStudioEntry(entry)
       ),
     [filteredDocumentEntries]
   )
+  const selectableAllEntries = useMemo(() => {
+    const seen = new Set<string>()
+    const merged: StudioEntry[] = []
+    const push = (entry: StudioEntry) => {
+      if (!entry.id) return
+      if (seen.has(entry.id)) return
+      seen.add(entry.id)
+      merged.push(entry)
+    }
+    selectableEntries.forEach(push)
+    filteredVisualEntries.forEach(push)
+    return merged
+  }, [selectableEntries, filteredVisualEntries])
 
   const selectedEntries = useMemo(
     () => displayEntries.filter((entry) => selectedIds.has(entry.id)),
@@ -2856,6 +5394,10 @@ function StudioModal({ onClose }: { onClose: () => void }) {
   const previewSelectedEntries = useMemo(
     () => previewEntries.filter((entry) => selectedIds.has(entry.id)),
     [previewEntries, selectedIds]
+  )
+  const previewSelectionKey = useMemo(
+    () => previewSelectedEntries.map((entry) => entry.id).sort().join("|"),
+    [previewSelectedEntries]
   )
 
   const handlePreviewFormatChange = useCallback((nextFormat: StudioFormat) => {
@@ -2890,17 +5432,17 @@ function StudioModal({ onClose }: { onClose: () => void }) {
     [generatedAtIso]
   )
 
-  const filteredSelectedCount = selectableEntries.reduce(
+  const filteredSelectedCount = selectableAllEntries.reduce(
     (count, entry) => count + (selectedIds.has(entry.id) ? 1 : 0),
     0
   )
-  const hasFilteredEntries = selectableEntries.length > 0
+  const hasFilteredEntries = selectableAllEntries.length > 0
   const allFilteredSelected =
-    hasFilteredEntries && filteredSelectedCount === selectableEntries.length
+    hasFilteredEntries && filteredSelectedCount === selectableAllEntries.length
   const hasPartialFilteredSelection = filteredSelectedCount > 0 && !allFilteredSelected
   const hasSelection = selectedEntries.length > 0
   const hasPreviewSelection = previewSelectedEntries.length > 0
-  const hasAnyEntries = selectableEntries.length > 0
+  const hasAnyEntries = selectableAllEntries.length > 0
 
   useEffect(() => {
     const checkbox = selectAllCheckboxRef.current
@@ -2914,6 +5456,8 @@ function StudioModal({ onClose }: { onClose: () => void }) {
     if (!showPreviewOverlay) {
       dirtyIdsRef.current = new Set()
       setDraftMap({})
+      setIsHydrating(false)
+      previewHydrationKeyRef.current = ""
     }
   }, [showPreviewOverlay])
 
@@ -2924,6 +5468,14 @@ function StudioModal({ onClose }: { onClose: () => void }) {
     if (previewSelectedEntries.length === 0) {
       return
     }
+    if (!previewSelectionKey) {
+      return
+    }
+
+    if (previewHydrationKeyRef.current === previewSelectionKey) {
+      return
+    }
+    previewHydrationKeyRef.current = previewSelectionKey
 
     let active = true
     const requestId = previewRequestIdRef.current + 1
@@ -2931,24 +5483,29 @@ function StudioModal({ onClose }: { onClose: () => void }) {
 
     const run = async () => {
       setIsHydrating(true)
-      const hydratedEntries = await hydrateEntriesWithViewerContent(previewSelectedEntries)
-      if (!active || previewRequestIdRef.current !== requestId) {
-        return
-      }
-      setIsHydrating(false)
+      try {
+        const hydratedEntries = await hydrateEntriesWithViewerContent(previewSelectedEntries)
+        if (!active || previewRequestIdRef.current !== requestId) {
+          return
+        }
 
-      if (hydratedEntries.length > 0) {
-        const hydratedMap = new Map(hydratedEntries.map((entry) => [entry.id, entry]))
-        setEntries((prev) => prev.map((entry) => hydratedMap.get(entry.id) ?? entry))
-      }
+        if (hydratedEntries.length > 0) {
+          const hydratedMap = new Map(hydratedEntries.map((entry) => [entry.id, entry]))
+          setEntries((prev) => prev.map((entry) => hydratedMap.get(entry.id) ?? entry))
+        }
 
-      const initialDrafts: Record<string, string> = {}
-      hydratedEntries.forEach((entry, index) => {
-        initialDrafts[entry.id] = buildStudioEntryBlock(entry, index, format, { isLoading })
-      })
-      dirtyIdsRef.current = new Set()
-      setDraftMap(initialDrafts)
-      setError(null)
+        const initialDrafts: Record<string, string> = {}
+        hydratedEntries.forEach((entry, index) => {
+          initialDrafts[entry.id] = buildStudioEntryBlock(entry, index, format, { isLoading })
+        })
+        dirtyIdsRef.current = new Set()
+        setDraftMap(initialDrafts)
+        setError(null)
+      } finally {
+        if (active && previewRequestIdRef.current === requestId) {
+          setIsHydrating(false)
+        }
+      }
     }
 
     void run()
@@ -2956,9 +5513,10 @@ function StudioModal({ onClose }: { onClose: () => void }) {
     return () => {
       active = false
     }
-  }, [showPreviewOverlay, previewSelectedEntries, format])
+  }, [showPreviewOverlay, previewSelectedEntries, previewSelectionKey, format])
 
   const handleToggleEntry = (entryId: string) => {
+    userSelectionTouchedRef.current = true
     setSelectedIds((prev) => {
       const next = new Set(prev)
       if (next.has(entryId)) {
@@ -2974,12 +5532,13 @@ function StudioModal({ onClose }: { onClose: () => void }) {
     if (!hasFilteredEntries) {
       return
     }
+    userSelectionTouchedRef.current = true
     setSelectedIds((prev) => {
       const next = new Set(prev)
       if (allFilteredSelected) {
-        selectableEntries.forEach((entry) => next.delete(entry.id))
+        selectableAllEntries.forEach((entry) => next.delete(entry.id))
       } else {
-        selectableEntries.forEach((entry) => next.add(entry.id))
+        selectableAllEntries.forEach((entry) => next.add(entry.id))
       }
       return next
     })
@@ -2989,18 +5548,109 @@ function StudioModal({ onClose }: { onClose: () => void }) {
     if (isRefreshing) return
     setIsRefreshing(true)
 
+    const domNow = readStudioTitlesFromDom()
+      .filter((entry) => UUID_RE.test(String(entry.id)) && String(entry.title ?? "").trim().length >= 3)
+      .map((entry) => ({
+        id: String(entry.id),
+        title: String(entry.title).trim(),
+        meta: entry.meta || "Resultado do EstÃºdio",
+        type: entry.type ?? inferTypeFromSignals(entry.title, entry.meta, entry.content),
+        content: "",
+        url: undefined,
+        mimeType: undefined,
+        node: entry.node,
+        kind: "text" as const
+      }))
+    if (domNow.length > 0) {
+      setListEntries((prev) => {
+        const prevById = new Map(prev.map((entry) => [entry.id, entry]))
+        const nextById = new Map(prevById)
+        for (const entry of domNow) {
+          const old = nextById.get(entry.id)
+          nextById.set(entry.id, old ? { ...old, ...entry, node: entry.node || old.node } : entry)
+        }
+        const domOrder = new Map(domNow.map((entry, idx) => [entry.id, idx]))
+        return Array.from(nextById.values())
+          .filter((entry) => String(entry.id ?? "").trim().length > 0 && String(entry.title ?? "").trim().length >= 3)
+          .sort((a, b) => {
+            const ai = domOrder.has(a.id) ? domOrder.get(a.id)! : Number.MAX_SAFE_INTEGER
+            const bi = domOrder.has(b.id) ? domOrder.get(b.id)! : Number.MAX_SAFE_INTEGER
+            if (ai !== bi) return ai - bi
+            return String(a.title ?? "").localeCompare(String(b.title ?? ""), "pt-BR", { sensitivity: "base" })
+          })
+      })
+      setEntries((prev) => {
+        const prevById = new Map(prev.map((entry) => [entry.id, entry]))
+        const merged = [...prev]
+        for (const entry of domNow) {
+          const old = prevById.get(entry.id)
+          const next = old
+            ? {
+                ...old,
+                ...entry,
+                title: entry.title,
+                type: resolvePreferredType(old.type, entry.type),
+                kind: old.kind || entry.kind,
+                content: old.content || entry.content,
+                url: old.url || entry.url,
+                mimeType: old.mimeType || entry.mimeType,
+                node: old.node || entry.node
+              }
+            : entry
+          const index = merged.findIndex((value) => value.id === entry.id)
+          if (index >= 0) {
+            merged[index] = next
+          } else {
+            merged.push(next)
+          }
+        }
+        return merged
+      })
+      setIsLoading(false)
+    }
+
     const notebookId = resolveNotebookIdFromUrl()
     window.postMessage(
       { source: "minddock", type: "MINDDOCK_FETCH_STUDIO_LIST", payload: { notebookId } },
       "*"
     )
-    const ids = listIds
+    const ids = Array.from(
+      new Set(
+        [...listIds, ...entries.map((entry) => entry.id), ...domNow.map((entry) => entry.id)].filter((id) =>
+          UUID_RE.test(String(id))
+        )
+      )
+    )
     const hasIds = ids.length > 0
     if (!hasIds) {
       setEntries([])
       setIsLoading(true)
       setIsRefreshing(false)
       return
+    }
+    if (!deepTitleProbeInFlightRef.current) {
+      deepTitleProbeInFlightRef.current = true
+      void readStudioTitlesByIdFromDomDeep(ids)
+        .then((titleById) => {
+          if (titleById.size === 0) return
+          setListEntries((prev) =>
+            prev.map((entry) => {
+              const nextTitle = titleById.get(entry.id)
+              if (!nextTitle || !shouldApplyDeepProbeTitle(entry, nextTitle)) return entry
+              return { ...entry, title: nextTitle }
+            })
+          )
+          setEntries((prev) =>
+            prev.map((entry) => {
+              const nextTitle = titleById.get(entry.id)
+              if (!nextTitle || !shouldApplyDeepProbeTitle(entry, nextTitle)) return entry
+              return { ...entry, title: nextTitle }
+            })
+          )
+        })
+        .finally(() => {
+          deepTitleProbeInFlightRef.current = false
+        })
     }
     const expectedCount = ids.length
     const currentCount = mergedEntries.filter((entry) => entry.content || entry.url).length
@@ -3018,24 +5668,72 @@ function StudioModal({ onClose }: { onClose: () => void }) {
         setError(message)
       })
       .finally(() => {
+        if (!deepTitleProbeInFlightRef.current) {
+          deepTitleProbeInFlightRef.current = true
+          void sleep(180)
+            .then(() => readStudioTitlesByIdFromDomDeep(ids))
+            .then((titleById) => {
+              if (titleById.size === 0) return
+              setListEntries((prev) =>
+                prev.map((entry) => {
+                  const nextTitle = titleById.get(entry.id)
+                  if (!nextTitle || !shouldApplyDeepProbeTitle(entry, nextTitle)) return entry
+                  return { ...entry, title: nextTitle }
+                })
+              )
+              setEntries((prev) =>
+                prev.map((entry) => {
+                  const nextTitle = titleById.get(entry.id)
+                  if (!nextTitle || !shouldApplyDeepProbeTitle(entry, nextTitle)) return entry
+                  return { ...entry, title: nextTitle }
+                })
+              )
+            })
+            .finally(() => {
+              deepTitleProbeInFlightRef.current = false
+            })
+        }
         fetchInFlightRef.current = false
         setIsRefreshing(false)
         setIsLoading(false)
       })
-  }, [applyStudioItems, isRefreshing, listIds, mergedEntries])
+  }, [applyStudioItems, entries, isRefreshing, listIds, mergedEntries])
 
   const hydrateEntriesWithViewerContent = async (entriesToHydrate: StudioEntry[]): Promise<StudioEntry[]> => {
     let lastContent = resolveStudioViewerContent()
     const updated: StudioEntry[] = []
+    let liveNodeById: Map<string, HTMLElement> | null = null
+    const getLiveNodeById = (id: string): HTMLElement | undefined => {
+      if (!liveNodeById) {
+        liveNodeById = new Map(
+          readStudioTitlesFromDom()
+            .filter((entry) => UUID_RE.test(String(entry.id)) && entry.node)
+            .map((entry) => [String(entry.id), entry.node as HTMLElement] as const)
+        )
+      }
+      return liveNodeById.get(id)
+    }
 
     for (const entry of entriesToHydrate) {
-      if (entry.content || entry.kind === "asset" || !entry.node) {
+      const existingContent = typeof entry.content === "string" ? entry.content.trim() : ""
+      if (existingContent.length > 0 || shouldTreatEntryAsAssetForExport(entry)) {
+        updated.push(entry)
+        continue
+      }
+
+      const targetNode =
+        (entry.node && entry.node.isConnected ? entry.node : undefined) ??
+        (entry.id ? getLiveNodeById(String(entry.id)) : undefined)
+      if (!targetNode) {
         updated.push(entry)
         continue
       }
       try {
-        entry.node.click()
+        const previousViewerContent = lastContent
+        clickStudioEntryNode(targetNode)
         const nextContent = await waitForStudioContentUpdate(lastContent, 2200)
+        const freshViewerContent =
+          nextContent && nextContent !== previousViewerContent ? nextContent : ""
         let resolvedEntry: StudioEntry = entry
 
         if (looksLikeFlashcardsEntry(entry)) {
@@ -3045,21 +5743,23 @@ function StudioModal({ onClose }: { onClose: () => void }) {
           }
         }
 
-        if (!resolvedEntry.content) {
+        if (!resolvedEntry.content || !looksLikeFlashcardsEntry(entry)) {
           const note = scrapeOpenNoteContent()
-          if (note?.content) {
-            const nextTitle =
-              note.title && note.title !== "Nota do Studio" ? note.title : resolvedEntry.title
-            resolvedEntry = { ...resolvedEntry, title: nextTitle, content: note.content }
-          } else if (nextContent) {
-            resolvedEntry = { ...resolvedEntry, content: nextContent }
+          const bestContent = pickBestStudioHydratedContent([
+            resolvedEntry.content,
+            entry.content,
+            freshViewerContent,
+            note?.content
+          ])
+          if (bestContent) {
+            resolvedEntry = { ...resolvedEntry, content: bestContent }
           }
         }
 
         if (resolvedEntry.content) {
           lastContent = resolvedEntry.content
-        } else if (nextContent) {
-          lastContent = nextContent
+        } else if (freshViewerContent) {
+          lastContent = freshViewerContent
         }
 
         updated.push(resolvedEntry)
@@ -3092,38 +5792,305 @@ function StudioModal({ onClose }: { onClose: () => void }) {
 
     setIsExporting(true)
     setError(null)
+    setExportToast({
+      status: "running",
+      message: "Preparando exportacao do Estudio...",
+      progress: 8
+    })
 
     try {
-      const hydratedEntries = await hydrateEntriesWithViewerContent(selectedEntries)
-      if (hydratedEntries.length > 0) {
-        const hydratedMap = new Map(hydratedEntries.map((entry) => [entry.id, entry]))
+      const stageStart = performance.now()
+      const traceId = `studio-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
+      const trace = (stage: string, details?: Record<string, unknown>) => {
+        console.log(`[MindDock][StudioExportTrace][${traceId}] ${stage}`, details ?? {})
+      }
+
+      trace("start", {
+        format: exportFormat,
+        selected: selectedEntries.length,
+        selectedIds: selectedEntries.map((entry) => entry.id)
+      })
+      setExportToast({
+        status: "running",
+        message: `Exportando ${selectedEntries.length} item(ns) do Estudio...`,
+        progress: 14
+      })
+      await flushUiFrame()
+
+      const withTimeout = async <T,>(promise: Promise<T>, ms: number): Promise<T | null> => {
+        let timer: number | null = null
+        try {
+          const timeoutPromise = new Promise<null>((resolve) => {
+            timer = window.setTimeout(() => resolve(null), ms)
+          })
+          return (await Promise.race([promise, timeoutPromise])) as T | null
+        } finally {
+          if (timer !== null) window.clearTimeout(timer)
+        }
+      }
+
+      const hasTextContentForExport = (entry: StudioEntry): boolean => {
+        const content = typeof entry.content === "string" ? entry.content.trim() : ""
+        return Boolean(content) && !looksLikeUrl(content)
+      }
+
+      const needsHydration = selectedEntries.some(
+        (entry) => !shouldTreatEntryAsAssetForExport(entry) && !hasTextContentForExport(entry)
+      )
+      trace("hydrate-check", { needsHydration })
+
+      let exportEntries = selectedEntries
+      if (needsHydration) {
+        const hydrationStart = performance.now()
+        const hydrated = await withTimeout(hydrateEntriesWithViewerContent(selectedEntries), 1200)
+        if (hydrated && Array.isArray(hydrated)) {
+          exportEntries = hydrated
+          trace("hydrate-success", {
+            elapsedMs: Math.round(performance.now() - hydrationStart),
+            entries: hydrated.length
+          })
+        } else {
+          console.warn("[MindDock][StudioExport] hydration-timeout-skip", {
+            selected: selectedEntries.length
+          })
+          trace("hydrate-timeout", {
+            elapsedMs: Math.round(performance.now() - hydrationStart),
+            timeoutMs: 1200
+          })
+        }
+
+        console.log("[MindDock][StudioExport] hydration-finished", {
+          entries: exportEntries.length,
+          elapsedMs: Math.round(performance.now() - stageStart)
+        })
+        setExportToast((current) =>
+          current.status === "running"
+            ? { ...current, message: "Conteudo preparado. Montando arquivos...", progress: Math.max(current.progress, 28) }
+            : current
+        )
+      }
+
+      const needsRefreshByEntry = (entry: StudioEntry): boolean => {
+        const id = String(entry.id ?? "").trim()
+        if (!id) return false
+
+        const hasUrl = Boolean(resolveEntryAssetUrl(entry))
+        const visualSignal =
+          shouldTreatEntryAsAssetForExport(entry) ||
+          isVisualAssetEntry(entry) ||
+          isVisualTypeCode(entry.type) ||
+          String(entry.kind ?? "").trim().toLowerCase() === "asset"
+
+        if (visualSignal) {
+          return !hasUrl
+        }
+
+        return !hasTextContentForExport(entry)
+      }
+
+      const idsNeedingRefresh = Array.from(
+        new Set(
+          exportEntries
+            .filter((entry) => needsRefreshByEntry(entry))
+            .map((entry) => String(entry.id ?? "").trim())
+            .filter(Boolean)
+        )
+      )
+      trace("refresh-check", {
+        idsNeedingRefresh: idsNeedingRefresh.length,
+        ids: idsNeedingRefresh
+      })
+
+      if (idsNeedingRefresh.length > 0) {
+        try {
+          const refreshStart = performance.now()
+          const refreshTargets = new Set(idsNeedingRefresh)
+          const currentResolvedCount = exportEntries.filter((entry) => {
+            const id = String(entry.id ?? "").trim()
+            if (!id || !refreshTargets.has(id)) return false
+            if (resolveEntryAssetUrl(entry)) return true
+            return hasTextContentForExport(entry)
+          }).length
+
+          const refreshedItems =
+            (await withTimeout(
+              requestStudioArtifacts(idsNeedingRefresh, {
+                forceRefresh: true,
+                expectedCount: idsNeedingRefresh.length,
+                currentCount: currentResolvedCount
+              }),
+              1200
+            )) ?? []
+
+          if (refreshedItems.length === 0) {
+            console.warn("[MindDock][StudioExport] refresh-timeout-or-empty-continue", {
+              pendingIds: idsNeedingRefresh.length
+            })
+            trace("refresh-empty-or-timeout", {
+              elapsedMs: Math.round(performance.now() - refreshStart),
+              timeoutMs: 1200
+            })
+          } else {
+            trace("refresh-success", {
+              elapsedMs: Math.round(performance.now() - refreshStart),
+              refreshedItems: refreshedItems.length
+            })
+          }
+
+          if (refreshedItems.length > 0) {
+            exportEntries = mergeEntriesWithRefreshedArtifacts(exportEntries, refreshedItems)
+          }
+        } catch (refreshErr) {
+          console.warn("[MindDock][StudioExportDecision] refresh-before-export-failed", refreshErr)
+          trace("refresh-error", { error: getErrorMessage(refreshErr) })
+        }
+      }
+
+      if (exportEntries.length > 0) {
+        const hydratedMap = new Map(exportEntries.map((entry) => [entry.id, entry]))
         setEntries((prev) => prev.map((entry) => hydratedMap.get(entry.id) ?? entry))
       }
 
-      const files = await buildStudioExportFiles(hydratedEntries, exportFormat, exportDraftMap)
-      if (files.length === 0) {
+      const buildStart = performance.now()
+      setExportToast((current) =>
+        current.status === "running"
+          ? { ...current, message: "Gerando arquivos de exportacao...", progress: Math.max(current.progress, 48) }
+          : current
+      )
+      const { files, directDownloads } = await buildStudioExportFiles(exportEntries, exportFormat, exportDraftMap, {
+        traceId
+      })
+      const fallbackUrlFiles = files.filter((file) => file.isAsset && file.filename.toLowerCase().endsWith(".url"))
+      trace("build-files-finished", {
+        elapsedMs: Math.round(performance.now() - buildStart),
+        files: files.length,
+        directDownloads,
+        fallbackUrlFiles: fallbackUrlFiles.length,
+        fallbackNames: fallbackUrlFiles.map((file) => file.filename)
+      })
+
+      if (files.length === 0 && directDownloads === 0) {
         throw new Error("Nenhum arquivo do Studio foi gerado para exportacao.")
       }
+      if (files.length === 0 && directDownloads > 0) {
+        setExportToast({
+          status: "success",
+          message: `Exportacao concluida (${directDownloads} download(s) direto(s)).`,
+          progress: 100
+        })
+        console.log("[MindDock][StudioExportDecision] export-completed-via-direct-download", {
+          directDownloads
+        })
+        trace("finish-direct-download-only", {
+          elapsedTotalMs: Math.round(performance.now() - stageStart),
+          directDownloads
+        })
+        await sleep(TOAST_MIN_VISIBLE_MS)
+        return
+      }
 
-      const hasAsset = files.some((file) => file.isAsset)
-      const shouldZip = files.length > 1 || hasAsset
+      if (files.length === 1 && files[0].isAsset && files[0].filename.toLowerCase().endsWith(".url")) {
+        const text = new TextDecoder().decode(files[0].bytes)
+        const match = text.match(/^URL=(.+)$/im)
+        const fallbackUrl = String(match?.[1] ?? "").trim()
+        const firstEntry = exportEntries[0]
+
+        if (fallbackUrl && firstEntry) {
+          const rpcContext = resolveRpcContextFromWindow()
+          const atToken = typeof rpcContext?.at === "string" ? rpcContext.at : undefined
+          const authUser = resolveAuthUserFromUrl(window.location.href)
+          const candidates = buildDirectDownloadCandidates(fallbackUrl, { atToken, authUser })
+
+          console.warn("[MindDock][StudioExportDecision] direct-download-fallback-start", {
+            title: firstEntry.title,
+            url: fallbackUrl,
+            candidates: candidates.length
+          })
+
+          const ext = resolveAssetExtension(firstEntry, candidates[0] ?? fallbackUrl)
+          const directName = `${sanitizeFilename(buildMindDuckFilenameBase("Studio", firstEntry.title))}.${ext}`
+          const ok = await tryChromeDirectDownload(candidates, directName)
+          if (ok) {
+            setExportToast({
+              status: "success",
+              message: "Exportacao concluida via download direto.",
+              progress: 100
+            })
+            console.log("[MindDock][StudioExportDecision] direct-download-fallback-success", {
+              title: firstEntry.title,
+              filename: directName
+            })
+            trace("finish-direct-download-fallback-success", {
+              elapsedTotalMs: Math.round(performance.now() - stageStart),
+              filename: directName
+            })
+            await sleep(TOAST_MIN_VISIBLE_MS)
+            return
+          }
+          console.warn("[MindDock][StudioExportDecision] direct-download-fallback-failed", {
+            title: firstEntry.title
+          })
+          trace("direct-download-fallback-failed", {
+            title: firstEntry.title,
+            url: fallbackUrl,
+            candidates: candidates.length
+          })
+        }
+      }
+
+      const shouldZip = files.length > 1
       const filenameBase = buildMindDockZipBase("Estudio")
+      trace("download-plan", { shouldZip, files: files.length })
 
       if (shouldZip) {
+        setExportToast({
+          status: "running",
+          message: `Compactando ${files.length} arquivo(s)...`,
+          progress: 92
+        })
+        await flushUiFrame()
         const zipBytes = await buildZip(files.map((file) => ({ filename: file.filename, bytes: file.bytes })))
+        setExportToast({
+          status: "success",
+          message: `Exportacao concluida: ${filenameBase}.zip`,
+          progress: 100
+        })
         triggerDownload(
           new Blob([toArrayBuffer(zipBytes)], { type: "application/zip" }),
           `${filenameBase}.zip`
         )
+        trace("finish-zip", {
+          elapsedTotalMs: Math.round(performance.now() - stageStart),
+          filename: `${filenameBase}.zip`
+        })
+        await sleep(TOAST_MIN_VISIBLE_MS)
         return
       }
 
       const [file] = files
+      setExportToast({
+        status: "success",
+        message: `Exportacao concluida: ${file.filename}`,
+        progress: 100
+      })
       triggerDownload(new Blob([toArrayBuffer(file.bytes)]), file.filename)
+      trace("finish-single-file", {
+        elapsedTotalMs: Math.round(performance.now() - stageStart),
+        filename: file.filename
+      })
+      await sleep(TOAST_MIN_VISIBLE_MS)
     } catch (exportError) {
       const message =
         exportError instanceof Error ? exportError.message : "Falha ao exportar o Studio."
       setError(message)
+      setExportToast({
+        status: "error",
+        message,
+        progress: 100
+      })
+      console.warn("[MindDock][StudioExportTrace] finish-error", {
+        message: getErrorMessage(exportError)
+      })
       throw exportError
     } finally {
       setIsExporting(false)
@@ -3160,9 +6127,10 @@ function StudioModal({ onClose }: { onClose: () => void }) {
       onChangeItem: handlePreviewContentChange,
       onRequestExport: exportHandlerRef.current ?? undefined,
       isExporting: isExporting || isHydrating,
+      toast: exportToast.status === "idle" ? undefined : exportToast,
       labels: {
-        previewLabTitle: "LABORATORIO DE PRE-VISUALIZACAO",
-        title: "Pré-visualização do Estúdio",
+        previewLabTitle: "LABORAT\u00d3RIO DE PR\u00c9-VISUALIZA\u00c7\u00c3O",
+        title: "Pr\u00e9-visualiza\u00e7\u00e3o do Est\u00fadio",
         subtitle: "Revise e edite cada resultado antes de exportar.",
         previewTextareaPlaceholder: "Edite o conteudo antes de exportar.",
         noPreview: "Nenhum conteudo para pre-visualizar.",
@@ -3171,7 +6139,6 @@ function StudioModal({ onClose }: { onClose: () => void }) {
         exportingButton: "Exportando..."
       }
     }
-    console.log("🚀 abrindo modal — ids:", previewItems.map((item) => item.id))
     window.dispatchEvent(new CustomEvent(EXPORT_PREVIEW_OPEN_EVENT, { detail }))
     previewOpenTimerRef.current = window.setTimeout(() => {
       previewOpenedRef.current = true
@@ -3182,7 +6149,8 @@ function StudioModal({ onClose }: { onClose: () => void }) {
     format,
     exportedAtLabel,
     handlePreviewFormatChange,
-    handlePreviewContentChange
+    handlePreviewContentChange,
+    exportToast
   ])
 
   useEffect(() => {
@@ -3191,10 +6159,13 @@ function StudioModal({ onClose }: { onClose: () => void }) {
     }
     window.dispatchEvent(
       new CustomEvent(EXPORT_PREVIEW_UPDATE_EVENT, {
-        detail: { isExporting: isExporting || isHydrating }
+        detail: {
+          isExporting: isExporting || isHydrating,
+          toast: exportToast.status === "idle" ? undefined : exportToast
+        }
       })
     )
-  }, [showPreviewOverlay, isExporting, isHydrating])
+  }, [showPreviewOverlay, isExporting, isHydrating, exportToast])
 
   const handleCloseModal = useCallback(() => {
     if (showPreviewOverlay) {
@@ -3203,13 +6174,6 @@ function StudioModal({ onClose }: { onClose: () => void }) {
     }
     onClose()
   }, [showPreviewOverlay, onClose])
-
-  console.log("DOC:", documentEntries.map((e) => `${e.title} | ${e.type}`))
-  console.log("VIS:", visualEntries.map((e) => `${e.title} | ${e.type}`))
-  console.log("DISPLAY:", displayEntries.map((e) => `${e.title} | ${e.type} | ${e.kind}`))
-  console.log("SELECTABLE:", selectableEntries.map((e) => `${e.title} | ${e.type}`))
-  console.log("FILTERED_VIS:", filteredVisualEntries.map((e) => `${e.title} | ${e.type}`))
-  console.log("FILTERED_DOC:", filteredDocumentEntries.map((e) => `${e.title} | ${e.type}`))
 
   return (
     <div className="studio-modal-stack">
@@ -3230,11 +6194,11 @@ function StudioModal({ onClose }: { onClose: () => void }) {
             <div>
               <span className="badge">
                 <FileText width={11} height={11} />
-                EXPORTAÇÃO DE ESTÚDIO
+                EXPORTA\u00c7\u00c3O DE EST\u00daDIO
               </span>
-            <p className="title">Exportar resultado do Estúdio</p>
+            <p className="title">{modalTitle}</p>
             <p className="subtitle">
-              Aqui vamos mostrar o resultado gerado pela opcao escolhida no Estúdio.
+              Aqui vamos mostrar o resultado gerado pela opcao escolhida no Est\u00fadio.
             </p>
             </div>
             <button className="close-btn" type="button" aria-label="Fechar" onClick={handleCloseModal}>
@@ -3297,52 +6261,75 @@ function StudioModal({ onClose }: { onClose: () => void }) {
           <div className="source-list">
             {error ? <div className="source-error">{error}</div> : null}
             {!hasAnyEntries && !isLoading && (
-              <div className="source-empty">Nenhum item do Estúdio encontrado.</div>
+              <div className="source-empty">Nenhum item do Est\u00fadio encontrado.</div>
             )}
-            {selectableEntries.map((entry) => {
-              const subtitle =
-                toExcerpt(entry.meta || entry.content || "", 140) || "Resultado do Estudio"
-              return (
-                <label key={entry.id} className="source-item">
-                  <input
-                    type="checkbox"
-                    checked={selectedIds.has(entry.id)}
-                    onChange={() => handleToggleEntry(entry.id)}
-                  />
-                  <span>
-                    <span className="source-title" title={entry.title}>
-                      {entry.title}
-                    </span>
-                    <span className="source-kind">{subtitle}</span>
-                  </span>
-                </label>
-              )
-            })}
-            {/* excluidos ocultados */}
-            {filteredVisualEntries.length > 0 && (
-              <>
-                <div className="source-section-title">Visuais</div>
-                {filteredVisualEntries.map((entry) => (
-                  <label key={entry.id} className="source-item">
-                    <input
-                      type="checkbox"
-                      checked={selectedIds.has(entry.id)}
-                      onChange={() => handleToggleEntry(entry.id)}
-                    />
-                    <span>
-                      <span className="source-title" title={entry.title}>
-                        {entry.title}
-                      </span>
-                      <span className="source-kind">
-                        {entry.type ?? "Recurso visual"} ·{" "}
-                        {resolveFileExtension(entry.type ?? "", entry.url ?? "")}
-                      </span>
-                    </span>
-                  </label>
-                ))}
-              </>
+            {(selectableEntries.length > 0 || filteredVisualEntries.length > 0) && (
+              <div className="source-sections">
+                {selectableEntries.length > 0 && (
+                  <section className="source-section">
+                    <div className="source-section-header">
+                      <div className="source-section-title">Documentos</div>
+                    </div>
+                    <div className="source-section-list">
+                      {selectableEntries.map((entry) => (
+                        <label key={entry.id} className="source-item">
+                          <input
+                            type="checkbox"
+                            checked={selectedIds.has(entry.id)}
+                            onChange={() => handleToggleEntry(entry.id)}
+                          />
+                          <span>
+                            <span className="source-title" title={entry.title}>
+                              {entry.title}
+                            </span>
+                          </span>
+                        </label>
+                      ))}
+                    </div>
+                  </section>
+                )}
+                {filteredVisualEntries.length > 0 && (
+                  <section className="source-section">
+                    <div className="source-section-header">
+                      <div className="source-section-title">Visuais</div>
+                    </div>
+                    <div className="source-section-list">
+                      {filteredVisualEntries.map((entry) => (
+                        <label key={entry.id} className="source-item">
+                          <input
+                            type="checkbox"
+                            checked={selectedIds.has(entry.id)}
+                            onChange={() => handleToggleEntry(entry.id)}
+                          />
+                          <span>
+                            <span className="source-title" title={entry.title}>
+                              {entry.title}
+                            </span>
+                          </span>
+                        </label>
+                      ))}
+                    </div>
+                  </section>
+                )}
+              </div>
             )}
           </div>
+
+          {exportToast.status !== "idle" && (
+            <div className={`studio-toast studio-toast--${exportToast.status}`}>
+              <div className="studio-toast-head">
+                <span>{exportToast.status === "running" ? "Exportando" : exportToast.status === "success" ? "Concluido" : "Erro"}</span>
+                <span>{Math.max(0, Math.min(100, Math.round(exportToast.progress)))}%</span>
+              </div>
+              <p className="studio-toast-msg">{exportToast.message}</p>
+              <div className="studio-toast-track">
+                <div
+                  className="studio-toast-fill"
+                  style={{ width: `${Math.max(0, Math.min(100, exportToast.progress))}%` }}
+                />
+              </div>
+            </div>
+          )}
 
           <footer className="footer">
             <button
@@ -3351,7 +6338,7 @@ function StudioModal({ onClose }: { onClose: () => void }) {
               onClick={handlePreviewClick}
               disabled={!hasPreviewSelection || isExporting || isHydrating || showPreviewOverlay}>
               <Eye width={16} height={16} />
-              {isHydrating ? "Carregando..." : "Prévia"}
+              {isHydrating ? "Carregando..." : "Pr\u00e9via"}
             </button>
             <button
               type="button"
@@ -3473,6 +6460,3 @@ function swallowInteraction(event: {
   const native = event.nativeEvent as Event & { stopImmediatePropagation?: () => void }
   native?.stopImmediatePropagation?.()
 }
-
-
-

@@ -10,11 +10,8 @@ export const config: PlasmoCSConfig = {
 const PAGE_HOOK_FLAG = "__MINDDOCK_PAGE_HOOK_INSTALLED__"
 const alreadyInstalled = Boolean((window as unknown as Record<string, unknown>)[PAGE_HOOK_FLAG])
 
-if (alreadyInstalled) {
-  console.warn("[MindDock][PageHook] already installed")
-} else {
+if (!alreadyInstalled) {
   ;(window as unknown as Record<string, unknown>)[PAGE_HOOK_FLAG] = true
-  console.warn("[MindDock][PageHook] installed", location.href)
   installPageHook()
 }
 
@@ -23,6 +20,11 @@ function installPageHook() {
   const STUDIO_LIST_RPC_ID = "gArtLc"
   const STUDIO_LIST_FILTER = 'NOT artifact.status = "ARTIFACT_STATUS_SUGGESTED"'
   const BATCHEXECUTE_URL = "https://notebooklm.google.com/_/LabsTailwindUi/data/batchexecute"
+  const BATCHEXECUTE_PATH = "/_/LabsTailwindUi/data/batchexecute"
+  const PDF_HINT_RE = /application\/pdf|\.pdf|googleusercontent/i
+  const NATIVE_SLIDES_DOWNLOAD_TYPE = "MINDDOCK_NATIVE_SLIDES_DOWNLOAD_URL"
+  const NATIVE_SLIDES_CAPTURE_ONLY_EVENT = "MINDDOCK_NATIVE_SLIDES_CAPTURE_ONLY"
+  const NATIVE_SLIDES_DOWNLOAD_RE = /^https:\/\/contribution\.usercontent\.google\.com\/download\?/i
   const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i
   const AT_PATTERN = /AIX[A-Za-z0-9_\-]{10,}:[0-9]{10,}/
 
@@ -33,7 +35,7 @@ function installPageHook() {
   const RETRY_INTERVAL_MS = 300
 
   function debugLog(...args: unknown[]) {
-    console.warn("[MindDock][PageHook]", ...args)
+    void args
   }
 
   // ─── LÊ at DIRETO DO WIZ_global_data ─────────────────────────────────────
@@ -205,6 +207,118 @@ function installPageHook() {
     } catch {}
   }
 
+  function logRpcDiagnostics(urlText: string) {
+    try {
+      const url = new URL(urlText, window.location.href)
+      if (!url.pathname.includes(BATCHEXECUTE_PATH)) return
+      console.log("[MD-RPC]", {
+        rpcids: url.searchParams.get("rpcids"),
+        sourcePath: url.searchParams.get("source-path"),
+        reqid: url.searchParams.get("_reqid"),
+        authuser: url.searchParams.get("authuser"),
+      })
+    } catch {}
+  }
+
+  function logRpcPdfHit(urlText: string, rawText: string) {
+    try {
+      const url = new URL(urlText, window.location.href)
+      if (!url.pathname.includes(BATCHEXECUTE_PATH)) return
+      if (!PDF_HINT_RE.test(rawText)) return
+      console.log("[MD-RPC-PDF-HIT]", {
+        url: url.toString(),
+        rpcids: url.searchParams.get("rpcids"),
+        sourcePath: url.searchParams.get("source-path"),
+        sample: String(rawText ?? "").slice(0, 1500),
+      })
+    } catch {}
+  }
+
+  function installNativeSlidesDownloadCapture(): void {
+    const globalRecord = window as unknown as Record<string, unknown>
+    if (globalRecord.__mdNativeDlInstalled) return
+    globalRecord.__mdNativeDlInstalled = true
+    if (typeof globalRecord.__mdNativeDlCaptureOnlyUntil !== "number") {
+      globalRecord.__mdNativeDlCaptureOnlyUntil = 0
+    }
+
+    const isNativeDl = (value: string): boolean => {
+      const normalized = String(value ?? "").trim()
+      return Boolean(normalized) && NATIVE_SLIDES_DOWNLOAD_RE.test(normalized)
+    }
+
+    const isCaptureOnlyMode = (): boolean => {
+      const until = Number(globalRecord.__mdNativeDlCaptureOnlyUntil ?? 0)
+      return Number.isFinite(until) && until > Date.now()
+    }
+
+    const resolveNotebookId = (): string => {
+      const path = String(location.pathname ?? "")
+      const uuidHit = path.match(UUID_RE)?.[0]
+      if (uuidHit) return uuidHit
+      const parts = path.split("/").filter(Boolean)
+      return String(parts[parts.length - 1] ?? "").trim()
+    }
+
+    const emitNativeUrl = (url: string, from: string): void => {
+      try {
+        const notebookId = resolveNotebookId()
+        window.postMessage(
+          {
+            source: "minddock",
+            type: NATIVE_SLIDES_DOWNLOAD_TYPE,
+            payload: { url, from, ts: Date.now(), notebookId }
+          },
+          "*"
+        )
+      } catch {}
+    }
+
+    const oldOpen = window.open
+    window.open = function patchedWindowOpen(url?: string | URL | null, ...rest: unknown[]) {
+      const normalized = url ? String(url) : ""
+      if (normalized && isNativeDl(normalized)) {
+        emitNativeUrl(normalized, "window-open")
+        if (isCaptureOnlyMode()) {
+          return null
+        }
+      }
+      return oldOpen.call(this, url as string | URL | undefined, ...(rest as []))
+    }
+
+    const oldAnchorClick = HTMLAnchorElement.prototype.click
+    HTMLAnchorElement.prototype.click = function patchedAnchorClick(...args: unknown[]) {
+      const href = String(this.href ?? "").trim()
+      if (href && isNativeDl(href)) {
+        emitNativeUrl(href, "anchor-proto-click")
+        if (isCaptureOnlyMode()) {
+          return
+        }
+      }
+      return oldAnchorClick.apply(this, args as [])
+    }
+
+    document.addEventListener(
+      "click",
+      (ev) => {
+        const target = ev.target as HTMLElement | null
+        const anchor = target?.closest?.("a[href]") as HTMLAnchorElement | null
+        const href = String(anchor?.href ?? "").trim()
+        if (href && isNativeDl(href)) {
+          if (isCaptureOnlyMode()) {
+            ev.preventDefault()
+            ev.stopPropagation()
+            try {
+              ;(ev as Event & { stopImmediatePropagation?: () => void }).stopImmediatePropagation?.()
+            } catch {}
+          }
+          emitNativeUrl(href, "dom-click")
+        }
+      },
+      true
+    )
+  }
+
   function buildListPayload(notebookId: string): unknown[] {
     return [
       [2, null, null, [1, null, null, null, null, null, null, null, null, null, [1]], [[2, 1, 3]]],
@@ -347,6 +461,7 @@ function installPageHook() {
   // ─── INTERCEPT FETCH (mantido para capturar fSid/bl/sourcePath) ──────────
   const originalFetch = window.fetch
   window.fetch = function (input: RequestInfo | URL, init?: RequestInit) {
+    let requestUrl = ""
     try {
       const url =
         typeof input === "string"
@@ -354,8 +469,10 @@ function installPageHook() {
           : input instanceof Request
           ? input.url
           : String(input)
+      requestUrl = url
 
-      if (url.includes("/_/LabsTailwindUi/data/batchexecute")) {
+      if (url.includes(BATCHEXECUTE_PATH)) {
+        logRpcDiagnostics(url)
         const serializeBody = (): string | undefined => {
           const body = init?.body
           if (typeof body === "string") return body
@@ -386,7 +503,21 @@ function installPageHook() {
         }
       }
     } catch {}
-    return originalFetch.apply(this, arguments as any)
+    const responsePromise = originalFetch.apply(this, arguments as any)
+    try {
+      if (requestUrl.includes(BATCHEXECUTE_PATH)) {
+        responsePromise
+          .then((res) =>
+            res
+              .clone()
+              .text()
+              .then((raw) => logRpcPdfHit(requestUrl, raw))
+              .catch(() => {})
+          )
+          .catch(() => {})
+      }
+    } catch {}
+    return responsePromise
   }
 
   // ─── INTERCEPT XHR ───────────────────────────────────────────────────────
@@ -402,7 +533,8 @@ function installPageHook() {
   XMLHttpRequest.prototype.send = function (body?: Document | BodyInit | null) {
     try {
       const url = (this as any).__minddock_url as string | undefined
-      if (url?.includes("/_/LabsTailwindUi/data/batchexecute")) {
+      if (url?.includes(BATCHEXECUTE_PATH)) {
+        logRpcDiagnostics(url)
         let bodyText: string | undefined
         if (typeof body === "string") bodyText = body
         else if (body instanceof URLSearchParams) bodyText = body.toString()
@@ -414,10 +546,39 @@ function installPageHook() {
           bodyText = parts.join("&")
         }
         if (bodyText) rememberFromUrlAndBody(url, bodyText)
+
+        this.addEventListener(
+          "loadend",
+          () => {
+            try {
+              if (typeof this.responseText === "string") {
+                logRpcPdfHit(url, this.responseText)
+              }
+            } catch {}
+          },
+          { once: true }
+        )
       }
     } catch {}
     return originalSend.apply(this, arguments as any)
   }
+
+  installNativeSlidesDownloadCapture()
+
+  const applyNativeSlidesCaptureOnlyTtl = (ttlMsRaw: unknown): void => {
+    const ttlMsNumber = Number(ttlMsRaw ?? 3000)
+    const ttlMs = Number.isFinite(ttlMsNumber) ? Math.max(300, Math.min(10000, ttlMsNumber)) : 3000
+    ;(window as unknown as Record<string, unknown>).__mdNativeDlCaptureOnlyUntil = Date.now() + ttlMs
+  }
+
+  window.addEventListener(
+    NATIVE_SLIDES_CAPTURE_ONLY_EVENT,
+    (event) => {
+      const customEvent = event as CustomEvent<{ ttlMs?: number } | undefined>
+      applyNativeSlidesCaptureOnlyTtl(customEvent.detail?.ttlMs)
+    },
+    true
+  )
 
   // ─── LISTENER ────────────────────────────────────────────────────────────
   window.addEventListener("message", (event) => {
@@ -425,9 +586,14 @@ function installPageHook() {
     const data = (event as MessageEvent).data as {
       source?: string
       type?: string
-      payload?: { notebookId?: string }
+      payload?: { notebookId?: string; ttlMs?: number }
     } | null
-    if (!data || data.source !== "minddock" || data.type !== "MINDDOCK_FETCH_STUDIO_LIST") return
+    if (!data || data.source !== "minddock") return
+    if (data.type === NATIVE_SLIDES_CAPTURE_ONLY_EVENT) {
+      applyNativeSlidesCaptureOnlyTtl(data.payload?.ttlMs)
+      return
+    }
+    if (data.type !== "MINDDOCK_FETCH_STUDIO_LIST") return
 
     debugLog("MINDDOCK_FETCH_STUDIO_LIST", data.payload)
     const notebookId = data.payload?.notebookId
