@@ -62,6 +62,9 @@ Arquivos nucleares:
 - O target `studio-export` usa:
   - `resolveHost: resolveStudioExportAnchor`
   - `render: () => <StudioExportButton />`
+- Controle de ciclo de vida (anti-botao "fantasma"):
+  - o host "sticky" do Studio so e mantido quando `isStudioExportModalOpen === true`
+  - quando a aba/modal fecha, o root e desmontado e o launcher deixa de aparecer fora do contexto
 - Referencias:
   - target: linhas ~175-180
   - import de `StudioExportButton`: linha 19
@@ -70,10 +73,23 @@ Arquivos nucleares:
 
 - Arquivo: `contents/notebooklm/sourceDom.ts`
 - `resolveStudioExportAnchor()`:
-  - tenta achar o botao com icone `dock_to_left`
-  - fallback: botao compacto proximo do label `Studio`
-  - fallback final: overflow menu button
-- Referencia: linha ~2826+
+  - **primario**: resolve header do Studio com `resolveStudioPanelHeader()`
+  - escolhe o botao compacto mais a direita do header via `resolveRightmostCompactHeaderActionButton()`
+  - prioriza acao com semantica de fechar/recolher (`dock_to_left`, `close`, `collapse`, etc.) quando presente
+  - fallback: `resolveStudioLabel()` + `resolveStudioCloseTabButton()`
+  - fallback adicional: botao com icone `dock_to_left`
+  - fallback final: botao compacto proximo do label `Studio` e, por ultimo, overflow
+- Referencia: bloco ~2766-3120
+
+### 2.3 Posicionamento e estilo do launcher (update 2026-03-30)
+
+- Arquivo: `contents/notebooklm/StudioExportButton.tsx`
+- Wrapper do botao:
+  - `ml-auto mr-1` para encostar no lado direito do header
+  - ajuste fino vertical com `marginTop: "1px"` para alinhar com icone nativo de fechar/recolher
+- Botao visualmente alinhado ao padrao escuro do MindDock:
+  - estado normal: fundo `#050505`, icone branco
+  - estado aberto/ativo: fundo `#0a0a0a`, icone branco
 
 ---
 
@@ -633,6 +649,16 @@ Conclusao pratica:
 - `src/lib/offscreen-pdf-listener.ts`
 - `src/lib/pdf-build.ts`
 
+### Anchor / Injetor (UI Studio)
+
+- `contents/notebooklm/sourceDom.ts`
+  - `resolveStudioExportAnchor` (~3068)
+  - `resolveStudioPanelHeader` (~2807)
+  - `resolveRightmostCompactHeaderActionButton` (~2766)
+  - `resolveStudioCloseTabButton` (~2803+)
+- `src/contents/notebooklm-injector.tsx`
+  - `mountTargets` com `stickyStudioHost` condicionado por `isStudioExportModalOpen` (~336-352)
+
 ---
 
 ## 16) Procedimento de restauracao para "estado perfeito"
@@ -852,12 +878,15 @@ Conferir:
 
 ### 19.3 Validacao runtime no browser (manual)
 
-1. Abrir NotebookLM com extensao carregada e abrir modal de Studio.
-2. Confirmar que lista de itens aparece no modal.
-3. Exportar 1 item textual em `markdown`.
-4. Exportar 1 item visual (video/audio/imagem).
-5. Exportar 1 item Slides.
-6. Exportar lote misto (texto + visuais).
+1. Abrir NotebookLM com extensao carregada e navegar ate a aba/painel do Studio.
+2. Confirmar que o launcher do MindDock fica no header do Studio ao lado do icone de fechar/recolher (nao centralizado).
+3. Fechar/recolher a aba do Studio e confirmar que o launcher nao fica "vazando" fora do contexto.
+4. Abrir o modal de Studio pelo launcher.
+5. Confirmar que lista de itens aparece no modal.
+6. Exportar 1 item textual em `markdown`.
+7. Exportar 1 item visual (video/audio/imagem).
+8. Exportar 1 item Slides.
+9. Exportar lote misto (texto + visuais).
 
 Logs esperados (console/background):
 
@@ -966,6 +995,8 @@ Consequencia direta:
 | pipeline `STUDIO_RESULTS_UPDATED` (`NetworkTrafficInterceptor.ts` + `secure-bridge-listener.ts`) | cache de studio por conta | lixo persistente reaparece apos refresh |
 | `dedupeByNormalizedTitle` (`studioArtifacts.ts` ~1384-1397) | consolidacao final | colisoes: item some ou troca com outro |
 | `overflowBlogPosts` (`studioArtifacts.ts` ~1642-1644) | retorno final ao modal | itens fora dos ids pedidos entram na tela |
+| `resolveStudioExportAnchor` + `resolveStudioPanelHeader` + `resolveRightmostCompactHeaderActionButton` (`sourceDom.ts` ~2766-3120) | ancoragem do launcher no header do Studio | botao centralizado, no host errado, ou longe do fechar/recolher |
+| guarda de host sticky `studio-export` no injetor (`notebooklm-injector.tsx` ~336-352) | desmontagem/visibilidade ao fechar aba Studio | botao residual ("fantasma") quando o Studio fecha |
 
 ### 21.3 Entradas provaveis de "lixo" (prioridade alta)
 
