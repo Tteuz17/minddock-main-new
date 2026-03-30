@@ -259,6 +259,7 @@ class AuthManager {
       return null
     }
 
+    const cachedProfile = await getFromStorage<UserProfile>(STORAGE_KEYS.USER_PROFILE)
     if (cachedProfile?.id === sessionUser.id) {
       return cachedProfile
     }

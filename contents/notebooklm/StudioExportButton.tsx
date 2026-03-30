@@ -15,7 +15,7 @@ import {
 import { buildNotebookAccountKey, buildScopedStorageKey, resolveAuthUserFromUrl } from "~/lib/notebook-account-scope"
 import { EXCLUDED_FROM_EXPORT, resolveFileExtension } from "../../src/background/studioArtifacts"
 import { queryDeepAll, resolveStudioLabelText } from "./sourceDom"
-import { useShadowPortal } from "./useShadowPortal"
+import { useMindDockPortal } from "./useMindDockPortal"
 import {
   EXPORT_PREVIEW_CLOSE_EVENT,
   EXPORT_PREVIEW_OPEN_EVENT,
@@ -26,6 +26,7 @@ import {
 const CONTEXT_EVENT = "MINDDOCK_RPC_CONTEXT"
 const NATIVE_SLIDES_DOWNLOAD_EVENT = "MINDDOCK_NATIVE_SLIDES_DOWNLOAD_URL"
 const NATIVE_SLIDES_CAPTURE_ONLY_EVENT = "MINDDOCK_NATIVE_SLIDES_CAPTURE_ONLY"
+const STUDIO_EXPORT_MODAL_STATE_EVENT = "MINDDOCK_STUDIO_EXPORT_MODAL_STATE"
 const NATIVE_SLIDES_DOWNLOAD_RE = /^https:\/\/contribution\.usercontent\.google\.com\/download\?/i
 
 const SLIDES_PDF_CACHE_TTL = 25_000
@@ -634,6 +635,35 @@ const SHADOW_CSS = `
   @keyframes spin { to { transform: rotate(360deg); } }
 `
 
+const STUDIO_MODAL_SCOPE_CLASS = "minddock-studio-scope"
+
+function buildScopedStudioCss(cssText: string): string {
+  return cssText.replace(/(^|[}\n])(\s*)([^@{}\n][^{}\n]*)\{/g, (match, prefix, whitespace, selectorGroup) => {
+    const selectors = String(selectorGroup ?? "")
+      .split(",")
+      .map((selector) => selector.trim())
+      .filter(Boolean)
+    if (selectors.length === 0) {
+      return match
+    }
+
+    const scopedSelectors = selectors.map((selector) => {
+      const hostNormalized = selector.replace(/:host/gi, `.${STUDIO_MODAL_SCOPE_CLASS}`)
+      if (/^(from|to|\d+%)$/i.test(hostNormalized)) {
+        return hostNormalized
+      }
+      if (hostNormalized.startsWith(`.${STUDIO_MODAL_SCOPE_CLASS}`)) {
+        return hostNormalized
+      }
+      return `.${STUDIO_MODAL_SCOPE_CLASS} ${hostNormalized}`
+    })
+
+    return `${prefix}${whitespace}${scopedSelectors.join(", ")} {`
+  })
+}
+
+const SCOPED_MODAL_CSS = buildScopedStudioCss(SHADOW_CSS)
+
 type StudioFormat = "markdown" | "text" | "pdf" | "docx"
 
 type StudioExportToastStatus = "idle" | "running" | "success" | "error"
@@ -677,6 +707,41 @@ const AUTH_USER_KEY = "nexus_auth_user"
 const STUDIO_FETCH_MESSAGE = "MINDDOCK_FETCH_STUDIO_ARTIFACTS"
 const STUDIO_BINARY_FETCH_MESSAGE = "MINDDOCK_FETCH_BINARY_ASSET"
 const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i
+
+function isExtensionContextInvalidatedError(error: unknown): boolean {
+  const message = String(error instanceof Error ? error.message : error ?? "")
+  return /extension context invalidated/i.test(message)
+}
+
+function hasRuntimeSendMessageSafe(): boolean {
+  try {
+    return Boolean(chrome?.runtime?.sendMessage)
+  } catch {
+    return false
+  }
+}
+
+function getStorageLocalSafe(): chrome.storage.StorageArea | null {
+  try {
+    if (typeof chrome === "undefined") {
+      return null
+    }
+    return chrome.storage?.local ?? null
+  } catch {
+    return null
+  }
+}
+
+function getStorageOnChangedSafe(): typeof chrome.storage.onChanged | null {
+  try {
+    if (typeof chrome === "undefined") {
+      return null
+    }
+    return chrome.storage?.onChanged ?? null
+  } catch {
+    return null
+  }
+}
 
 function resolveNotebookIdFromUrl(): string | null {
   const match = window.location.href.match(UUID_RE)
@@ -835,9 +900,9 @@ async function requestStudioArtifacts(
   bgLog({
     tag: "studio-request",
     idsCount: Array.isArray(ids) ? ids.length : 0,
-    hasRuntime: Boolean(chrome?.runtime?.sendMessage)
+    hasRuntime: hasRuntimeSendMessageSafe()
   })
-  if (!chrome?.runtime?.sendMessage) {
+  if (!hasRuntimeSendMessageSafe()) {
     return []
   }
   if (!Array.isArray(ids) || ids.length === 0) {
@@ -861,24 +926,43 @@ async function requestStudioArtifacts(
   })
 
   const response = await new Promise<any>((resolve) => {
-    chrome.runtime.sendMessage(
-      {
-        type: STUDIO_FETCH_MESSAGE,
-        payload: {
-          ids,
-          notebookId: effectiveNotebookId,
-          forceRefresh: forceRefresh || needRefresh,
-          rpcContext
+    if (!hasRuntimeSendMessageSafe()) {
+      resolve({})
+      return
+    }
+
+    try {
+      chrome.runtime.sendMessage(
+        {
+          type: STUDIO_FETCH_MESSAGE,
+          payload: {
+            ids,
+            notebookId: effectiveNotebookId,
+            forceRefresh: forceRefresh || needRefresh,
+            rpcContext
+          },
+          data: {
+            ids,
+            notebookId: effectiveNotebookId,
+            forceRefresh: forceRefresh || needRefresh,
+            rpcContext
+          }
         },
-        data: {
-          ids,
-          notebookId: effectiveNotebookId,
-          forceRefresh: forceRefresh || needRefresh,
-          rpcContext
+        (resp) => {
+          try {
+            void chrome.runtime?.lastError
+          } catch {
+            // ignore runtime access failures on stale extension contexts
+          }
+          resolve(resp ?? {})
         }
-      },
-      (resp) => resolve(resp ?? {})
-    )
+      )
+    } catch (error) {
+      if (isExtensionContextInvalidatedError(error)) {
+        console.warn("[MindDock][Studio] runtime context invalidated while requesting artifacts")
+      }
+      resolve({})
+    }
   })
 
   const items =
@@ -1185,12 +1269,20 @@ async function loadStudioEntriesFromStorage(): Promise<{
   entries: StudioEntry[]
   scopedKeys: string[]
 } | null> {
-  if (typeof chrome === "undefined" || !chrome.storage?.local) {
+  const storageLocal = getStorageLocalSafe()
+  if (!storageLocal) {
     return null
   }
 
   const accountSnapshot = await new Promise<Record<string, unknown>>((resolve) => {
-    chrome.storage.local.get([ACCOUNT_EMAIL_KEY, AUTH_USER_KEY], (snapshot) => resolve(snapshot ?? {}))
+    try {
+      storageLocal.get([ACCOUNT_EMAIL_KEY, AUTH_USER_KEY], (snapshot) => resolve(snapshot ?? {}))
+    } catch (error) {
+      if (isExtensionContextInvalidatedError(error)) {
+        console.warn("[MindDock][Studio] extension context invalidated while reading account snapshot")
+      }
+      resolve({})
+    }
   })
 
   const accountKey = buildNotebookAccountKey({
@@ -1203,7 +1295,14 @@ async function loadStudioEntriesFromStorage(): Promise<{
   const scopedKeys = Array.from(new Set([scopedKey, fallbackKey]))
 
   const dataSnapshot = await new Promise<Record<string, unknown>>((resolve) => {
-    chrome.storage.local.get(scopedKeys, (snapshot) => resolve(snapshot ?? {}))
+    try {
+      storageLocal.get(scopedKeys, (snapshot) => resolve(snapshot ?? {}))
+    } catch (error) {
+      if (isExtensionContextInvalidatedError(error)) {
+        console.warn("[MindDock][Studio] extension context invalidated while reading studio cache")
+      }
+      resolve({})
+    }
   })
 
   let rawItems: StudioCacheItem[] = []
@@ -1221,14 +1320,24 @@ async function loadStudioEntriesFromStorage(): Promise<{
   void buildStudioDebugText(rawItems, normalized, safeFiltered, usedKey)
 
   if (usedKey && safeFiltered.length > 0 && safeFiltered.length !== normalized.length) {
-    chrome.storage.local.set(
-      {
-        [usedKey]: safeFiltered
-      },
-      () => {
-        void chrome.runtime.lastError
+    try {
+      storageLocal.set(
+        {
+          [usedKey]: safeFiltered
+        },
+        () => {
+          try {
+            void chrome.runtime?.lastError
+          } catch {
+            // ignore runtime access failures on stale extension contexts
+          }
+        }
+      )
+    } catch (error) {
+      if (!isExtensionContextInvalidatedError(error)) {
+        console.warn("[MindDock][Studio] failed to persist filtered cache", error)
       }
-    )
+    }
   }
 
   return { entries: safeFiltered, scopedKeys }
@@ -2547,7 +2656,7 @@ function isInsideMindDockUi(element: HTMLElement): boolean {
   const rootNode = element.getRootNode()
   if (rootNode instanceof ShadowRoot) {
     const host = rootNode.host as HTMLElement | null
-    if (host?.hasAttribute("data-minddock-shadow-host")) {
+    if (host?.hasAttribute("data-minddock-shadow-host") || host?.hasAttribute("data-minddock-host")) {
       return true
     }
   }
@@ -3944,21 +4053,40 @@ async function tryChromeDirectDownload(urls: string[], filename: string): Promis
 
   for (const targetUrl of urls) {
     const downloadId = await new Promise<number | null>((resolve) => {
-      chrome.downloads.download(
-        { url: targetUrl, filename, saveAs: false },
-        (id) => {
-          const runtimeError = chrome.runtime?.lastError
-          if (runtimeError) {
-            console.warn("[MindDock][StudioExportDecision] direct-download-attempt-failed", {
-              url: targetUrl,
-              error: runtimeError.message
-            })
-            resolve(null)
-            return
+      try {
+        chrome.downloads.download(
+          { url: targetUrl, filename, saveAs: false },
+          (id) => {
+            let runtimeErrorMessage = ""
+            try {
+              runtimeErrorMessage = String(chrome.runtime?.lastError?.message ?? "")
+            } catch (runtimeReadError) {
+              console.warn("[MindDock][StudioExportDecision] direct-download-runtime-read-failed", {
+                url: targetUrl,
+                error: getErrorMessage(runtimeReadError)
+              })
+              resolve(null)
+              return
+            }
+
+            if (runtimeErrorMessage) {
+              console.warn("[MindDock][StudioExportDecision] direct-download-attempt-failed", {
+                url: targetUrl,
+                error: runtimeErrorMessage
+              })
+              resolve(null)
+              return
+            }
+            resolve(typeof id === "number" ? id : null)
           }
-          resolve(typeof id === "number" ? id : null)
-        }
-      )
+        )
+      } catch (downloadError) {
+        console.warn("[MindDock][StudioExportDecision] direct-download-attempt-threw", {
+          url: targetUrl,
+          error: getErrorMessage(downloadError)
+        })
+        resolve(null)
+      }
     })
 
     if (downloadId !== null) return true
@@ -4342,30 +4470,29 @@ async function buildStudioExportFiles(
           continue
         }
 
-        const preferDirectDownload = entries.length === 1
         const fetchResult = await fetchBinaryFile(finalUrl, {
           atToken,
           authUser,
-          mode: preferDirectDownload ? "download" : undefined,
+          mode: "buffer",
           filename: filenameHint
         })
 
         if ("downloaded" in fetchResult && fetchResult.downloaded) {
-          directDownloads += 1
-          console.log("[MindDock][StudioExportDecision] binary-direct-background-download", {
+          const urlFilename = buildUniqueStudioFilename(base, "url", usedNames)
+          const shortcut = `[InternetShortcut]\nURL=${finalUrl}\n`
+          files.push({ filename: urlFilename, bytes: encoder.encode(shortcut), isAsset: true })
+          console.warn("[MindDock][StudioExportDecision] unexpected-direct-download-buffer-mode-fallback-url", {
             title: entry.title,
             downloadId: fetchResult.downloadId,
-            size: fetchResult.size ?? null,
-            mimeType: fetchResult.mimeType ?? null
+            fallbackFilename: urlFilename
           })
           if (traceId) {
-            console.log(`[MindDock][StudioExportTrace][${traceId}] binary-fetch-direct-download`, {
+            console.warn(`[MindDock][StudioExportTrace][${traceId}] binary-fetch-unexpected-direct-download-fallback-url`, {
               id: entry.id,
               title: entry.title,
               downloadId: fetchResult.downloadId,
               elapsedMs: Math.round(performance.now() - fetchStartedAt),
-              size: fetchResult.size ?? null,
-              mimeType: fetchResult.mimeType ?? null
+              fallbackFilename: urlFilename
             })
           }
           continue
@@ -4875,13 +5002,24 @@ function StudioModal({ onClose }: { onClose: () => void }) {
       }
     }
 
-    if (chrome?.storage?.onChanged) {
-      chrome.storage.onChanged.addListener(handleStorageChange)
+    const storageOnChanged = getStorageOnChangedSafe()
+    if (storageOnChanged) {
+      try {
+        storageOnChanged.addListener(handleStorageChange)
+      } catch (error) {
+        if (!isExtensionContextInvalidatedError(error)) {
+          console.warn("[MindDock][Studio] failed to register storage listener", error)
+        }
+      }
     }
 
     return () => {
-      if (chrome?.storage?.onChanged) {
-        chrome.storage.onChanged.removeListener(handleStorageChange)
+      if (storageOnChanged) {
+        try {
+          storageOnChanged.removeListener(handleStorageChange)
+        } catch {
+          // no-op: listener teardown can race during extension reload
+        }
       }
     }
   }, [showPreviewOverlay, listEntries])
@@ -6038,45 +6176,24 @@ function StudioModal({ onClose }: { onClose: () => void }) {
         }
       }
 
-      const shouldZip = files.length > 1
       const filenameBase = buildMindDockZipBase("Estudio")
-      trace("download-plan", { shouldZip, files: files.length })
-
-      if (shouldZip) {
-        setExportToast({
-          status: "running",
-          message: `Compactando ${files.length} arquivo(s)...`,
-          progress: 92
-        })
-        await flushUiFrame()
-        const zipBytes = await buildZip(files.map((file) => ({ filename: file.filename, bytes: file.bytes })))
-        setExportToast({
-          status: "success",
-          message: `Exportacao concluida: ${filenameBase}.zip`,
-          progress: 100
-        })
-        triggerDownload(
-          new Blob([toArrayBuffer(zipBytes)], { type: "application/zip" }),
-          `${filenameBase}.zip`
-        )
-        trace("finish-zip", {
-          elapsedTotalMs: Math.round(performance.now() - stageStart),
-          filename: `${filenameBase}.zip`
-        })
-        await sleep(TOAST_MIN_VISIBLE_MS)
-        return
-      }
-
-      const [file] = files
+      trace("download-plan", { zip: true, files: files.length })
+      setExportToast({
+        status: "running",
+        message: `Compactando ${files.length} arquivo(s)...`,
+        progress: 92
+      })
+      await flushUiFrame()
+      const zipBytes = await buildZip(files.map((file) => ({ filename: file.filename, bytes: file.bytes })))
       setExportToast({
         status: "success",
-        message: `Exportacao concluida: ${file.filename}`,
+        message: `Exportacao concluida: ${filenameBase}.zip`,
         progress: 100
       })
-      triggerDownload(new Blob([toArrayBuffer(file.bytes)]), file.filename)
-      trace("finish-single-file", {
+      triggerDownload(new Blob([toArrayBuffer(zipBytes)], { type: "application/zip" }), `${filenameBase}.zip`)
+      trace("finish-zip", {
         elapsedTotalMs: Math.round(performance.now() - stageStart),
-        filename: file.filename
+        filename: `${filenameBase}.zip`
       })
       await sleep(TOAST_MIN_VISIBLE_MS)
     } catch (exportError) {
@@ -6129,8 +6246,8 @@ function StudioModal({ onClose }: { onClose: () => void }) {
       isExporting: isExporting || isHydrating,
       toast: exportToast.status === "idle" ? undefined : exportToast,
       labels: {
-        previewLabTitle: "LABORAT\u00d3RIO DE PR\u00c9-VISUALIZA\u00c7\u00c3O",
-        title: "Pr\u00e9-visualiza\u00e7\u00e3o do Est\u00fadio",
+        previewLabTitle: "LABORATÓRIO DE PRÉ-VISUALIZAÇÃO",
+        title: "Pré-visualização do Estúdio",
         subtitle: "Revise e edite cada resultado antes de exportar.",
         previewTextareaPlaceholder: "Edite o conteudo antes de exportar.",
         noPreview: "Nenhum conteudo para pre-visualizar.",
@@ -6194,11 +6311,11 @@ function StudioModal({ onClose }: { onClose: () => void }) {
             <div>
               <span className="badge">
                 <FileText width={11} height={11} />
-                EXPORTA\u00c7\u00c3O DE EST\u00daDIO
+                EXPORTAÇÃO DE ESTÚDIO
               </span>
             <p className="title">{modalTitle}</p>
             <p className="subtitle">
-              Aqui vamos mostrar o resultado gerado pela opcao escolhida no Est\u00fadio.
+              Aqui vamos mostrar o resultado gerado pela opção escolhida no Estúdio.
             </p>
             </div>
             <button className="close-btn" type="button" aria-label="Fechar" onClick={handleCloseModal}>
@@ -6261,7 +6378,7 @@ function StudioModal({ onClose }: { onClose: () => void }) {
           <div className="source-list">
             {error ? <div className="source-error">{error}</div> : null}
             {!hasAnyEntries && !isLoading && (
-              <div className="source-empty">Nenhum item do Est\u00fadio encontrado.</div>
+              <div className="source-empty">Nenhum item do Estúdio encontrado.</div>
             )}
             {(selectableEntries.length > 0 || filteredVisualEntries.length > 0) && (
               <div className="source-sections">
@@ -6338,7 +6455,7 @@ function StudioModal({ onClose }: { onClose: () => void }) {
               onClick={handlePreviewClick}
               disabled={!hasPreviewSelection || isExporting || isHydrating || showPreviewOverlay}>
               <Eye width={16} height={16} />
-              {isHydrating ? "Carregando..." : "Pr\u00e9via"}
+              {isHydrating ? "Carregando..." : "Prévia"}
             </button>
             <button
               type="button"
@@ -6362,25 +6479,43 @@ function StudioModal({ onClose }: { onClose: () => void }) {
 
 export function StudioExportButton() {
   const [isOpen, setIsOpen] = useState(false)
-  const { shadowRoot, injectCSS } = useShadowPortal("studio-export-modal", isOpen, 2147483646)
+  const portalHost = useMindDockPortal("studio-export-modal", 2147483646)
+
+  const broadcastStudioModalState = useCallback((nextOpen: boolean) => {
+    window.dispatchEvent(
+      new CustomEvent(STUDIO_EXPORT_MODAL_STATE_EVENT, {
+        detail: { isOpen: nextOpen }
+      })
+    )
+  }, [])
 
   useEffect(() => {
     if (!isOpen) return
     bgLog({ tag: "studio-modal-open" })
   }, [isOpen])
+
+  useEffect(() => {
+    broadcastStudioModalState(isOpen)
+
+    return () => {
+      broadcastStudioModalState(false)
+    }
+  }, [isOpen, broadcastStudioModalState])
+
   const cssInjectedRef = useRef(false)
+  const styleRef = useRef<HTMLStyleElement | null>(null)
   const mountRef = useRef<HTMLDivElement | null>(null)
   const rootRef = useRef<Root | null>(null)
 
   useLayoutEffect(() => {
-    if (!shadowRoot) {
+    if (!portalHost) {
       return
     }
 
     if (!mountRef.current) {
       const mount = document.createElement("div")
       mount.id = "minddock-studio-export-root"
-      shadowRoot.appendChild(mount)
+      portalHost.appendChild(mount)
       mountRef.current = mount
     }
 
@@ -6389,7 +6524,11 @@ export function StudioExportButton() {
     }
 
     if (!cssInjectedRef.current) {
-      injectCSS(SHADOW_CSS)
+      const style = document.createElement("style")
+      style.setAttribute("data-minddock-studio-style", "true")
+      style.textContent = SCOPED_MODAL_CSS
+      portalHost.appendChild(style)
+      styleRef.current = style
       cssInjectedRef.current = true
     }
 
@@ -6401,10 +6540,14 @@ export function StudioExportButton() {
       if (mountRef.current?.parentNode) {
         mountRef.current.parentNode.removeChild(mountRef.current)
       }
+      if (styleRef.current?.parentNode) {
+        styleRef.current.parentNode.removeChild(styleRef.current)
+      }
+      styleRef.current = null
       mountRef.current = null
       cssInjectedRef.current = false
     }
-  }, [shadowRoot, injectCSS])
+  }, [portalHost])
 
   useEffect(() => {
     if (!rootRef.current) {
@@ -6414,12 +6557,24 @@ export function StudioExportButton() {
       rootRef.current.render(null)
       return
     }
-    rootRef.current.render(<StudioModal onClose={() => setIsOpen(false)} />)
-  }, [isOpen])
+    rootRef.current.render(
+      <div className={STUDIO_MODAL_SCOPE_CLASS}>
+        <StudioModal
+          onClose={() => {
+            broadcastStudioModalState(false)
+            setIsOpen(false)
+          }}
+        />
+      </div>
+    )
+  }, [isOpen, broadcastStudioModalState])
 
   return (
     <>
-      <div data-minddock-studio-export="true" className="relative ml-1 inline-flex shrink-0 items-center">
+      <div
+        data-minddock-studio-export="true"
+        className="relative ml-auto mr-1 inline-flex shrink-0 items-center"
+        style={{ marginTop: "1px" }}>
         <button
           type="button"
           title="Export Studio"
@@ -6429,11 +6584,17 @@ export function StudioExportButton() {
           onMouseDown={swallowInteraction}
           onClick={(event) => {
             swallowInteraction(event)
-            setIsOpen((prev) => !prev)
+            setIsOpen((prev) => {
+              const next = !prev
+              broadcastStudioModalState(next)
+              return next
+            })
           }}
           className={[
-            "inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg transition-colors cursor-pointer",
-            "bg-transparent text-[#9ba3b0] hover:bg-white/[0.06] hover:text-white"
+            "inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-[11px] border transition-colors cursor-pointer",
+            isOpen
+              ? "border-white/[0.14] bg-[#0a0a0a] text-white"
+              : "border-white/[0.06] bg-[#050505] text-white hover:bg-[#0d0d0d]"
           ].join(" ")}>
           <Download size={15} strokeWidth={1.8} />
         </button>
