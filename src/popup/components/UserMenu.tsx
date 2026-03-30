@@ -2,7 +2,6 @@ import {
   ArrowUp,
   BarChart3,
   ChevronRight,
-  CreditCard,
   LogOut,
   Settings,
   Sparkles,
@@ -24,9 +23,10 @@ import {
 interface UserMenuProps {
   onOpenUsage?: () => void
   onOpenPlans?: () => void
+  onOpenSettings?: () => void
 }
 
-export function UserMenu({ onOpenUsage, onOpenPlans }: UserMenuProps) {
+export function UserMenu({ onOpenUsage, onOpenPlans, onOpenSettings }: UserMenuProps) {
   const { user, signOut } = useAuth()
   const { tier } = useSubscription()
 
@@ -49,7 +49,7 @@ export function UserMenu({ onOpenUsage, onOpenPlans }: UserMenuProps) {
   ).href
 
   return (
-    <div className="pointer-events-none absolute bottom-3 left-3 right-3 z-20">
+    <div className="pointer-events-none absolute bottom-5 left-3 right-3 z-20">
       <div className="rounded-[22px] border border-white/[0.05] bg-[linear-gradient(180deg,#060606_0%,#090a0d_40%,#050505_100%)] p-1.5 shadow-[0_18px_40px_rgba(0,0,0,0.34)] backdrop-blur-2xl">
         <div
           className="pointer-events-auto relative overflow-hidden rounded-[18px] border border-white/[0.08] px-2.5 py-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_8px_20px_rgba(0,0,0,0.2)]"
@@ -164,19 +164,6 @@ export function UserMenu({ onOpenUsage, onOpenPlans }: UserMenuProps) {
                     <DropdownMenuItem asChild>
                       <button
                         type="button"
-                        onClick={() => chrome.tabs.create({ url: "https://minddocklm.digital/billing" })}
-                        className="group flex w-full items-center gap-2.5 rounded-[13px] border border-transparent px-2.5 py-2 text-zinc-300 transition-all hover:border-white/[0.08] hover:bg-white/[0.04] hover:text-white">
-                        <span className="flex h-7 w-7 items-center justify-center rounded-[10px] border border-white/[0.08] bg-white/[0.03] text-zinc-400 group-hover:text-white">
-                          <CreditCard className="h-3.5 w-3.5" />
-                        </span>
-                        <span className="flex-1 text-left text-[12px] font-medium">Subscription</span>
-                        <ChevronRight className="h-3.5 w-3.5 text-zinc-600 group-hover:text-zinc-300" />
-                      </button>
-                    </DropdownMenuItem>
-
-                    <DropdownMenuItem asChild>
-                      <button
-                        type="button"
                         onClick={() => {
                           if (onOpenUsage) {
                             onOpenUsage()
@@ -196,7 +183,13 @@ export function UserMenu({ onOpenUsage, onOpenPlans }: UserMenuProps) {
                     <DropdownMenuItem asChild>
                       <button
                         type="button"
-                        onClick={() => chrome.tabs.create({ url: "https://minddocklm.digital/settings" })}
+                        onClick={() => {
+                          if (onOpenSettings) {
+                            onOpenSettings()
+                            return
+                          }
+                          chrome.tabs.create({ url: "https://minddocklm.digital/settings" })
+                        }}
                         className="group flex w-full items-center gap-2.5 rounded-[13px] border border-transparent px-2.5 py-2 text-zinc-300 transition-all hover:border-white/[0.08] hover:bg-white/[0.04] hover:text-white">
                         <span className="flex h-7 w-7 items-center justify-center rounded-[10px] border border-white/[0.08] bg-white/[0.03] text-zinc-400 group-hover:text-white">
                           <Settings className="h-3.5 w-3.5" />

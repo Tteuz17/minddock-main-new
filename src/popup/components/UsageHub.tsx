@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react"
 import { motion } from "framer-motion"
-import { ArrowLeft, BrainCircuit, Sparkles, Wand2 } from "lucide-react"
-import { STORAGE_KEYS } from "~/lib/constants"
+import { ArrowLeft, ArrowUpRight, BrainCircuit, Sparkles, Wand2 } from "lucide-react"
+import { PLAN_NAMES, STORAGE_KEYS, URLS } from "~/lib/constants"
 import { useSubscription } from "~/hooks/useSubscription"
 
 interface UsageHubProps {
@@ -21,6 +21,14 @@ interface AiMonthlyUsage {
   agilePrompts: number
   docksSummaries: number
   brainMerges: number
+}
+
+type QuotaState = "locked" | "limited" | "no_cap"
+
+interface QuotaDescriptor {
+  state: QuotaState
+  limit: number
+  display: string
 }
 
 const EMPTY_DAILY_USAGE: DailyUsage = { date: "", imports: 0, exports: 0, aiCalls: 0, captures: 0 }
@@ -69,27 +77,81 @@ function normalizeDailyUsage(value: unknown): DailyUsage {
   }
 }
 
-function toPercent(used: number, limit: number | null): number {
-  if (!limit || limit <= 0) {
+function resolveQuota(
+  rawLimit: number | "unlimited" | undefined,
+  featureEnabled: boolean
+): QuotaDescriptor {
+  if (!featureEnabled) {
+    return { state: "locked", limit: 0, display: "Locked" }
+  }
+  if (rawLimit === "unlimited") {
+    return { state: "no_cap", limit: 0, display: "No cap" }
+  }
+  if (typeof rawLimit === "number") {
+    const safeLimit = Math.max(0, Math.floor(rawLimit))
+    return { state: "limited", limit: safeLimit, display: String(safeLimit) }
+  }
+  return { state: "limited", limit: 0, display: "0" }
+}
+
+function toPercent(used: number, quota: QuotaDescriptor): number {
+  if (quota.state !== "limited" || quota.limit <= 0) {
     return 0
   }
-  return Math.min((used / limit) * 100, 100)
+  return Math.min((used / quota.limit) * 100, 100)
+}
+
+function describeQuotaRemaining(used: number, quota: QuotaDescriptor): string {
+  if (quota.state === "locked") {
+    return "Locked on this plan"
+  }
+  if (quota.state === "no_cap") {
+    return "No monthly cap on this plan"
+  }
+  return `${Math.max(quota.limit - used, 0)} remaining this month`
 }
 
 export function UsageHub({ onBack }: UsageHubProps) {
-  const { limits } = useSubscription()
+  const { tier, limits } = useSubscription()
   const [dailyUsage, setDailyUsage] = useState<DailyUsage>(EMPTY_DAILY_USAGE)
   const [monthlyUsage, setMonthlyUsage] = useState<AiMonthlyUsage>({
     ...EMPTY_MONTHLY_USAGE,
     monthKey: getCurrentMonthKey()
   })
 
-  const agileLimit =
-    typeof limits.agile_prompts_per_month === "number" ? limits.agile_prompts_per_month : null
-  const docksLimit =
-    typeof limits.docks_summaries_per_month === "number" ? limits.docks_summaries_per_month : null
-  const brainMergeLimit =
-    typeof limits.brain_merges_per_month === "number" ? limits.brain_merges_per_month : null
+  const isFreeOrPro = tier === "free" || tier === "pro"
+  const planName = PLAN_NAMES[tier]
+
+  const agileQuota = useMemo(
+    () => resolveQuota(limits.agile_prompts_per_month, limits.ai_features),
+    [limits.agile_prompts_per_month, limits.ai_features]
+  )
+  const docksQuota = useMemo(
+    () => resolveQuota(limits.docks_summaries_per_month, limits.zettelkasten),
+    [limits.docks_summaries_per_month, limits.zettelkasten]
+  )
+  const brainMergeQuota = useMemo(
+    () => resolveQuota(limits.brain_merges_per_month, limits.ai_features),
+    [limits.brain_merges_per_month, limits.ai_features]
+  )
+
+  const aiLimitsSummary = useMemo(() => {
+    if (!limits.ai_features) {
+      return `Current limits (${planName}): Agile locked + Docks locked + Brain Merge locked per month.`
+    }
+
+    return `Current limits (${planName}): ${
+      agileQuota.state === "limited" ? `${agileQuota.limit} Agile Prompts` : "Agile no cap"
+    } + ${
+      docksQuota.state === "limited" ? `${docksQuota.limit} Dock summaries` : "Docks no cap"
+    } + ${
+      brainMergeQuota.state === "limited" ? `${brainMergeQuota.limit} Brain Merges` : "Brain Merge no cap"
+    } per month.`
+  }, [limits.ai_features, planName, agileQuota.state, agileQuota.limit, docksQuota.state, docksQuota.limit, brainMergeQuota.state, brainMergeQuota.limit])
+
+  const openThinkerPricing = () => {
+    chrome.tabs.create({ url: `${URLS.MINDDOCK_LANDING}/#pricing` })
+  }
 
   useEffect(() => {
     const hydrate = (): void => {
@@ -132,21 +194,6 @@ export function UsageHub({ onBack }: UsageHubProps) {
     return () => chrome.storage.onChanged.removeListener(handleStorage)
   }, [])
 
-  const agileRemaining = useMemo(() => {
-    if (agileLimit === null) return null
-    return Math.max(agileLimit - monthlyUsage.agilePrompts, 0)
-  }, [agileLimit, monthlyUsage.agilePrompts])
-
-  const docksRemaining = useMemo(() => {
-    if (docksLimit === null) return null
-    return Math.max(docksLimit - monthlyUsage.docksSummaries, 0)
-  }, [docksLimit, monthlyUsage.docksSummaries])
-
-  const brainMergeRemaining = useMemo(() => {
-    if (brainMergeLimit === null) return null
-    return Math.max(brainMergeLimit - monthlyUsage.brainMerges, 0)
-  }, [brainMergeLimit, monthlyUsage.brainMerges])
-
   return (
     <div className="relative flex h-full flex-col bg-[#050505] text-white">
       <div className="flex items-center gap-2 px-3 pb-1 pt-2.5">
@@ -174,20 +221,27 @@ export function UsageHub({ onBack }: UsageHubProps) {
             <p className="text-[10px] font-medium uppercase tracking-[0.16em] text-zinc-500">
               AI Plan
             </p>
+            <div className="inline-flex w-fit items-center gap-1.5 rounded-full border border-white/[0.1] bg-white/[0.03] px-2 py-0.5">
+              <span className="text-[9px] uppercase tracking-[0.12em] text-zinc-500">Current plan</span>
+              <span className="rounded-full border border-[#facc15]/30 bg-[#facc15]/10 px-1.5 py-[1px] text-[9px] font-semibold text-[#facc15]">
+                {planName}
+              </span>
+            </div>
             <div className="flex items-center gap-2 text-[11px] text-zinc-300">
               <BrainCircuit size={13} className="text-[#facc15]" />
               <span>Claude Sonnet 4.6</span>
             </div>
-            <p className="text-[10px] leading-relaxed text-zinc-400">
-              {`Current limits: ${
-                agileLimit !== null ? `${agileLimit} Agile Prompts` : "Agile unlimited"
-              } + ${
-                docksLimit !== null ? `${docksLimit} Dock summaries` : "Docks unlimited"
-              } + ${
-                brainMergeLimit !== null ? `${brainMergeLimit} Brain Merges` : "Brain Merge unlimited"
-              } per month.`}
-            </p>
+            <p className="text-[10px] leading-relaxed text-zinc-400">{aiLimitsSummary}</p>
             <p className="text-[10px] text-zinc-500">AI calls today: {dailyUsage.aiCalls}</p>
+            {isFreeOrPro ? (
+              <button
+                type="button"
+                onClick={openThinkerPricing}
+                className="group inline-flex w-fit items-center gap-1.5 rounded-lg border border-[#facc15]/40 bg-[#facc15]/15 px-2.5 py-1.5 text-[10px] font-semibold text-[#facc15] transition hover:-translate-y-px hover:bg-[#facc15]/25">
+                Increase AI limits
+                <ArrowUpRight size={11} className="transition group-hover:translate-x-[1px] group-hover:-translate-y-[1px]" />
+              </button>
+            ) : null}
           </div>
         </motion.div>
 
@@ -203,18 +257,18 @@ export function UsageHub({ onBack }: UsageHubProps) {
               </p>
               <p className="text-[10px] text-zinc-400">
                 {monthlyUsage.agilePrompts}
-                {agileLimit !== null ? ` / ${agileLimit}` : " / unlimited"}
+                {` / ${agileQuota.display}`}
               </p>
             </div>
 
             <div className="h-2 overflow-hidden rounded-full bg-white/10">
               <div
                 className="h-full rounded-full bg-[linear-gradient(90deg,#facc15,#f59e0b)]"
-                style={{ width: `${toPercent(monthlyUsage.agilePrompts, agileLimit)}%` }}
+                style={{ width: `${toPercent(monthlyUsage.agilePrompts, agileQuota)}%` }}
               />
             </div>
             <p className="mt-1 text-[10px] text-zinc-500">
-              {agileRemaining !== null ? `${agileRemaining} remaining this month` : "Unlimited"}
+              {describeQuotaRemaining(monthlyUsage.agilePrompts, agileQuota)}
             </p>
           </div>
         </motion.div>
@@ -231,18 +285,18 @@ export function UsageHub({ onBack }: UsageHubProps) {
               </p>
               <p className="text-[10px] text-zinc-400">
                 {monthlyUsage.docksSummaries}
-                {docksLimit !== null ? ` / ${docksLimit}` : " / unlimited"}
+                {` / ${docksQuota.display}`}
               </p>
             </div>
 
             <div className="h-2 overflow-hidden rounded-full bg-white/10">
               <div
                 className="h-full rounded-full bg-[linear-gradient(90deg,#38bdf8,#0ea5e9)]"
-                style={{ width: `${toPercent(monthlyUsage.docksSummaries, docksLimit)}%` }}
+                style={{ width: `${toPercent(monthlyUsage.docksSummaries, docksQuota)}%` }}
               />
             </div>
             <p className="mt-1 text-[10px] text-zinc-500">
-              {docksRemaining !== null ? `${docksRemaining} remaining this month` : "Unlimited"}
+              {describeQuotaRemaining(monthlyUsage.docksSummaries, docksQuota)}
             </p>
           </div>
         </motion.div>
@@ -259,18 +313,18 @@ export function UsageHub({ onBack }: UsageHubProps) {
               </p>
               <p className="text-[10px] text-zinc-400">
                 {monthlyUsage.brainMerges}
-                {brainMergeLimit !== null ? ` / ${brainMergeLimit}` : " / unlimited"}
+                {` / ${brainMergeQuota.display}`}
               </p>
             </div>
 
             <div className="h-2 overflow-hidden rounded-full bg-white/10">
               <div
                 className="h-full rounded-full bg-[linear-gradient(90deg,#a855f7,#9333ea)]"
-                style={{ width: `${toPercent(monthlyUsage.brainMerges, brainMergeLimit)}%` }}
+                style={{ width: `${toPercent(monthlyUsage.brainMerges, brainMergeQuota)}%` }}
               />
             </div>
             <p className="mt-1 text-[10px] text-zinc-500">
-              {brainMergeRemaining !== null ? `${brainMergeRemaining} remaining this month` : "Unlimited"}
+              {describeQuotaRemaining(monthlyUsage.brainMerges, brainMergeQuota)}
             </p>
           </div>
         </motion.div>

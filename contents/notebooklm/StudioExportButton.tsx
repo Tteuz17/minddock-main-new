@@ -6419,32 +6419,24 @@ export function StudioExportButton() {
 
   return (
     <>
-      <div data-minddock-studio-export="true" className="relative mr-1 inline-flex shrink-0 items-center">
-        <div className="inline-flex shrink-0 items-center gap-1 rounded-[12px] border border-white/[0.08] bg-[#06080c] p-[3px]">
-          <button
-            type="button"
-            title="Export"
-            aria-label="Export"
-            aria-haspopup="dialog"
-            aria-expanded={isOpen}
-            onMouseDown={swallowInteraction}
-            onClick={(event) => {
-              swallowInteraction(event)
-              setIsOpen((prev) => !prev)
-            }}
-            className={[
-              "inline-flex h-8 shrink-0 items-center gap-1.5 rounded-[9px] border px-3 text-[13px] font-medium transition-colors",
-              "border-transparent bg-transparent text-[#cfd6e3] hover:bg-white/[0.04] hover:text-white cursor-pointer"
-            ].join(" ")}>
-            <Download size={14} strokeWidth={1.9} className="text-[#d7deea]" />
-            <span className="whitespace-nowrap">Export</span>
-            <ChevronDown
-              size={14}
-              strokeWidth={1.9}
-              className={["transition-transform", isOpen ? "rotate-180" : ""].join(" ")}
-            />
-          </button>
-        </div>
+      <div data-minddock-studio-export="true" className="relative ml-1 inline-flex shrink-0 items-center">
+        <button
+          type="button"
+          title="Export Studio"
+          aria-label="Export Studio"
+          aria-haspopup="dialog"
+          aria-expanded={isOpen}
+          onMouseDown={swallowInteraction}
+          onClick={(event) => {
+            swallowInteraction(event)
+            setIsOpen((prev) => !prev)
+          }}
+          className={[
+            "inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg transition-colors cursor-pointer",
+            "bg-transparent text-[#9ba3b0] hover:bg-white/[0.06] hover:text-white"
+          ].join(" ")}>
+          <Download size={15} strokeWidth={1.8} />
+        </button>
       </div>
     </>
   )

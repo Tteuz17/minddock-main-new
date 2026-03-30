@@ -550,6 +550,28 @@ class MessageRouter {
     }
   }
 
+  // Commands that content scripts on external pages are allowed to call.
+  // Everything else requires the message to come from within the extension itself.
+  private static readonly EXTERNAL_ALLOWED_COMMANDS = new Set([
+    "MINDDOCK_SAVE_TOKENS",
+    MESSAGE_ACTIONS.STORE_SESSION_TOKENS,
+    "MINDDOCK_IMPORT_AI_CHAT",
+    "MINDDOCK_HIGHLIGHT_SNIPE",
+    "PROTOCOL_APPEND_SOURCE",
+    "MINDDOCK_ADD_SOURCE",
+    "MINDDOCK_GET_AUTH",
+    MESSAGE_ACTIONS.CMD_AUTH_GET_STATUS,
+  ])
+
+  private isSenderTrusted(action: string, sender: MessageSender): boolean {
+    // Messages from the extension itself (popup, sidepanel, background) always trusted.
+    if (sender.id === chrome.runtime.id) {
+      return true
+    }
+    // External content scripts (injected into web pages) may only call allowlisted commands.
+    return MessageRouter.EXTERNAL_ALLOWED_COMMANDS.has(action)
+  }
+
   async handle(
     message: ChromeMessage & { action?: string; intent?: string; tokens?: unknown },
     sender: MessageSender,
@@ -562,6 +584,12 @@ class MessageRouter {
     }
 
     const action = this.resolveIncomingAction(message)
+
+    if (!this.isSenderTrusted(action, sender)) {
+      sendResponse(this.normalizeResponse(this.fail("Unauthorized")))
+      return
+    }
+
     const handler = this.handlers.get(action)
     if (!handler) {
       sendResponse(
@@ -1055,44 +1083,6 @@ class MessageRouter {
       isAuthenticated: !!user,
       user
     })
-  }
-
-  private async handleDevBypassSignIn(payload: unknown): Promise<StandardResponse> {
-    const requestedTier = String((payload as { tier?: unknown })?.tier ?? "")
-      .trim()
-      .toLowerCase()
-    const requestedCycle = String((payload as { cycle?: unknown })?.cycle ?? "")
-      .trim()
-      .toLowerCase()
-    const tier: SubscriptionTier = requestedTier === "thinker_pro" ? "thinker_pro" : "thinker"
-    const cycle = requestedCycle === "yearly" ? "yearly" : "monthly"
-    const now = new Date().toISOString()
-
-    const user: UserProfile = {
-      id: "dev-thinker-test-user",
-      email: "thinker.test@minddock.local",
-      displayName: "Thinker Test",
-      subscriptionTier: tier,
-      subscriptionStatus: "active",
-      subscriptionCycle: cycle,
-      createdAt: now,
-      updatedAt: now
-    }
-
-    await chrome.storage.local.set({
-      [STORAGE_KEYS.USER_PROFILE]: user,
-      [STORAGE_KEYS.DEV_AUTH_BYPASS]: {
-        enabled: true,
-        tier,
-        cycle,
-        token: "dev-bypass-token",
-        activatedAt: now
-      }
-    })
-
-    this.broadcastAuthChanged(user)
-
-    return this.ok({ isAuthenticated: true, user, bypass: true })
   }
 
   private async handleGetNotebooks(): Promise<StandardResponse> {
@@ -4820,16 +4810,8 @@ class MessageRouter {
     }
 
     const currentUser = await authManager.initializeSession()
-    const isDevBypassUser =
-      String(currentUser?.id ?? "").trim() === "dev-thinker-test-user" ||
-      String(currentUser?.email ?? "")
-        .trim()
-        .toLowerCase()
-        .endsWith("@minddock.local")
-    if (isDevBypassUser) {
-      return this.fail(
-        "Checkout indisponivel sem login real. Faca login com Google para abrir Stripe Checkout."
-      )
+    if (!currentUser) {
+      return this.fail("Login necessario para abrir Stripe Checkout.")
     }
 
     const resolveTargetTierFromPriceId = (id: string): SubscriptionTier | null => {

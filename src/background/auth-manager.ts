@@ -21,13 +21,6 @@ interface SupabaseConfig {
   anonKey: string
 }
 
-interface DevAuthBypassState {
-  enabled: boolean
-  tier: SubscriptionTier
-  cycle: SubscriptionCycle
-  token: string
-}
-
 class AuthManager {
   private supabase: SupabaseClient | null = null
   private listeners: Array<(user: UserProfile | null) => void> = []
@@ -39,28 +32,13 @@ class AuthManager {
     await removeFromSecureStorage(FIXED_STORAGE_KEYS.SUPABASE_SESSION)
     await removeFromStorage(STORAGE_KEYS.USER_PROFILE)
     await removeFromStorage(STORAGE_KEYS.SUBSCRIPTION)
-    await removeFromStorage(STORAGE_KEYS.DEV_AUTH_BYPASS)
+    await removeFromStorage("minddock_dev_auth_bypass")
     if (notify) {
       this.notifyListeners(null)
     }
   }
 
   async initializeSession(): Promise<UserProfile | null> {
-    const devBypassState = await this.getDevAuthBypassState()
-    if (devBypassState) {
-      const cachedProfile = await getFromStorage<UserProfile>(STORAGE_KEYS.USER_PROFILE)
-      if (cachedProfile && !this.isDevBypassProfile(cachedProfile)) {
-        await removeFromStorage(STORAGE_KEYS.DEV_AUTH_BYPASS)
-      } else {
-      const profile = cachedProfile ?? this.buildDevBypassProfile(devBypassState.tier, devBypassState.cycle)
-      if (!cachedProfile) {
-        await setInStorage(STORAGE_KEYS.USER_PROFILE, profile)
-      }
-      this.notifyListeners(profile)
-      return profile
-      }
-    }
-
     const client = await this.getClient()
     const { data, error } = await client.auth.getSession()
 
@@ -101,7 +79,7 @@ class AuthManager {
     }
 
     await this.persistSession(data.session)
-    await removeFromStorage(STORAGE_KEYS.DEV_AUTH_BYPASS)
+    await removeFromStorage("minddock_dev_auth_bypass")
     const profile = await this.fetchProfile(data.session.user)
     this.notifyListeners(profile)
     return profile
@@ -139,7 +117,7 @@ class AuthManager {
       }
 
       await this.persistSession(data.session)
-      await removeFromStorage(STORAGE_KEYS.DEV_AUTH_BYPASS)
+      await removeFromStorage("minddock_dev_auth_bypass")
       const profile = await this.fetchProfile(data.session.user)
       this.notifyListeners(profile)
       return profile
@@ -163,7 +141,7 @@ class AuthManager {
       }
 
       await this.persistSession(data.session)
-      await removeFromStorage(STORAGE_KEYS.DEV_AUTH_BYPASS)
+      await removeFromStorage("minddock_dev_auth_bypass")
       const profile = await this.fetchProfile(data.session.user)
       this.notifyListeners(profile)
       return profile
@@ -211,12 +189,6 @@ class AuthManager {
       return null
     }
 
-    const devBypassState = await this.getDevAuthBypassState()
-    const cachedProfile = await getFromStorage<UserProfile>(STORAGE_KEYS.USER_PROFILE)
-    if (devBypassState && this.isDevBypassProfile(cachedProfile)) {
-      return devBypassState.token
-    }
-
     return null
   }
 
@@ -229,14 +201,13 @@ class AuthManager {
     }
 
     await this.persistSession(data.session)
-    await removeFromStorage(STORAGE_KEYS.DEV_AUTH_BYPASS)
+    await removeFromStorage("minddock_dev_auth_bypass")
     const profile = await this.fetchProfile(data.session.user)
     this.notifyListeners(profile)
     return data.session.access_token
   }
 
   async getVerifiedAccessToken(): Promise<string | null> {
-    const client = await this.getClient()
     const currentToken = await this.getAccessToken()
     if (!currentToken) {
       return null
@@ -247,8 +218,8 @@ class AuthManager {
       return null
     }
 
-    const { data: currentUserData, error: currentTokenError } = await client.auth.getUser(currentToken)
-    if (!currentTokenError && currentUserData.user) {
+    const currentTokenValid = await this.verifyAccessToken(currentToken)
+    if (currentTokenValid) {
       return currentToken
     }
 
@@ -257,8 +228,8 @@ class AuthManager {
       return null
     }
 
-    const { data: refreshedUserData, error: refreshedTokenError } = await client.auth.getUser(refreshedToken)
-    if (!refreshedTokenError && refreshedUserData.user) {
+    const refreshedTokenValid = await this.verifyAccessToken(refreshedToken)
+    if (refreshedTokenValid) {
       return refreshedToken
     }
 
@@ -274,17 +245,6 @@ class AuthManager {
   }
 
   async getCurrentUser(): Promise<UserProfile | null> {
-    const cachedProfile = await getFromStorage<UserProfile>(STORAGE_KEYS.USER_PROFILE)
-    const devBypassState = await this.getDevAuthBypassState()
-    if (devBypassState) {
-      if (this.isDevBypassProfile(cachedProfile)) {
-        return cachedProfile
-      }
-      const profile = this.buildDevBypassProfile(devBypassState.tier, devBypassState.cycle)
-      await setInStorage(STORAGE_KEYS.USER_PROFILE, profile)
-      return profile
-    }
-
     const client = await this.getClient()
     const { data: sessionData, error: sessionError } = await client.auth.getSession()
 
@@ -354,18 +314,6 @@ class AuthManager {
 
   private async handleAuthStateChanged(session: Session | null): Promise<void> {
     if (!session?.user) {
-      const devBypassState = await this.getDevAuthBypassState()
-      if (devBypassState) {
-        const cachedProfile = await getFromStorage<UserProfile>(STORAGE_KEYS.USER_PROFILE)
-        const profile =
-          cachedProfile ?? this.buildDevBypassProfile(devBypassState.tier, devBypassState.cycle)
-        if (!cachedProfile) {
-          await setInStorage(STORAGE_KEYS.USER_PROFILE, profile)
-        }
-        this.notifyListeners(profile)
-        return
-      }
-
       await removeFromSecureStorage(FIXED_STORAGE_KEYS.SUPABASE_SESSION)
       await removeFromStorage(STORAGE_KEYS.USER_PROFILE)
       this.notifyListeners(null)
@@ -446,48 +394,36 @@ class AuthManager {
     return mapped
   }
 
+  private async verifyAccessToken(token: string): Promise<boolean> {
+    const normalizedToken = String(token ?? "").trim()
+    if (!normalizedToken || normalizedToken.split(".").length !== 3) {
+      return false
+    }
+
+    let config: SupabaseConfig
+    try {
+      config = await this.resolveSupabaseConfig()
+    } catch {
+      return false
+    }
+
+    try {
+      const response = await fetch(`${config.url}/auth/v1/user`, {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${normalizedToken}`,
+          apikey: config.anonKey
+        }
+      })
+      return response.ok
+    } catch {
+      return false
+    }
+  }
+
   private notifyListeners(user: UserProfile | null): void {
     for (const listener of this.listeners) {
       listener(user)
-    }
-  }
-
-  private async getDevAuthBypassState(): Promise<DevAuthBypassState | null> {
-    const raw = await getFromStorage<Record<string, unknown>>(STORAGE_KEYS.DEV_AUTH_BYPASS)
-    if (!raw || typeof raw !== "object") {
-      return null
-    }
-
-    if (raw.enabled !== true) {
-      return null
-    }
-
-    const tierRaw = String(raw.tier ?? "").trim().toLowerCase()
-    const tier: SubscriptionTier = tierRaw === "thinker_pro" ? "thinker_pro" : "thinker"
-    const cycle = this.normalizeSubscriptionCycle(raw.cycle)
-    const token = String(raw.token ?? "").trim() || "dev-bypass-token"
-    return {
-      enabled: true,
-      tier,
-      cycle: cycle === "none" ? "monthly" : cycle,
-      token
-    }
-  }
-
-  private buildDevBypassProfile(
-    tier: SubscriptionTier,
-    cycle: SubscriptionCycle = "monthly"
-  ): UserProfile {
-    const now = new Date().toISOString()
-    return {
-      id: "dev-thinker-test-user",
-      email: "thinker.test@minddock.local",
-      displayName: "Thinker Test",
-      subscriptionTier: tier,
-      subscriptionStatus: "active",
-      subscriptionCycle: cycle,
-      createdAt: now,
-      updatedAt: now
     }
   }
 
@@ -499,15 +435,6 @@ class AuthManager {
       return candidate
     }
     return "none"
-  }
-
-  private isDevBypassProfile(profile: UserProfile | null | undefined): boolean {
-    const userId = String(profile?.id ?? "").trim()
-    const email = String(profile?.email ?? "")
-      .trim()
-      .toLowerCase()
-
-    return userId === "dev-thinker-test-user" || email.endsWith("@minddock.local")
   }
 
   private isAuthSessionMissingError(error: { message?: string } | null | undefined): boolean {

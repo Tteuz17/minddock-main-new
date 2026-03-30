@@ -1,6 +1,13 @@
 import { useCallback, useEffect, useState } from "react"
 import type { AuthState, UserProfile } from "~/lib/types"
 
+type AuthCommandResponse = {
+  success?: boolean
+  error?: string
+  payload?: { user?: UserProfile | null; isAuthenticated?: boolean }
+  data?: { user?: UserProfile | null; isAuthenticated?: boolean }
+}
+
 function getSafeRuntime(): typeof chrome.runtime | null {
   if (typeof chrome === "undefined") {
     return null
@@ -16,6 +23,47 @@ function getSafeRuntime(): typeof chrome.runtime | null {
   } catch {
     return null
   }
+}
+
+function sendRuntimeMessageWithTimeout(
+  runtime: typeof chrome.runtime,
+  message: { command: string },
+  timeoutMs = 12_000
+): Promise<unknown> {
+  const boundedTimeoutMs = Math.max(1_000, timeoutMs)
+
+  return new Promise((resolve, reject) => {
+    let settled = false
+    const timeoutId = setTimeout(() => {
+      if (settled) {
+        return
+      }
+
+      settled = true
+      reject(new Error("Tempo limite ao comunicar com o background da extensao."))
+    }, boundedTimeoutMs)
+
+    runtime
+      .sendMessage(message)
+      .then((response) => {
+        if (settled) {
+          return
+        }
+
+        settled = true
+        clearTimeout(timeoutId)
+        resolve(response)
+      })
+      .catch((error) => {
+        if (settled) {
+          return
+        }
+
+        settled = true
+        clearTimeout(timeoutId)
+        reject(error)
+      })
+  })
 }
 
 export function useAuth(): AuthState & {
@@ -42,9 +90,9 @@ export function useAuth(): AuthState & {
         return
       }
 
-      const response = await runtime.sendMessage({
+      const response = await sendRuntimeMessageWithTimeout(runtime, {
         command: "MINDDOCK_CMD_AUTH_GET_STATUS"
-      })
+      }) as AuthCommandResponse
 
       if (response?.success === false) {
         setError(String(response.error ?? "Falha ao verificar autenticacao."))
@@ -108,7 +156,11 @@ export function useAuth(): AuthState & {
         throw new Error("Contexto da extensao indisponivel. Recarregue a pagina.")
       }
 
-      const response = await runtime.sendMessage({ command: "MINDDOCK_SIGN_IN" })
+      const response = await sendRuntimeMessageWithTimeout(
+        runtime,
+        { command: "MINDDOCK_SIGN_IN" },
+        20_000
+      ) as AuthCommandResponse
       if (response?.success === false) {
         throw new Error(String(response.error ?? "Falha ao iniciar login com Google."))
       }
@@ -144,7 +196,9 @@ export function useAuth(): AuthState & {
       return
     }
 
-    await runtime.sendMessage({ command: "MINDDOCK_CMD_AUTH_SIGN_OUT" })
+    await sendRuntimeMessageWithTimeout(runtime, {
+      command: "MINDDOCK_CMD_AUTH_SIGN_OUT"
+    })
     setError(null)
     setState({ user: null, isLoading: false, isAuthenticated: false })
   }, [])

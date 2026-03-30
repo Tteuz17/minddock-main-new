@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react"
 import dynamic from "next/dynamic"
+import WaitlistForm from "@/components/ui/WaitlistForm"
 
 const Sparkles = dynamic(
   () => import("@/components/ui/sparkles").then((mod) => mod.Sparkles),
@@ -82,26 +83,9 @@ export default function CTASection() {
           Install MindDock and turn NotebookLM into a research system that actually grows with you.
         </p>
 
-        <a
-          href="https://chromewebstore.google.com/detail/minddock/your-extension-id"
-          target="_blank"
-          rel="noopener noreferrer"
-          className="mt-10 inline-flex items-center gap-2.5 rounded-full px-7 py-4 text-sm font-semibold transition-opacity hover:opacity-88"
-          style={{ background: "#ffffff", color: "#000000" }}
-        >
-          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" aria-hidden="true" className="shrink-0">
-            <path d="M12 2a10 10 0 0 1 8.66 5H12Z" fill="#EA4335" />
-            <path d="M3.34 7A10 10 0 0 0 7.5 21.33L12 13Z" fill="#34A853" />
-            <path d="M12 22a10 10 0 0 0 8.66-15H12l-4.5 7.33Z" fill="#FBBC05" />
-            <circle cx="12" cy="12" r="5" fill="#fff" />
-            <circle cx="12" cy="12" r="3.5" fill="#4285F4" />
-          </svg>
-          Add to Chrome — it's free
-        </a>
-
-        <p className="mt-5 text-[11px] text-white/22">
-          No account required &nbsp;·&nbsp; Chrome extension &nbsp;·&nbsp; Free plan forever
-        </p>
+        <div className="mt-10 flex w-full flex-col items-center gap-2">
+          <WaitlistForm />
+        </div>
       </div>
     </section>
   )

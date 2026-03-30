@@ -20,6 +20,43 @@ const MINDDOCK_HIGHLIGHT_PARENT_ID = "MINDDOCK_HIGHLIGHT_PARENT"
 const MINDDOCK_FOLDER_PREFIX = "MINDDOCK_FOLDER_"
 const LEGACY_SNIPE_MENU_ID = "minddock_snipe"
 
+function normalizeHexColor(input: unknown): string {
+  const raw = String(input ?? "").trim().toLowerCase()
+  const match = raw.match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i)
+  if (!match) {
+    return ""
+  }
+
+  const value = match[1]
+  if (value.length === 3) {
+    return `#${value[0]}${value[0]}${value[1]}${value[1]}${value[2]}${value[2]}`
+  }
+
+  return `#${value}`
+}
+
+function resolveFolderColorDot(input: unknown): string {
+  const normalized = normalizeHexColor(input)
+  switch (normalized) {
+    case "#3b82f6":
+      return "\u{1F535}" // blue
+    case "#8b5cf6":
+      return "\u{1F7E3}" // purple
+    case "#f97316":
+      return "\u{1F7E0}" // orange
+    case "#ef4444":
+      return "\u{1F534}" // red
+    case "#22c55e":
+      return "\u{1F7E2}" // green
+    case "#eab308":
+      return "\u{1F7E1}" // yellow
+    case "#06b6d4":
+      return "\u{1F537}" // large blue diamond
+    default:
+      return "\u{26AA}" // white
+  }
+}
+
 void authManager.initializeSession().catch((error) => {
   console.warn("[MindDock] Falha ao inicializar sessao:", error)
 })
@@ -56,29 +93,27 @@ async function ensureMindDockSelectionContextMenu() {
   // Parent item
   await createContextMenu({
     id: MINDDOCK_HIGHLIGHT_PARENT_ID,
-    title: "Save highlight — MindDock",
+    title: "MindDock",
     contexts: ["selection"],
   })
 
   // One submenu item per folder
   for (const folder of folders) {
+    const folderName = String(folder.name ?? "").trim()
+    const folderIcon = String(folder.icon ?? "").trim() || "\u{1F4C1}"
+    const folderColorDot = resolveFolderColorDot(folder.color)
+    if (!folderName) {
+      continue
+    }
+
     await createContextMenu({
       id: `${MINDDOCK_FOLDER_PREFIX}${folder.id}`,
       parentId: MINDDOCK_HIGHLIGHT_PARENT_ID,
-      title: folder.name,
+      title: `${folderColorDot} ${folderIcon} ${folderName}`,
       contexts: ["selection"],
     }).catch(() => {})
   }
-
-  // Separator + "Send to NotebookLM" fallback
-  await createContextMenu({
-    id: `${MINDDOCK_FOLDER_PREFIX}notebooklm`,
-    parentId: MINDDOCK_HIGHLIGHT_PARENT_ID,
-    title: "Send to NotebookLM directly",
-    contexts: ["selection"],
-  }).catch(() => {})
 }
-
 async function rebuildHighlightContextMenu() {
   await ensureMindDockSelectionContextMenu()
 }
@@ -146,7 +181,6 @@ function shouldKeepPendingSelection(error: string | undefined): boolean {
     normalized.includes("sessao notebooklm incompleta") ||
     normalized.includes("sessao notebooklm ausente") ||
     normalized.includes("tokens nao disponiveis") ||
-    normalized.includes("tokens não disponíveis") ||
     normalized.includes("capturar f.sid") ||
     normalized.includes("f.sid") ||
     normalized.includes("gere trafego")
@@ -217,49 +251,23 @@ async function captureSelectionFromContextMenu(
   sourceTabRecord?: chrome.tabs.Tab
 ) {
   const menuId = String(contextMenuInfo.menuItemId)
+  if (!menuId.startsWith(MINDDOCK_FOLDER_PREFIX)) {
+    return
+  }
+
   const selectedTextContent = String(contextMenuInfo.selectionText ?? "").trim()
   if (!selectedTextContent) return
 
   const tabTitle = String(sourceTabRecord?.title ?? "").trim()
   const sourceUrl = String(sourceTabRecord?.url ?? "").trim()
 
-  // Save to a highlight folder
-  if (menuId.startsWith(MINDDOCK_FOLDER_PREFIX)) {
-    const folderId = menuId.slice(MINDDOCK_FOLDER_PREFIX.length)
-
-    if (folderId === "notebooklm") {
-      // "Send to NotebookLM directly" option — original behavior
-      const timestampLabel = buildCaptureTimestampLabel()
-      const sourceTitle = tabTitle
-        ? `Selection - ${tabTitle} - ${timestampLabel}`
-        : `Selection - MindDock - ${timestampLabel}`
-      const sourceBody = [`Source: ${tabTitle || "Selection"}`, `URL: ${sourceUrl || "N/A"}`, "", selectedTextContent].join("\n")
-      await chrome.storage.local.set({
-        minddock_pending_selection: { text: sourceBody, sourceUrl, sourceTitle, savedAt: Date.now() },
-      })
-      await flushPendingSelection()
-      return
-    }
-
-    // Save snippet to local folder
-    await saveSnippet(folderId, selectedTextContent, tabTitle || "Untitled", sourceUrl)
+  const folderId = menuId.slice(MINDDOCK_FOLDER_PREFIX.length)
+  if (!folderId) {
     return
   }
 
-  // Legacy fallback: direct send
-  if (menuId === MINDDOCK_SELECTION_CAPTURE_MENU_ID) {
-    const timestampLabel = buildCaptureTimestampLabel()
-    const sourceTitle = tabTitle
-      ? `Selection - ${tabTitle} - ${timestampLabel}`
-      : `Selection - MindDock - ${timestampLabel}`
-    const sourceBody = [`Source: ${tabTitle || "Selection"}`, `URL: ${sourceUrl || "N/A"}`, "", selectedTextContent].join("\n")
-    await chrome.storage.local.set({
-      minddock_pending_selection: { text: sourceBody, sourceUrl, sourceTitle, savedAt: Date.now() },
-    })
-    await flushPendingSelection()
-  }
+  await saveSnippet(folderId, selectedTextContent, tabTitle || "Untitled", sourceUrl)
 }
-
 chrome.runtime.onInstalled.addListener(async ({ reason }) => {
   if (reason === "install") {
     console.log("[MindDock] Instalado. Bem-vindo!")

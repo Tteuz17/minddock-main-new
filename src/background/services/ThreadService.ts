@@ -149,46 +149,8 @@ class ThreadService {
     return { db, userId }
   }
 
-  private async isDevBypassEnabled(): Promise<boolean> {
-    try {
-      const snapshot = await chrome.storage.local.get([STORAGE_KEYS.DEV_AUTH_BYPASS])
-      const raw = snapshot[STORAGE_KEYS.DEV_AUTH_BYPASS]
-      return isRecord(raw) && raw.enabled === true
-    } catch {
-      return false
-    }
-  }
-
-  private async isDevBypassUserActive(): Promise<boolean> {
-    if (!(await this.isDevBypassEnabled())) {
-      return false
-    }
-
-    const user = await authManager.getCurrentUser()
-    const userId = String(user?.id ?? "").trim()
-    const userEmail = String(user?.email ?? "")
-      .trim()
-      .toLowerCase()
-
-    return userId === "dev-thinker-test-user" || userEmail.endsWith("@minddock.local")
-  }
-
-  private async shouldAllowLocalFallback(): Promise<boolean> {
-    return this.isDevBypassUserActive()
-  }
-
   private async shouldUseLocalBackend(): Promise<boolean> {
-    if (this.forceLocalBackend) {
-      const allowFallback = await this.shouldAllowLocalFallback()
-      if (allowFallback) {
-        return true
-      }
-
-      // Reset sticky local mode once a real authenticated account is active.
-      this.forceLocalBackend = false
-    }
-
-    return this.shouldAllowLocalFallback()
+    return false
   }
 
   private isThreadMessagesTableError(error: unknown): boolean {

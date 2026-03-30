@@ -97,6 +97,11 @@ a {
   transform: translateY(-1px);
 }
 
+@keyframes feature-marquee {
+  from { transform: translateX(0); }
+  to   { transform: translateX(-50%); }
+}
+
 .panel-flat {
   border: 1px solid rgba(255, 255, 255, 0.07);
   background: #000000;
@@ -234,7 +239,8 @@ a {
   }
 
   .ribbon-track,
-  .animate-move {
+  .animate-move,
+  .feature-marquee-track {
     animation: none !important;
   }
 }

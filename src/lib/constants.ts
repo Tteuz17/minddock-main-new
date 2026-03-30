@@ -32,8 +32,7 @@ export const STORAGE_KEYS = {
   TOKEN_EXPIRES_AT: "nexus_token_expires_at",
   USER_PROFILE: "minddock_user_profile",
   SUBSCRIPTION: "minddock_subscription",
-  DEV_AUTH_BYPASS: "minddock_dev_auth_bypass",
-  SIDEPANEL_VIEW: "minddock_sidepanel_view",
+SIDEPANEL_VIEW: "minddock_sidepanel_view",
   SIDEPANEL_NOTE_DRAFT: "minddock_sidepanel_note_draft",
   NOTEBOOKS_CACHE: "minddock_notebooks_cache",
   SOURCES_CACHE: "minddock_sources_cache",
@@ -96,7 +95,7 @@ export const PLANS: Record<SubscriptionTier, { price_monthly?: number; price_yea
       agile_prompts_per_month: 30,
       docks_summaries_per_month: 6,
       notes_limit: 500,
-      brain_merges_per_month: 2
+      brain_merges_per_month: 0
     }
   },
   thinker_pro: {
@@ -116,10 +115,10 @@ export const PLANS: Record<SubscriptionTier, { price_monthly?: number; price_yea
       agile_prompts_basic: true,
       agile_prompts_ai: true,
       ai_calls_per_day: "unlimited",
-      agile_prompts_per_month: "unlimited",
-      docks_summaries_per_month: "unlimited",
+      agile_prompts_per_month: 50,
+      docks_summaries_per_month: 12,
       notes_limit: "unlimited",
-      brain_merges_per_month: "unlimited",
+      brain_merges_per_month: 5,
       priority_support: true,
       early_access: true
     }

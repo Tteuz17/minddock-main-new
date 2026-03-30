@@ -11,13 +11,25 @@ import { PlanSelector } from "~/popup/components/PlanSelector"
 import { ZettelHub } from "~/popup/components/ZettelHub"
 import { PromptLab } from "~/popup/components/PromptLab"
 import { BrainMergeHub } from "~/popup/components/BrainMergeHub"
+import { SettingsHub } from "~/popup/components/SettingsHub"
 import { useAuth } from "~/hooks/useAuth"
 import { AuthScreen } from "~/popup/components/AuthScreen"
 import { LoadingSpinner } from "~/components/LoadingSpinner"
 import { STORAGE_KEYS } from "~/lib/constants"
 import type { SidePanelLaunchTarget } from "~/lib/types"
 
-type PopupView = "home" | "imports" | "agile" | "docks" | "highlights" | "usage" | "plans" | "zettel" | "prompt-lab" | "brain-merge"
+type PopupView =
+  | "home"
+  | "imports"
+  | "agile"
+  | "docks"
+  | "highlights"
+  | "usage"
+  | "plans"
+  | "zettel"
+  | "prompt-lab"
+  | "brain-merge"
+  | "settings"
 
 export default function PopupApplication() {
   const { isAuthenticated, isLoading, signIn, error } = useAuth()
@@ -50,7 +62,7 @@ export default function PopupApplication() {
             animate={{ opacity: 1, x: 0 }}
             exit={{ opacity: 0, x: 20 }}
             transition={{ duration: 0.18 }}
-            className="flex h-full flex-col">
+            className="flex h-full flex-col overflow-hidden">
             <ImportsHub onBack={() => setView("home")} />
           </motion.div>
         ) : view === "agile" ? (
@@ -60,7 +72,7 @@ export default function PopupApplication() {
             animate={{ opacity: 1, x: 0 }}
             exit={{ opacity: 0, x: 20 }}
             transition={{ duration: 0.18 }}
-            className="flex h-full flex-col">
+            className="flex h-full flex-col overflow-hidden">
             <AgilePromptsHub onBack={() => setView("home")} />
           </motion.div>
         ) : view === "docks" ? (
@@ -70,7 +82,7 @@ export default function PopupApplication() {
             animate={{ opacity: 1, x: 0 }}
             exit={{ opacity: 0, x: 20 }}
             transition={{ duration: 0.18 }}
-            className="flex h-full flex-col">
+            className="flex h-full flex-col overflow-hidden">
             <DocksHub onBack={() => setView("home")} />
           </motion.div>
         ) : view === "highlights" ? (
@@ -80,7 +92,7 @@ export default function PopupApplication() {
             animate={{ opacity: 1, x: 0 }}
             exit={{ opacity: 0, x: 20 }}
             transition={{ duration: 0.18 }}
-            className="flex h-full flex-col">
+            className="flex h-full flex-col overflow-hidden">
             <HighlightHub onBack={() => setView("home")} />
           </motion.div>
         ) : view === "usage" ? (
@@ -90,7 +102,7 @@ export default function PopupApplication() {
             animate={{ opacity: 1, x: 0 }}
             exit={{ opacity: 0, x: 20 }}
             transition={{ duration: 0.18 }}
-            className="flex h-full flex-col">
+            className="flex h-full flex-col overflow-hidden">
             <UsageHub onBack={() => setView("home")} />
           </motion.div>
         ) : view === "plans" ? (
@@ -100,7 +112,7 @@ export default function PopupApplication() {
             animate={{ opacity: 1, x: 0 }}
             exit={{ opacity: 0, x: 20 }}
             transition={{ duration: 0.18 }}
-            className="flex h-full flex-col">
+            className="flex h-full flex-col overflow-hidden">
             <PlanSelector onBack={() => setView("home")} />
           </motion.div>
         ) : view === "zettel" ? (
@@ -110,7 +122,7 @@ export default function PopupApplication() {
             animate={{ opacity: 1, x: 0 }}
             exit={{ opacity: 0, x: 20 }}
             transition={{ duration: 0.18 }}
-            className="flex h-full flex-col">
+            className="flex h-full flex-col overflow-hidden">
             <ZettelHub onBack={() => setView("home")} />
           </motion.div>
         ) : view === "prompt-lab" ? (
@@ -120,7 +132,7 @@ export default function PopupApplication() {
             animate={{ opacity: 1, x: 0 }}
             exit={{ opacity: 0, x: 20 }}
             transition={{ duration: 0.18 }}
-            className="flex h-full flex-col">
+            className="flex h-full flex-col overflow-hidden">
             <PromptLab onBack={() => setView("home")} />
           </motion.div>
         ) : view === "brain-merge" ? (
@@ -130,8 +142,18 @@ export default function PopupApplication() {
             animate={{ opacity: 1, x: 0 }}
             exit={{ opacity: 0, x: 20 }}
             transition={{ duration: 0.18 }}
-            className="flex h-full flex-col">
+            className="flex h-full flex-col overflow-hidden">
             <BrainMergeHub onBack={() => setView("home")} />
+          </motion.div>
+        ) : view === "settings" ? (
+          <motion.div
+            key="settings"
+            initial={{ opacity: 0, x: 20 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: 20 }}
+            transition={{ duration: 0.18 }}
+            className="flex h-full flex-col overflow-hidden">
+            <SettingsHub onBack={() => setView("home")} />
           </motion.div>
         ) : (
           <motion.div
@@ -140,7 +162,7 @@ export default function PopupApplication() {
             animate={{ opacity: 1, x: 0 }}
             exit={{ opacity: 0, x: -20 }}
             transition={{ duration: 0.18 }}
-            className="flex h-full flex-col">
+            className="flex h-full flex-col overflow-hidden">
             <HomeDashboard
               onOpenSidePanel={openSidePanel}
               onOpenZettelHub={() => setView("zettel")}
@@ -149,10 +171,12 @@ export default function PopupApplication() {
               onOpenHighlights={() => setView("highlights")}
               onOpenDocks={() => setView("docks")}
               onOpenPlans={() => setView("plans")}
+              onOpenSettings={() => setView("settings")}
             />
             <UserMenu
               onOpenUsage={() => setView("usage")}
               onOpenPlans={() => setView("plans")}
+              onOpenSettings={() => setView("settings")}
             />
           </motion.div>
         )}
@@ -160,3 +184,4 @@ export default function PopupApplication() {
     </div>
   )
 }
+

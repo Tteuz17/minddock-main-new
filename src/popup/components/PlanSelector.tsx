@@ -569,7 +569,7 @@ export function PlanSelector({ onBack }: PlanSelectorProps) {
                 {isThinker && cycle === "monthly" ? (
                   <p className="mt-2 inline-flex items-center gap-1 text-[10px] text-zinc-400">
                     <Zap size={10} className="text-[#facc15]" />
-                    Annual adds +20 Agile, +6 Docks and +3 Brain Merge every month.
+                    Annual adds +20 Agile, +6 Docks and +5 Brain Merge every month.
                   </p>
                 ) : null}
 
@@ -670,7 +670,7 @@ export function PlanSelector({ onBack }: PlanSelectorProps) {
 
         {currentTier === "thinker_pro" ? (
           <div className="mt-3 rounded-xl border border-emerald-400/30 bg-emerald-500/10 px-3 py-2 text-[10px] text-emerald-300">
-            Your current plan is Thinker Pro with unlimited AI quotas.
+            Your current plan is Thinker Pro with 50 Agile, 12 Docks and 5 Brain Merge per month.
           </div>
         ) : null}
 

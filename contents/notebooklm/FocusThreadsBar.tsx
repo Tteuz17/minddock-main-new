@@ -50,6 +50,7 @@ const MINDDOCK_LOGO_SRC = new URL(
 ).href
 
 type DockIconKey = "hash" | "folder" | "target" | "lightbulb" | "book" | "briefcase" | "sparkles"
+type SummaryReuseMode = "summary_only" | "summary_with_conversation"
 
 const DEFAULT_DOCK_ICON: DockIconKey = "hash"
 
@@ -321,28 +322,50 @@ function buildProfessionalContinuationPrompt(
   ].join("\n")
 }
 
-function buildCompactContinuationPrompt(thread: Thread, messages: ThreadMessage[]): string {
+function buildSummaryOnlyContinuationPrompt(thread: Thread, messages: ThreadMessage[]): string {
   const userMessages = messages.filter((message) => message.role === "user")
+  const assistantMessages = messages.filter((message) => message.role === "assistant")
+  const firstUser = userMessages[0]?.content.trim() || "No first user message found."
   const latestUser = userMessages[userMessages.length - 1]?.content.trim() || "No latest user message found."
+  const latestAssistant =
+    assistantMessages[assistantMessages.length - 1]?.content.trim() || "No latest assistant response found."
+  const language = inferPreferredLanguage(messages)
+  const learningSignals = inferLearningStyleSignals(messages)
   const context = extractDockContext(messages)
+  const assistantHighlights = assistantMessages
+    .slice(-4)
+    .map((message, index) => `${index + 1}. ${truncateText(message.content, 220)}`)
+    .join("\n")
 
   return [
-    `CONTINUE FROM SAVED DOCK: "${thread.name}"`,
-    thread.topic ? `Topic: ${thread.topic}` : "Topic: not specified",
+    `CONTINUITY SUMMARY FROM SAVED DOCK: "${thread.name}"`,
+    thread.topic ? `Dock topic: ${thread.topic}` : "Dock topic: not specified",
     "",
-    "Use this as persistent context and continue from where we stopped:",
-    `- Original intent: ${context.question}`,
-    `- Latest user intent: ${truncateText(latestUser, 320)}`,
-    `- Key insight to preserve: ${context.insight}`,
+    "Use this summary as your memory. Continue from the exact pending point without restarting.",
     "",
-    "Rules:",
+    "SUMMARY:",
+    `- Initial user intent: ${truncateText(firstUser, 420)}`,
+    `- Original intent anchor: ${context.question}`,
+    `- Latest user intent: ${truncateText(latestUser, 420)}`,
+    `- Latest assistant state: ${truncateText(latestAssistant, 460)}`,
+    `- Core insight to preserve: ${context.insight}`,
+    `- Preferred language: ${language}`,
+    `- Interaction style signals: ${learningSignals.join(" | ")}`,
+    "",
+    "RECENT ASSISTANT TAKEAWAYS:",
+    assistantHighlights || "No assistant takeaways available.",
+    "",
+    "CONTINUITY RULES:",
     "1. Do not restart from zero.",
     "2. Keep the same language and tone.",
-    "3. Continue with practical next steps.",
-    "",
-    "Short transcript anchor:",
-    truncateText(context.transcript, 2200)
+    "3. Preserve the same project direction and assumptions.",
+    "4. Continue with practical, implementation-ready next steps."
   ].join("\n")
+}
+
+function buildConversationTranscript(messages: ThreadMessage[]): string {
+  const context = extractDockContext(messages)
+  return context.transcript || "No transcript available."
 }
 
 const MANUAL_USER_LABELS = new Set([
@@ -703,6 +726,7 @@ export function FocusThreadsBar() {
   const [isUpdatingDockSnapshot, setIsUpdatingDockSnapshot] = useState(false)
   const [showClearConversationModal, setShowClearConversationModal] = useState(false)
   const [clearConversationContext, setClearConversationContext] = useState<{ dockName: string } | null>(null)
+  const [summaryReuseMode, setSummaryReuseMode] = useState<SummaryReuseMode>("summary_with_conversation")
   const [expandAllMessages, setExpandAllMessages] = useState(false)
   const [actionFeedback, setActionFeedback] = useState<{
     type: "success" | "error"
@@ -959,7 +983,7 @@ export function FocusThreadsBar() {
     )
   }
 
-  function handleUseCompactContinuity() {
+  function handleUseAiSummary() {
     if (!activeThread || messages.length === 0) {
       pushActionFeedback("This dock has no saved context yet.", "error")
       return
@@ -972,16 +996,23 @@ export function FocusThreadsBar() {
     }
 
     const currentValue = readComposerValue(composer).trim()
-    const dockContextBlock = buildCompactContinuationPrompt(activeThread, messages)
+    const dockContextBlock =
+      summaryReuseMode === "summary_only"
+        ? buildSummaryOnlyContinuationPrompt(activeThread, messages)
+        : buildProfessionalContinuationPrompt(activeThread, messages)
 
     const nextValue = currentValue ? `${currentValue}\n\n${dockContextBlock}` : dockContextBlock
 
     writeComposerValue(composer, nextValue)
     setHistoryOpen(false)
-    pushActionFeedback("Compact continuity prompt inserted into the current chat.")
+    pushActionFeedback(
+      summaryReuseMode === "summary_only"
+        ? "AI summary inserted into the current chat."
+        : "AI summary plus full conversation inserted into the current chat."
+    )
   }
 
-  function handleUseFullProfessionalContinuity() {
+  function handlePasteFullConversationOnly() {
     if (!activeThread || messages.length === 0) {
       pushActionFeedback("This dock has no saved context yet.", "error")
       return
@@ -994,13 +1025,13 @@ export function FocusThreadsBar() {
     }
 
     const currentValue = readComposerValue(composer).trim()
-    const dockContextBlock = buildProfessionalContinuationPrompt(activeThread, messages)
+    const dockContextBlock = buildConversationTranscript(messages)
 
     const nextValue = currentValue ? `${currentValue}\n\n${dockContextBlock}` : dockContextBlock
 
     writeComposerValue(composer, nextValue)
     setHistoryOpen(false)
-    pushActionFeedback("Full professional continuity prompt inserted into the current chat.")
+    pushActionFeedback("Full conversation pasted into the current chat.")
   }
 
   function handleGenerateNextPrompt() {
@@ -1680,24 +1711,40 @@ export function FocusThreadsBar() {
                   )}
 
                   <div className="grid gap-1.5">
-                    <button
-                      type="button"
-                      onClick={handleUseCompactContinuity}
-                      disabled={messages.length === 0 || isLoadingMessages}
-                      className="flex items-center justify-between rounded-xl border border-white/[0.08] bg-[#0d1117]/85 px-3 py-2.5 text-left transition-colors hover:border-[#facc15]/25 hover:bg-[#121823] disabled:cursor-default disabled:opacity-40">
-                      <span className="flex items-center gap-2">
-                        <span className="flex h-5 w-5 items-center justify-center rounded-md border border-[#facc15]/20 bg-[#facc15]/12">
-                          <ArrowUpRight size={10} strokeWidth={2} className="text-[#facc15]" />
-                        </span>
-                        <span className="text-[10px] font-medium text-zinc-200">
-                          Use compact continuity
-                        </span>
-                      </span>
-                    </button>
+                    <div className="rounded-xl border border-[#facc15]/20 bg-[#1a1607]/55 p-2">
+                      <p className="px-1 text-[9px] font-semibold uppercase tracking-[0.12em] text-[#fde68a]">
+                        AI summary mode
+                      </p>
+                      <div className="mt-1.5 grid grid-cols-2 gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => setSummaryReuseMode("summary_only")}
+                          className={[
+                            "rounded-lg border px-2 py-1.5 text-[9px] font-medium transition-colors",
+                            summaryReuseMode === "summary_only"
+                              ? "border-[#facc15]/45 bg-[#facc15]/18 text-[#fef3c7]"
+                              : "border-white/[0.1] bg-white/[0.04] text-zinc-400 hover:border-[#facc15]/25 hover:text-zinc-200"
+                          ].join(" ")}>
+                          Summary only
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => setSummaryReuseMode("summary_with_conversation")}
+                          className={[
+                            "rounded-lg border px-2 py-1.5 text-[9px] font-medium transition-colors",
+                            summaryReuseMode === "summary_with_conversation"
+                              ? "border-[#facc15]/45 bg-[#facc15]/18 text-[#fef3c7]"
+                              : "border-white/[0.1] bg-white/[0.04] text-zinc-400 hover:border-[#facc15]/25 hover:text-zinc-200"
+                          ].join(" ")}>
+                          Summary + full conversation
+                        </button>
+                      </div>
+                    </div>
 
                     <button
                       type="button"
-                      onClick={handleUseFullProfessionalContinuity}
+                      onClick={handleUseAiSummary}
                       disabled={messages.length === 0 || isLoadingMessages}
                       className="flex items-center justify-between rounded-xl border border-[#facc15]/35 bg-[#2a2008]/70 px-3 py-2.5 text-left transition-colors hover:border-[#facc15]/55 hover:bg-[#33280a]/85 disabled:cursor-default disabled:opacity-40">
                       <span className="flex items-center gap-2">
@@ -1705,7 +1752,25 @@ export function FocusThreadsBar() {
                           <Sparkles size={10} strokeWidth={2} className="text-[#facc15]" />
                         </span>
                         <span className="text-[10px] font-medium text-[#fef3c7]">
-                          Use full professional continuity
+                          Reuse with AI summary
+                        </span>
+                      </span>
+                      <span className="text-[9px] text-[#fde68a]">
+                        {summaryReuseMode === "summary_only" ? "Summary only" : "Summary + chat"}
+                      </span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={handlePasteFullConversationOnly}
+                      disabled={messages.length === 0 || isLoadingMessages}
+                      className="flex items-center justify-between rounded-xl border border-white/[0.08] bg-[#0d1117]/85 px-3 py-2.5 text-left transition-colors hover:border-[#facc15]/25 hover:bg-[#121823] disabled:cursor-default disabled:opacity-40">
+                      <span className="flex items-center gap-2">
+                        <span className="flex h-5 w-5 items-center justify-center rounded-md border border-[#facc15]/20 bg-[#facc15]/12">
+                          <ArrowUpRight size={10} strokeWidth={2} className="text-[#facc15]" />
+                        </span>
+                        <span className="text-[10px] font-medium text-zinc-200">
+                          Paste full conversation only
                         </span>
                       </span>
                     </button>
@@ -1724,7 +1789,6 @@ export function FocusThreadsBar() {
                         </span>
                       </span>
                     </button>
-
                   </div>
 
                   <div className="mt-2 grid grid-cols-3 gap-2">

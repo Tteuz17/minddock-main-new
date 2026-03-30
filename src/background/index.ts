@@ -340,6 +340,9 @@ void authManager.initializeSession().catch((error) => {
 })
 
 chrome.runtime.onInstalled.addListener(async ({ reason }) => {
+  // Remove any legacy dev bypass keys that may have been stored in older versions
+  await chrome.storage.local.remove("minddock_dev_auth_bypass").catch(() => {})
+
   if (reason === "install") {
     console.log("[MindDock] Instalado. Bem-vindo!")
     await storageManager.initDefaults()
