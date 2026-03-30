@@ -2146,7 +2146,7 @@ function openSniperOverlay(): void {
   }
 
   sniperOverlayRoot.render(
-    <SniperOverlay onClose={closeSniperOverlay} defaultNotebookId={sniperDefaultNotebookId} />
+    <SniperOverlay onClose={closeSniperOverlay} getDefaultNotebookId={() => sniperDefaultNotebookId} />
   )
 }
 
@@ -7519,10 +7519,10 @@ function MenuPanel(props: MenuPanelProps): JSX.Element {
 
 function SniperOverlay({
   onClose,
-  defaultNotebookId
+  getDefaultNotebookId
 }: {
   onClose: () => void
-  defaultNotebookId: string
+  getDefaultNotebookId: () => string
 }): JSX.Element {
   return (
     <div style={{ position: "fixed", inset: 0, zIndex: 2147483647 }}>
@@ -7537,7 +7537,7 @@ function SniperOverlay({
       <div
         onClick={(event) => event.stopPropagation()}
         style={{ position: "relative", zIndex: 1 }}>
-        <SniperUI onClose={onClose} defaultNotebookId={defaultNotebookId} />
+        <SniperUI onClose={onClose} getDefaultNotebookId={getDefaultNotebookId} />
       </div>
     </div>
   )

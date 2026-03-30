@@ -81,6 +81,8 @@
       }
     },
     "permissions": [
+      "contextMenus",
+      "notifications",
       "scripting",
       "sidePanel",
       "identity",

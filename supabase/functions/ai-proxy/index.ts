@@ -12,7 +12,8 @@ import Anthropic from "https://esm.sh/@anthropic-ai/sdk@0.27.3"
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, content-type",
+  "Access-Control-Allow-Headers":
+    "authorization, content-type, apikey, x-minddock-user-jwt",
   "Access-Control-Allow-Methods": "POST, OPTIONS"
 }
 
@@ -54,6 +55,9 @@ const ACTION_TO_AI_MONTHLY_METRIC: Record<AIAction, AiMonthlyUsageMetric> = {
   suggestLinks: "docks_summaries",
   brainMerge: "brain_merges"
 }
+const BRAIN_MERGE_MAX_SOURCES = 22
+const BRAIN_MERGE_MAX_CHARS_PER_SOURCE = 2800
+const BRAIN_MERGE_MAX_TOTAL_CHARS = 32_000
 
 const SHARED_SYSTEM_RULES = `You are MindDock AI, used in Focus Docks, Agile Prompts, and Brain Merge.
 General rules:
@@ -112,6 +116,21 @@ function isRecord(value: unknown): value is JsonMap {
 
 function normalizeString(value: unknown, maxLength: number): string {
   return String(value ?? "").trim().slice(0, maxLength)
+}
+
+function extractProjectRefFromUrl(url: string): string | null {
+  const raw = String(url ?? "").trim()
+  if (!raw) {
+    return null
+  }
+
+  try {
+    const host = new URL(raw).hostname
+    const ref = String(host.split(".")[0] ?? "").trim()
+    return ref || null
+  } catch {
+    return null
+  }
 }
 
 function normalizeSubscriptionTier(value: unknown): SubscriptionTier {
@@ -225,11 +244,6 @@ function validateActionPayload(action: AIAction, payload: JsonMap): void {
     }
 
     case "brainMerge": {
-      const goal = normalizeString(payload.goal, 1200)
-      if (!goal) {
-        throw new HttpError(400, { error: "Missing goal for brainMerge" })
-      }
-
       const sources = Array.isArray(payload.sources) ? payload.sources : []
       const hasValidSource = sources.some((item) => {
         if (!isRecord(item)) {
@@ -253,12 +267,15 @@ function validateActionPayload(action: AIAction, payload: JsonMap): void {
 }
 
 async function enforceAiMonthlyQuota(
-  supabase: ReturnType<typeof createClient>,
   params: {
     userId: string
     action: AIAction
     tier: SubscriptionTier
     cycle: SubscriptionCycle
+  },
+  clients: {
+    admin: ReturnType<typeof createClient> | null
+    user: ReturnType<typeof createClient>
   }
 ): Promise<void> {
   const metric = ACTION_TO_AI_MONTHLY_METRIC[params.action]
@@ -271,39 +288,46 @@ async function enforceAiMonthlyQuota(
     throw new HttpError(403, { error: "AI plan quota unavailable for current subscription tier." })
   }
 
-  const { data, error } = await supabase.rpc("consume_ai_monthly_usage", {
-    p_user_id: params.userId,
-    p_metric: metric,
-    p_limit: limit
-  })
+  // Primary path: atomic server-side guard (requires service_role grants).
+  if (clients.admin) {
+    const { data, error } = await clients.admin.rpc("consume_ai_monthly_usage", {
+      p_user_id: params.userId,
+      p_metric: metric,
+      p_limit: limit
+    })
 
-  if (error) {
+    if (!error) {
+      const row = Array.isArray(data) ? data[0] : data
+      const allowed = Boolean(
+        row &&
+          typeof row === "object" &&
+          "allowed" in row &&
+          ((row as { allowed?: unknown }).allowed === true ||
+            String((row as { allowed?: unknown }).allowed ?? "").toLowerCase() === "true")
+      )
+      const currentCount =
+        row && typeof row === "object"
+          ? normalizeNonNegativeInteger((row as { current_count?: unknown }).current_count)
+          : 0
+
+      if (!allowed) {
+        throw new HttpError(429, {
+          error: resolveQuotaExceededMessage(metric, limit),
+          code: "AI_MONTHLY_LIMIT_REACHED",
+          limit,
+          currentCount,
+          metric
+        })
+      }
+
+      return
+    }
+
+    // Primary path failed — do not fall back to a non-atomic increment.
+    // Without the admin client we cannot safely enforce quota against concurrent requests.
     throw new HttpError(503, {
       error: "AI quota service unavailable",
       code: "AI_QUOTA_SERVICE_UNAVAILABLE"
-    })
-  }
-
-  const row = Array.isArray(data) ? data[0] : data
-  const allowed = Boolean(
-    row &&
-      typeof row === "object" &&
-      "allowed" in row &&
-      ((row as { allowed?: unknown }).allowed === true ||
-        String((row as { allowed?: unknown }).allowed ?? "").toLowerCase() === "true")
-  )
-  const currentCount =
-    row && typeof row === "object"
-      ? normalizeNonNegativeInteger((row as { current_count?: unknown }).current_count)
-      : 0
-
-  if (!allowed) {
-    throw new HttpError(429, {
-      error: resolveQuotaExceededMessage(metric, limit),
-      code: "AI_MONTHLY_LIMIT_REACHED",
-      limit,
-      currentCount,
-      metric
     })
   }
 }
@@ -654,14 +678,76 @@ async function callClaude(
   userContent: string,
   maxTokens: number
 ): Promise<string> {
-  const response = await claude.messages.create({
-    model,
-    max_tokens: maxTokens,
-    system,
-    messages: [{ role: "user", content: userContent }]
-  })
+  const extractErrorMessage = (err: unknown): string => {
+    const candidate = err instanceof Error ? err.message : String(err ?? "")
+    return normalizeString(candidate, 320)
+  }
 
-  return extractText(response)
+  const isModelAvailabilityError = (message: string): boolean => {
+    const normalized = String(message ?? "").toLowerCase()
+    return (
+      normalized.includes("model") &&
+      (normalized.includes("not found") ||
+        normalized.includes("unavailable") ||
+        normalized.includes("does not exist") ||
+        normalized.includes("invalid model"))
+    )
+  }
+
+  const isInputTooLargeError = (message: string): boolean => {
+    const normalized = String(message ?? "").toLowerCase()
+    return (
+      normalized.includes("too long") ||
+      normalized.includes("too many tokens") ||
+      normalized.includes("maximum context") ||
+      normalized.includes("prompt is too large") ||
+      normalized.includes("input is too large")
+    )
+  }
+
+  const candidateModels = Array.from(
+    new Set([model, "claude-3-5-sonnet-latest", "claude-3-5-haiku-latest"])
+  )
+
+  let lastError = ""
+  for (const candidateModel of candidateModels) {
+    try {
+      const response = await claude.messages.create({
+        model: candidateModel,
+        max_tokens: maxTokens,
+        system,
+        messages: [{ role: "user", content: userContent }]
+      })
+
+      return extractText(response)
+    } catch (err) {
+      const message = extractErrorMessage(err)
+      lastError = message || "unknown_error"
+
+      if (isInputTooLargeError(message)) {
+        throw new HttpError(413, {
+          error:
+            "Conteudo muito grande para processar de uma vez. Reduza o numero de fontes ou use fontes menores.",
+          code: "AI_INPUT_TOO_LARGE"
+        })
+      }
+
+      // Retry only for likely model availability problems.
+      if (isModelAvailabilityError(message)) {
+        continue
+      }
+
+      throw new HttpError(502, {
+        error: `AI upstream failure: ${message || "unknown_error"}`,
+        code: "AI_UPSTREAM_ERROR"
+      })
+    }
+  }
+
+  throw new HttpError(503, {
+    error: `Modelo de IA indisponivel no momento. detalhe=${lastError || "n/a"}`,
+    code: "AI_MODEL_UNAVAILABLE"
+  })
 }
 
 Deno.serve(async (req: Request) => {
@@ -681,30 +767,67 @@ Deno.serve(async (req: Request) => {
   if (!authHeader?.startsWith("Bearer ")) {
     return jsonResponse({ error: "Missing authorization" }, 401)
   }
+  const headerUserJwt = normalizeString(req.headers.get("x-minddock-user-jwt"), 6000)
 
-  const supabaseUrl = String(Deno.env.get("SUPABASE_URL") ?? "").trim()
+  const envSupabaseUrl = String(Deno.env.get("SUPABASE_URL") ?? "").trim()
+  const envSupabaseAnonKey = String(Deno.env.get("SUPABASE_ANON_KEY") ?? "").trim()
   const supabaseServiceKey = String(Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "").trim()
   const claudeApiKey = String(Deno.env.get("CLAUDE_API_KEY") ?? "").trim()
-
-  if (!supabaseUrl || !supabaseServiceKey || !claudeApiKey) {
+  if (!claudeApiKey) {
     return jsonResponse({ error: "AI service not configured" }, 503)
   }
 
-  const token = authHeader.slice(7)
-  const supabase = createClient(supabaseUrl, supabaseServiceKey)
+  if (!envSupabaseUrl || !envSupabaseAnonKey) {
+    return jsonResponse({ error: "AI service not configured" }, 503)
+  }
 
-  const {
-    data: { user },
-    error: authError
-  } = await supabase.auth.getUser(token)
-  if (authError || !user) {
+  const token = headerUserJwt || authHeader.slice(7)
+
+  const userClient = createClient(envSupabaseUrl, envSupabaseAnonKey, {
+    global: { headers: { Authorization: `Bearer ${token}` } }
+  })
+
+  let resolvedUserSupabase: ReturnType<typeof createClient> | null = null
+  let resolvedUserId = ""
+
+  const userAuth = await userClient.auth.getUser(token)
+  if (userAuth.data.user?.id) {
+    resolvedUserSupabase = userClient
+    resolvedUserId = userAuth.data.user.id
+  }
+
+  // Fallback: verify token directly against GoTrue
+  if (!resolvedUserId) {
+    try {
+      const userRes = await fetch(`${envSupabaseUrl}/auth/v1/user`, {
+        method: "GET",
+        headers: { Authorization: `Bearer ${token}`, apikey: envSupabaseAnonKey }
+      })
+      if (userRes.ok) {
+        const userJson = (await userRes.json()) as { id?: unknown }
+        const userId = String(userJson?.id ?? "").trim()
+        if (userId) {
+          resolvedUserSupabase = userClient
+          resolvedUserId = userId
+        }
+      }
+    } catch {
+      // Ignore
+    }
+  }
+
+  if (!resolvedUserSupabase || !resolvedUserId) {
     return jsonResponse({ error: "Invalid or expired session" }, 401)
   }
 
-  const { data: profile, error: profileError } = await supabase
+  const adminSupabase = supabaseServiceKey
+    ? createClient(envSupabaseUrl, supabaseServiceKey)
+    : null
+
+  const { data: profile, error: profileError } = await resolvedUserSupabase
     .from("profiles")
     .select("subscription_tier, subscription_status, subscription_cycle")
-    .eq("id", user.id)
+    .eq("id", resolvedUserId)
     .single()
 
   if (profileError || !profile) {
@@ -722,10 +845,23 @@ Deno.serve(async (req: Request) => {
     )
   }
 
-  if (profileStatus !== "active" && profileStatus !== "trialing") {
+  const statusAllowsAi =
+    profileStatus === "active" ||
+    profileStatus === "trialing" ||
+    profileStatus === "past_due"
+  const stalePaidProfile =
+    profileStatus === "inactive" && AI_ALLOWED_TIERS.has(profileTier)
+
+  if (!statusAllowsAi && !stalePaidProfile) {
     return jsonResponse(
       { error: "Subscription is not active", status: profileStatus },
       403
+    )
+  }
+
+  if (stalePaidProfile) {
+    console.warn(
+      `[ai-proxy] allowing paid tier with stale status. user=${resolvedUserId} tier=${profileTier} status=${profileStatus}`
     )
   }
 
@@ -752,12 +888,18 @@ Deno.serve(async (req: Request) => {
   try {
     validateActionPayload(action, payload)
 
-    await enforceAiMonthlyQuota(supabase, {
-      userId: user.id,
-      action,
-      tier: profileTier,
-      cycle: profileCycle
-    })
+    await enforceAiMonthlyQuota(
+      {
+        userId: resolvedUserId,
+        action,
+        tier: profileTier,
+        cycle: profileCycle
+      },
+      {
+        admin: adminSupabase,
+        user: resolvedUserSupabase
+      }
+    )
 
     const result = await dispatchAction(claude, model, action, payload)
     return jsonResponse({ success: true, result })
@@ -766,8 +908,12 @@ Deno.serve(async (req: Request) => {
       return jsonResponse(err.body, err.status)
     }
 
+    const detail = normalizeString(err instanceof Error ? err.message : String(err ?? ""), 280)
     console.error("[ai-proxy] AI call failed:", err)
-    return jsonResponse({ error: "AI call failed" }, 502)
+    return jsonResponse(
+      { error: `AI call failed${detail ? `: ${detail}` : ""}`, code: "AI_PROXY_UNHANDLED" },
+      502
+    )
   }
 })
 
@@ -920,13 +1066,12 @@ Rules:
     }
 
     case "brainMerge": {
-      const goal = normalizeString(payload.goal, 1200)
-      if (!goal) {
-        throw new Error("Missing goal for brainMerge")
-      }
+      const goal =
+        normalizeString(payload.goal, 1200) ||
+        "Produzir um summary executivo profissional de tudo o que estiver salvo nas fontes."
 
-      const sources = (Array.isArray(payload.sources) ? payload.sources : [])
-        .slice(0, 28)
+      const rawSources = (Array.isArray(payload.sources) ? payload.sources : [])
+        .slice(0, BRAIN_MERGE_MAX_SOURCES)
         .map((item) => {
           if (!isRecord(item)) {
             return null
@@ -934,7 +1079,7 @@ Rules:
 
           const notebookTitle = normalizeString(item.notebookTitle, 120)
           const sourceTitle = normalizeString(item.sourceTitle, 120)
-          const content = normalizeString(item.content, 7000)
+          const content = normalizeString(item.content, BRAIN_MERGE_MAX_CHARS_PER_SOURCE)
           if (!notebookTitle || !sourceTitle || !content) {
             return null
           }
@@ -946,8 +1091,39 @@ Rules:
             Boolean(item)
         )
 
-      if (sources.length === 0) {
+      if (rawSources.length === 0) {
         throw new Error("No valid sources for brainMerge")
+      }
+
+      const sources: Array<{ notebookTitle: string; sourceTitle: string; content: string }> = []
+      let totalChars = 0
+      let truncatedByBudget = 0
+      for (const source of rawSources) {
+        if (totalChars >= BRAIN_MERGE_MAX_TOTAL_CHARS) {
+          truncatedByBudget += 1
+          continue
+        }
+
+        const remaining = BRAIN_MERGE_MAX_TOTAL_CHARS - totalChars
+        const normalizedContent = normalizeString(source.content, remaining)
+        if (!normalizedContent) {
+          continue
+        }
+
+        totalChars += normalizedContent.length
+        sources.push({
+          notebookTitle: source.notebookTitle,
+          sourceTitle: source.sourceTitle,
+          content: normalizedContent
+        })
+      }
+
+      if (sources.length === 0) {
+        throw new HttpError(413, {
+          error:
+            "Conteudo muito grande para processar no Brain Merge. Reduza o numero de fontes e tente novamente.",
+          code: "AI_INPUT_TOO_LARGE"
+        })
       }
 
       const sourcesBlock = sources
@@ -956,6 +1132,11 @@ Rules:
             `### Source ${index + 1}: ${source.sourceTitle} (Notebook: ${source.notebookTitle})\n${source.content}`
         )
         .join("\n\n---\n\n")
+
+      const truncationNote =
+        truncatedByBudget > 0
+          ? `\n\n[Nota interna: ${truncatedByBudget} fonte(s) adicionais foram omitidas por limite de contexto.]`
+          : ""
 
       const text = await callClaude(
         claude,
@@ -966,14 +1147,23 @@ You are the Brain Merge synthesis engine.
 Build one coherent markdown document from many notebook sources.
 
 Hard requirements:
-- Focus strictly on the user's goal.
-- Merge overlapping ideas and call out meaningful disagreements.
-- Cite origin inline using this format:
+- Focus strictly on the user's goal and the provided sources.
+- If the goal is broad or generic, optimize for an executive-level synthesis.
+- Merge overlapping ideas, remove redundancy, and call out meaningful disagreements.
+- Every key claim must include at least one inline citation using this format:
   [Notebook: <name> | Source: <title>]
+- If evidence is weak or missing, state "Evidencia insuficiente" instead of guessing.
+- Output markdown only.
 - Start with "## Brain Merge Summary".
-- Then provide practical sections with clear headings.
-- Keep it concise and high-signal.`,
-        `Goal:\n${goal}\n\nSources:\n${sourcesBlock}${buildContextHints(payload)}`,
+- Use this section order:
+  1) "## Brain Merge Summary" (4-8 bullet executive snapshot)
+  2) "## Key Findings" (grouped findings with citations)
+  3) "## Tensions and Divergences" (conflicting points and likely causes)
+  4) "## Strategic Implications" (why this matters for decisions)
+  5) "## Recommended Next Actions" (prioritized, concrete, and time-bound)
+  6) "## Gaps to Validate" (what still needs confirmation)
+- Keep the output high-signal and decision-ready.`,
+        `Goal:\n${goal}\n\nSources:\n${sourcesBlock}${truncationNote}${buildContextHints(payload)}`,
         4096
       )
 

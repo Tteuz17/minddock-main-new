@@ -58,6 +58,28 @@ html, body {
   -moz-osx-font-smoothing: grayscale;
 }
 
+html.minddock-popup-shell,
+body.minddock-popup-shell {
+  width: 380px;
+  min-width: 380px;
+  max-width: 380px;
+  height: 620px;
+  min-height: 620px;
+  max-height: 620px;
+  overflow: hidden !important;
+}
+
+html.minddock-popup-shell #__plasmo,
+html.minddock-popup-shell #root,
+html.minddock-popup-shell #app,
+body.minddock-popup-shell #__plasmo,
+body.minddock-popup-shell #root,
+body.minddock-popup-shell #app {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
 /* ─── Transições Globais ───────────────────────────────────────── */
 *,
 *::before,

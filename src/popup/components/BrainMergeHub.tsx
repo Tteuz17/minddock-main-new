@@ -1,8 +1,9 @@
-import { useState, useCallback, useEffect } from "react"
+import { useState, useCallback, useEffect, useRef } from "react"
 import { motion, AnimatePresence } from "framer-motion"
 import {
   ArrowLeft,
   Check,
+  ChevronDown,
   Download,
   GitMerge,
   Loader2,
@@ -36,6 +37,126 @@ interface NotebookSources {
 interface BrainMergeHubProps {
   onBack: () => void
 }
+
+const DEFAULT_BRAIN_MERGE_GOAL =
+  "Create a professional executive summary of everything saved in the selected notebooks, focused on actionable insights."
+
+interface GoalPreset {
+  id: string
+  title: string
+  description: string
+  method: string
+  depthLabel: string
+  outputs: string[]
+  goal: string
+}
+
+const GOAL_PRESETS: GoalPreset[] = [
+  {
+    id: "executive",
+    title: "Executive Summary",
+    description: "Board-level synthesis with evidence-weighted conclusions.",
+    method: "Hypothesis-driven synthesis with confidence scoring",
+    depthLabel: "Harvard-level",
+    outputs: ["Executive Thesis", "Decision Options", "Recommended Path", "Validation Gaps"],
+    goal: [
+      "Build a Harvard-level executive synthesis from the selected notebooks.",
+      "",
+      "Analytical standard:",
+      "- Separate facts, assumptions, and inferences.",
+      "- Reconcile conflicting evidence and state confidence levels.",
+      "- Prioritize decision relevance over narration.",
+      "",
+      "Required output format:",
+      "1) Executive Thesis (max 5 bullets)",
+      "2) Critical Findings (grouped by theme, with evidence strength)",
+      "3) Strategic Implications (short-term vs long-term)",
+      "4) Decision Options (A/B/C with trade-offs)",
+      "5) Recommended Path and rationale",
+      "6) Open Questions to validate next",
+      "",
+      "Tone: concise, executive, evidence-driven."
+    ].join("\n")
+  },
+  {
+    id: "strategy",
+    title: "Strategy Focus",
+    description: "Competitive positioning and strategic trade-off analysis.",
+    method: "Scenario-based strategy with optionality mapping",
+    depthLabel: "MBA-case",
+    outputs: ["Strategic Bets", "Scenarios", "Trade-offs", "Priority Matrix"],
+    goal: [
+      "Produce a strategy memo from the selected notebooks with Harvard-case rigor.",
+      "",
+      "Strategic lens:",
+      "- Identify structural opportunities and constraints.",
+      "- Compare strategic pathways under uncertainty.",
+      "- Explicitly quantify or rank major trade-offs.",
+      "",
+      "Required output format:",
+      "1) Strategic Context Snapshot",
+      "2) Opportunity Landscape (ranked by impact and feasibility)",
+      "3) Scenario Analysis (Base / Upside / Downside)",
+      "4) Strategic Trade-offs and second-order effects",
+      "5) Priority Matrix (Now, Next, Later)",
+      "6) Leadership recommendations",
+      "",
+      "Tone: analytical, sharp, decision-oriented."
+    ].join("\n")
+  },
+  {
+    id: "risks",
+    title: "Risk Review",
+    description: "Structured risk architecture with mitigation sequencing.",
+    method: "Risk taxonomy + likelihood-impact prioritization",
+    depthLabel: "Audit-grade",
+    outputs: ["Risk Register", "Heatmap Logic", "Mitigation Sequence", "Control Gaps"],
+    goal: [
+      "Create an audit-grade risk review from the selected notebooks.",
+      "",
+      "Risk standards:",
+      "- Build a clear risk taxonomy (strategic, operational, financial, reputational).",
+      "- Score likelihood and impact (High/Medium/Low with justification).",
+      "- Flag unknown-unknowns and evidence blind spots.",
+      "",
+      "Required output format:",
+      "1) Risk Taxonomy Overview",
+      "2) Top Risks (with drivers, signals, and exposure)",
+      "3) Mitigation Plan (preventive vs corrective actions)",
+      "4) Residual Risks after mitigation",
+      "5) Control and monitoring recommendations",
+      "6) Immediate escalations",
+      "",
+      "Tone: precise, risk-aware, action-ready."
+    ].join("\n")
+  },
+  {
+    id: "action-plan",
+    title: "Action Plan",
+    description: "Execution blueprint with ownership and measurable milestones.",
+    method: "Outcome-back planning with milestone architecture",
+    depthLabel: "Operator mode",
+    outputs: ["30-60-90 Plan", "Owners", "Milestones", "Success Metrics"],
+    goal: [
+      "Turn the selected notebooks into a high-clarity execution blueprint.",
+      "",
+      "Execution standards:",
+      "- Translate insights into outcomes, not tasks only.",
+      "- Assign ownership and sequencing dependencies.",
+      "- Define measurable success criteria and review cadence.",
+      "",
+      "Required output format:",
+      "1) Objective and expected outcomes",
+      "2) 30-60-90 day action plan",
+      "3) Owners, dependencies, and critical path",
+      "4) Milestones and success metrics",
+      "5) Failure modes and contingency actions",
+      "6) Weekly operating rhythm",
+      "",
+      "Tone: pragmatic, structured, implementation-first."
+    ].join("\n")
+  }
+]
 
 // ─── Usage tracking ───────────────────────────────────────────────────────────
 
@@ -157,7 +278,7 @@ function QuotaBar({
       {remaining === 0 && (
         <p className="text-[9px] text-zinc-600 leading-relaxed">
           Resets on the 1st of next month.{" "}
-          <span className="text-zinc-500">Upgrade to Thinker Pro for unlimited merges.</span>
+          <span className="text-zinc-500">Upgrade plan for higher monthly Brain Merge limits.</span>
         </p>
       )}
     </motion.div>
@@ -325,10 +446,15 @@ export function BrainMergeHub({ onBack }: BrainMergeHubProps) {
   const [selectedNotebookIds, setSelectedNotebookIds] = useState<Set<string>>(new Set())
   const [notebookSourcesMap, setNotebookSourcesMap] = useState<Record<string, NotebookSources>>({})
   const [goal, setGoal] = useState("")
+  const [selectedGoalPresetId, setSelectedGoalPresetId] = useState<string>("custom")
+  const [isPresetDropdownOpen, setIsPresetDropdownOpen] = useState(false)
   const [isGenerating, setIsGenerating] = useState(false)
   const [result, setResult] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
+  const presetDropdownRef = useRef<HTMLDivElement | null>(null)
+  const selectedGoalPreset =
+    GOAL_PRESETS.find((preset) => preset.id === selectedGoalPresetId) ?? null
 
   const toggleNotebook = (id: string, title: string) => {
     setSelectedNotebookIds((prev) => {
@@ -438,28 +564,64 @@ export function BrainMergeHub({ onBack }: BrainMergeHubProps) {
     }
   }, [step, selectedNotebookIds, notebookSourcesMap, notebooks, loadSources])
 
+  useEffect(() => {
+    const handleOutsideClick = (event: MouseEvent) => {
+      if (!presetDropdownRef.current) {
+        return
+      }
+      const target = event.target
+      if (!(target instanceof Node)) {
+        return
+      }
+      if (!presetDropdownRef.current.contains(target)) {
+        setIsPresetDropdownOpen(false)
+      }
+    }
+
+    document.addEventListener("mousedown", handleOutsideClick)
+    return () => document.removeEventListener("mousedown", handleOutsideClick)
+  }, [])
+
+  useEffect(() => {
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setIsPresetDropdownOpen(false)
+      }
+    }
+
+    document.addEventListener("keydown", handleEscape)
+    return () => document.removeEventListener("keydown", handleEscape)
+  }, [])
+
   const handleGenerate = async () => {
     setError(null)
     setIsGenerating(true)
     try {
       const notebookSources = Array.from(selectedNotebookIds)
-        .map((id) => notebookSourcesMap[id])
-        .filter((nb) => nb && nb.sources.length > 0)
-        .map((nb) => ({
-          notebookId: nb.notebookId,
-          notebookTitle: nb.notebookTitle,
-          sourceIds: nb.sources.map((source) => source.id)
-        }))
+        .map((id) => {
+          const notebookEntry = notebookSourcesMap[id]
+          const notebookTitle =
+            notebookEntry?.notebookTitle ??
+            notebooks.find((item) => item.id === id)?.title ??
+            "Notebook"
+
+          return {
+            notebookId: id,
+            notebookTitle,
+            sourceIds: (notebookEntry?.sources ?? []).map((source) => source.id)
+          }
+        })
 
       if (notebookSources.length === 0) {
-        setError("Nenhuma fonte encontrada nos notebooks selecionados.")
+        setError("Select at least 1 notebook to generate a Brain Merge.")
         setIsGenerating(false)
         return
       }
 
+      const normalizedGoal = goal.trim() || DEFAULT_BRAIN_MERGE_GOAL
       const response = await chrome.runtime.sendMessage({
         command: MESSAGE_ACTIONS.CMD_BRAIN_MERGE,
-        payload: { notebookSources, goal },
+        payload: { notebookSources, goal: normalizedGoal },
       })
       if (!response?.success) throw new Error(String(response?.error ?? "Failed to generate Brain Merge."))
       const doc = (response.payload ?? response.data) as { document?: string }
@@ -492,8 +654,15 @@ export function BrainMergeHub({ onBack }: BrainMergeHubProps) {
   }
 
   const handleReset = () => {
-    setStep(1); setResult(null); setGoal("")
+    setStep(1); setResult(null); setGoal(""); setSelectedGoalPresetId("custom")
+    setIsPresetDropdownOpen(false)
     setSelectedNotebookIds(new Set()); setNotebookSourcesMap({}); setError(null)
+  }
+
+  const applyGoalPreset = (preset: GoalPreset) => {
+    setSelectedGoalPresetId(preset.id)
+    setGoal(preset.goal)
+    setIsPresetDropdownOpen(false)
   }
 
   if (!isThinker) {
@@ -555,7 +724,7 @@ export function BrainMergeHub({ onBack }: BrainMergeHubProps) {
       )}
 
       {/* Content */}
-      <div className="flex-1 overflow-y-auto">
+      <div className="flex-1 overflow-y-auto [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden">
         <AnimatePresence mode="wait">
           {/* ── Step 1: Notebooks ── */}
           {step === 1 && (
@@ -646,64 +815,219 @@ export function BrainMergeHub({ onBack }: BrainMergeHubProps) {
                 </p>
               </div>
 
-              <div className="space-y-1.5">
-                {Array.from(selectedNotebookIds).map((id) => {
-                  const notebookEntry = notebookSourcesMap[id]
-                  const notebookTitle =
-                    notebookEntry?.notebookTitle ??
-                    notebooks.find((item) => item.id === id)?.title ??
-                    "Notebook"
+              <div className="overflow-x-auto pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+                <div className="flex snap-x snap-mandatory gap-2.5 pr-1">
+                  {Array.from(selectedNotebookIds).map((id) => {
+                    const notebookEntry = notebookSourcesMap[id]
+                    const notebookTitle =
+                      notebookEntry?.notebookTitle ??
+                      notebooks.find((item) => item.id === id)?.title ??
+                      "Notebook"
+                    const isLoadingNotebook = !notebookEntry || notebookEntry.loading || !notebookEntry.loaded
+                    const sourceCount = notebookEntry?.sources.length ?? 0
 
-                  const isLoadingNotebook = !notebookEntry || notebookEntry.loading || !notebookEntry.loaded
-                  const sourceCount = notebookEntry?.sources.length ?? 0
-
-                  return (
-                    <div key={id} className="rounded-xl border border-white/[0.07] bg-white/[0.02] px-3 py-2.5">
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="truncate text-[11px] font-medium text-zinc-100">{notebookTitle}</span>
-                        {isLoadingNotebook ? (
-                          <span className="inline-flex items-center gap-1 text-[9px] text-zinc-500">
-                            <Loader2 size={10} className="animate-spin text-yellow-400/70" />
-                            Loading...
-                          </span>
-                        ) : (
-                          <span className="rounded-full bg-yellow-400/12 px-2 py-0.5 text-[9px] font-semibold text-yellow-300">
-                            {sourceCount} source{sourceCount !== 1 ? "s" : ""}
-                          </span>
-                        )}
+                    return (
+                      <div
+                        key={id}
+                        className="min-h-[106px] min-w-[118px] snap-start rounded-xl border border-white/[0.08] bg-white/[0.03] p-2.5"
+                      >
+                        <div className="flex h-full flex-col justify-between">
+                          <div className="space-y-1">
+                            <p className="max-h-[28px] overflow-hidden text-[10px] font-semibold leading-tight text-zinc-100">
+                              {notebookTitle}
+                            </p>
+                            <p className="text-[9px] text-zinc-500">
+                              {isLoadingNotebook
+                                ? "Loading..."
+                                : sourceCount > 0
+                                  ? "Auto included"
+                                  : "No sources"}
+                            </p>
+                          </div>
+                          <div className="pt-1">
+                            {isLoadingNotebook ? (
+                              <span className="inline-flex items-center gap-1 text-[9px] text-zinc-500">
+                                <Loader2 size={9} className="animate-spin text-yellow-400/70" />
+                                Syncing
+                              </span>
+                            ) : (
+                              <span className="inline-flex rounded-full bg-yellow-400/12 px-2 py-0.5 text-[8px] font-semibold text-yellow-300">
+                                {sourceCount} source{sourceCount !== 1 ? "s" : ""}
+                              </span>
+                            )}
+                          </div>
+                        </div>
                       </div>
-                      <p className="mt-1 text-[10px] text-zinc-500">
-                        {isLoadingNotebook
-                          ? "Loading sources automatically for this notebook."
-                          : sourceCount > 0
-                            ? "All sources from this notebook will be used automatically."
-                            : "No sources found in this notebook."}
-                      </p>
-                    </div>
-                  )
-                })}
+                    )
+                  })}
+                </div>
               </div>
+              <p className="text-[9px] text-zinc-600">Swipe horizontally to preview selected notebooks.</p>
 
               {/* Goal input */}
-              <div className="space-y-1.5 pt-1">
-                <div className="flex items-center gap-1.5">
-                  <Target size={10} className="text-yellow-500" />
-                  <label className="text-[10px] font-semibold uppercase tracking-widest text-zinc-500">
-                    Your goal
-                  </label>
+              <div className="space-y-2.5 pt-1">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-1.5">
+                    <Target size={11} className="text-zinc-300" />
+                    <label className="text-[11px] font-medium text-zinc-100">Merge Goal</label>
+                  </div>
+                  <span className="rounded-full border border-white/[0.14] bg-white/[0.04] px-2 py-0.5 text-[9px] text-zinc-400">
+                    Optional
+                  </span>
                 </div>
-                <textarea
-                  value={goal}
-                  onChange={(e) => setGoal(e.target.value)}
-                  placeholder="E.g. Create a sales script combining psychology and marketing tactics"
-                  rows={3}
-                  className="w-full resize-none rounded-xl border border-white/[0.08] bg-white/[0.04] px-3 py-2.5 text-[11px] text-zinc-100 placeholder-zinc-600 outline-none focus:border-yellow-400/40 focus:bg-white/[0.06] transition-all duration-200 leading-relaxed"
-                />
+
+                <div className="space-y-2 rounded-2xl border border-white/[0.1] bg-[linear-gradient(180deg,rgba(255,255,255,0.05),rgba(255,255,255,0.015))] p-3 shadow-[0_14px_40px_rgba(0,0,0,0.28)]">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="space-y-0.5">
+                      <p className="text-[11px] font-semibold text-white">Custom goal</p>
+                      <p className="text-[9px] text-zinc-500">
+                        Primary input. This defines what the merge should optimize for.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedGoalPresetId("custom")}
+                      className={`rounded-full border px-2 py-0.5 text-[8px] font-medium tracking-wide transition-all ${
+                        selectedGoalPresetId === "custom"
+                          ? "border-yellow-400/40 bg-yellow-400/12 text-yellow-200"
+                          : "border-white/[0.15] text-zinc-400 hover:border-white/[0.22] hover:text-zinc-200"
+                      }`}
+                    >
+                      Primary
+                    </button>
+                  </div>
+                  <textarea
+                    value={goal}
+                    onChange={(e) => {
+                      setGoal(e.target.value)
+                      setSelectedGoalPresetId("custom")
+                    }}
+                    placeholder="Type your merge goal. Example: Build an executive synthesis with key opportunities, risks, and next actions."
+                    rows={4}
+                    className="w-full resize-none rounded-2xl border border-white/[0.12] bg-[#0f1012] px-3 py-3 text-[12px] leading-relaxed text-zinc-100 placeholder-zinc-500 outline-none transition-all duration-200 focus:border-white/[0.26] focus:bg-[#121316] focus:shadow-[0_0_0_2px_rgba(255,255,255,0.06)]"
+                  />
+                </div>
+
+                <div className="space-y-2 rounded-2xl border border-white/[0.1] bg-white/[0.03] p-3">
+                  <div className="space-y-0.5">
+                    <p className="text-[11px] font-semibold text-white">Quick Presets</p>
+                    <p className="text-[9px] text-zinc-500">
+                      Advanced frameworks with structured method and expected deliverables.
+                    </p>
+                  </div>
+                  <div ref={presetDropdownRef} className="relative">
+                    <button
+                      type="button"
+                      onClick={() => setIsPresetDropdownOpen((prev) => !prev)}
+                      className={`flex w-full items-center justify-between rounded-xl border px-3 py-2.5 text-left transition-all ${
+                        isPresetDropdownOpen
+                          ? "border-white/[0.26] bg-white/[0.08] shadow-[0_0_0_2px_rgba(255,255,255,0.05)]"
+                          : "border-white/[0.12] bg-[#111215] hover:border-white/[0.2] hover:bg-[#14161a]"
+                      }`}
+                    >
+                      <span
+                        className={`text-[11px] font-medium ${
+                          selectedGoalPreset ? "text-zinc-100" : "text-zinc-400"
+                        }`}
+                      >
+                        {selectedGoalPreset?.title ?? "Select a preset"}
+                      </span>
+                      <ChevronDown
+                        size={13}
+                        className={`text-zinc-400 transition-transform duration-150 ${
+                          isPresetDropdownOpen ? "rotate-180" : "rotate-0"
+                        }`}
+                      />
+                    </button>
+
+                    {isPresetDropdownOpen && (
+                      <div className="absolute left-0 right-0 z-30 mt-1.5 rounded-xl border border-white/[0.12] bg-[#0f1115] p-1.5 shadow-[0_16px_40px_rgba(0,0,0,0.48)] backdrop-blur">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSelectedGoalPresetId("custom")
+                            setIsPresetDropdownOpen(false)
+                          }}
+                          className={`flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-left transition-all ${
+                            selectedGoalPresetId === "custom"
+                              ? "bg-yellow-400/12 text-yellow-200"
+                              : "text-zinc-300 hover:bg-white/[0.07] hover:text-zinc-100"
+                          }`}
+                        >
+                          <div className="space-y-0.5">
+                            <p className="text-[10px] font-semibold">No preset (Custom)</p>
+                            <p className="text-[9px] text-zinc-500">Keep only your own goal text.</p>
+                          </div>
+                          {selectedGoalPresetId === "custom" && (
+                            <Check size={11} className="text-yellow-300" />
+                          )}
+                        </button>
+
+                        {GOAL_PRESETS.map((preset) => {
+                          const selected = selectedGoalPresetId === preset.id
+                          return (
+                            <button
+                              key={preset.id}
+                              type="button"
+                              onClick={() => applyGoalPreset(preset)}
+                              className={`mt-1 flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-left transition-all ${
+                                selected
+                                  ? "bg-yellow-400/12 text-yellow-200"
+                                  : "text-zinc-300 hover:bg-white/[0.07] hover:text-zinc-100"
+                              }`}
+                            >
+                              <div className="space-y-0.5">
+                                <div className="flex items-center gap-1.5">
+                                  <p className="text-[10px] font-semibold">{preset.title}</p>
+                                  <span className="rounded-full border border-white/[0.14] bg-white/[0.04] px-1.5 py-0.5 text-[8px] text-zinc-400">
+                                    {preset.depthLabel}
+                                  </span>
+                                </div>
+                                <p className="text-[9px] text-zinc-500">{preset.description}</p>
+                                <p className="text-[9px] text-zinc-500">Method: {preset.method}</p>
+                              </div>
+                              {selected && <Check size={11} className="text-yellow-300" />}
+                            </button>
+                          )
+                        })}
+                      </div>
+                    )}
+                  </div>
+
+                  {selectedGoalPreset && (
+                    <div className="space-y-1.5 rounded-xl border border-white/[0.1] bg-black/20 p-2.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <p className="text-[10px] font-semibold text-zinc-100">
+                          {selectedGoalPreset.title} Framework
+                        </p>
+                        <span className="rounded-full border border-yellow-400/35 bg-yellow-400/10 px-1.5 py-0.5 text-[8px] text-yellow-200">
+                          {selectedGoalPreset.depthLabel}
+                        </span>
+                      </div>
+                      <p className="text-[9px] text-zinc-400">Method: {selectedGoalPreset.method}</p>
+                      <div className="flex flex-wrap gap-1">
+                        {selectedGoalPreset.outputs.map((output) => (
+                          <span
+                            key={output}
+                            className="rounded-full border border-white/[0.12] bg-white/[0.04] px-2 py-0.5 text-[8px] text-zinc-300"
+                          >
+                            {output}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
               </div>
 
               {selectedCount > 0 && (
                 <p className="text-[10px] text-zinc-500 text-center">
                   <span className="text-yellow-400 font-semibold">{selectedCount}</span> source{selectedCount !== 1 ? "s" : ""} included automatically
+                </p>
+              )}
+              {!isLoadingSelectedSources && selectedCount === 0 && (
+                <p className="text-[10px] text-zinc-500 text-center">
+                  Sources are not preloaded in the popup. Brain Merge will fetch everything automatically from the selected notebooks.
                 </p>
               )}
 
@@ -759,7 +1083,7 @@ export function BrainMergeHub({ onBack }: BrainMergeHubProps) {
                     {copied ? "Copied" : "Copy"}
                   </button>
                 </div>
-                <div className="max-h-[180px] overflow-y-auto px-3 py-2.5">
+                <div className="max-h-[180px] overflow-y-auto px-3 py-2.5 [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden">
                   <pre className="whitespace-pre-wrap font-sans text-[10px] leading-relaxed text-zinc-300">
                     {result}
                   </pre>
@@ -824,7 +1148,7 @@ export function BrainMergeHub({ onBack }: BrainMergeHubProps) {
             {step === 2 && (
               <motion.button
                 type="button"
-                disabled={isLoadingSelectedSources || selectedCount === 0 || !goal.trim() || isGenerating || quota.exhausted}
+                disabled={isLoadingSelectedSources || selectedNotebookIds.size === 0 || isGenerating || quota.exhausted}
                 onClick={() => void handleGenerate()}
                 whileTap={{ scale: 0.97 }}
                 className="flex items-center gap-2 rounded-xl bg-yellow-400 px-5 py-2 text-[11px] font-bold text-black transition-all duration-150 hover:bg-yellow-300 disabled:opacity-35 disabled:cursor-not-allowed"

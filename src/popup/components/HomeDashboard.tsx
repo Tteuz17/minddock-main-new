@@ -38,6 +38,7 @@ interface HomeDashboardProps {
   onOpenHighlights?: () => void
   onOpenDocks?: () => void
   onOpenPlans?: () => void
+  onOpenSettings?: () => void
 }
 
 interface DailyUsageSnapshot {
@@ -159,7 +160,8 @@ export function HomeDashboard({
   onOpenBrainMerge,
   onOpenHighlights,
   onOpenDocks,
-  onOpenPlans
+  onOpenPlans,
+  onOpenSettings
 }: HomeDashboardProps) {
   const { limits } = useSubscription()
   const {
@@ -482,7 +484,7 @@ export function HomeDashboard({
         <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(5,5,5,0.18),rgba(5,5,5,0)_18%,rgba(5,5,5,0)_82%,rgba(5,5,5,0.3))]" />
       </div>
 
-      <div className="relative flex h-full flex-col px-4 pb-[104px] pt-2">
+      <div className="relative flex h-full flex-col px-4 pb-[90px] pt-2">
         <div>
           <motion.div
             initial={{ opacity: 0, y: 4 }}
@@ -524,7 +526,13 @@ export function HomeDashboard({
               </button>
               <button
                 type="button"
-                onClick={() => chrome.runtime.openOptionsPage()}
+                onClick={() => {
+                  if (onOpenSettings) {
+                    onOpenSettings()
+                    return
+                  }
+                  void chrome.runtime.openOptionsPage()
+                }}
                 className="liquid-metal-button">
                 <Settings2 size={14} strokeWidth={1.7} />
               </button>

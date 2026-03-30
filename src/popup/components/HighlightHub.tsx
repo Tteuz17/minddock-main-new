@@ -46,10 +46,25 @@ export function HighlightHub({ onBack }: HighlightHubProps) {
   const [newIcon, setNewIcon] = useState(FOLDER_ICONS[0])
   const [savingFolder, setSavingFolder] = useState(false)
 
-  const loadFolders = useCallback(async () => {
-    const loaded = await getFolders()
-    setFolders(loaded)
+  const groupSnippetsByFolder = useCallback((snippets: HighlightSnippet[]) => {
+    return snippets.reduce<Record<string, HighlightSnippet[]>>((acc, snippet) => {
+      const folderId = String(snippet.folderId ?? "").trim()
+      if (!folderId) {
+        return acc
+      }
+      if (!acc[folderId]) {
+        acc[folderId] = []
+      }
+      acc[folderId].push(snippet)
+      return acc
+    }, {})
   }, [])
+
+  const loadFolders = useCallback(async () => {
+    const [loadedFolders, allSnippets] = await Promise.all([getFolders(), getSnippets()])
+    setFolders(loadedFolders)
+    setSnippetsByFolder(groupSnippetsByFolder(allSnippets))
+  }, [groupSnippetsByFolder])
 
   useEffect(() => {
     void loadFolders()
@@ -57,28 +72,17 @@ export function HighlightHub({ onBack }: HighlightHubProps) {
     const handler = (changes: Record<string, chrome.storage.StorageChange>, area: string) => {
       if (area === "local" && (changes["minddock_highlight_folders"] || changes["minddock_highlights"])) {
         void loadFolders()
-        // Refresh open folder's snippets
-        setExpandedId((prev) => {
-          if (prev) void loadSnippetsForFolder(prev)
-          return prev
-        })
       }
     }
     chrome.storage.onChanged.addListener(handler)
     return () => chrome.storage.onChanged.removeListener(handler)
   }, [loadFolders])
 
-  const loadSnippetsForFolder = async (folderId: string) => {
-    const snippets = await getSnippets(folderId)
-    setSnippetsByFolder((prev) => ({ ...prev, [folderId]: snippets }))
-  }
-
   const toggleFolder = (folderId: string) => {
     if (expandedId === folderId) {
       setExpandedId(null)
     } else {
       setExpandedId(folderId)
-      void loadSnippetsForFolder(folderId)
     }
   }
 
@@ -130,8 +134,6 @@ export function HighlightHub({ onBack }: HighlightHubProps) {
   const handleCopy = async (text: string) => {
     await navigator.clipboard.writeText(text)
   }
-
-  const totalSnippets = Object.values(snippetsByFolder).reduce((acc, s) => acc + s.length, 0)
 
   return (
     <div className="relative flex h-full flex-col bg-[#050505] text-white">
@@ -267,11 +269,17 @@ export function HighlightHub({ onBack }: HighlightHubProps) {
                         <div className="h-2 w-2 shrink-0 rounded-full" style={{ background: folder.color }} />
                         <p className="max-w-[72px] truncate text-[10px] font-semibold text-white">{folder.name}</p>
                       </div>
-                      {isOpen ? (
-                        <p className="mt-0.5 text-[9px] text-zinc-500">{snippets.length} highlight{snippets.length !== 1 ? "s" : ""}</p>
-                      ) : (
-                        <ChevronRight size={9} strokeWidth={2} className="mt-0.5 text-zinc-600" />
-                      )}
+                      <div className="mt-0.5 flex items-center gap-1">
+                        <p className="text-[9px] text-zinc-500">{snippets.length} highlight{snippets.length !== 1 ? "s" : ""}</p>
+                        <ChevronRight
+                          size={9}
+                          strokeWidth={2}
+                          className={[
+                            "text-zinc-600 transition-transform duration-150",
+                            isOpen ? "rotate-90" : ""
+                          ].join(" ")}
+                        />
+                      </div>
                     </motion.button>
                   )
                 })}

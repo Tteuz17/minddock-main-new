@@ -11,7 +11,7 @@ import { authManager } from "./auth-manager"
 import type { SubscriptionCycle, SubscriptionTier, PlanLimits } from "~/lib/types"
 
 const SERVER_CACHE_TTL_MS = 5 * 60 * 1000 // 5 min
-const ACTIVE_SUBSCRIPTION_STATUSES = new Set(["active", "trialing"])
+const INACTIVE_SUBSCRIPTION_STATUSES = new Set(["canceled", "past_due"])
 const DAILY_IMPORTS_UNLIMITED_EMAILS = new Set(["loveadoisoficial@gmail.com"])
 
 interface SubscriptionCache {
@@ -53,11 +53,6 @@ class SubscriptionManager {
   }
 
   private async getResolvedSubscription(): Promise<ResolvedSubscription> {
-    const bypass = await this.getBypassSubscription()
-    if (bypass) {
-      return bypass
-    }
-
     const token = await authManager.getAccessToken()
     if (!token) {
       this.memoryCache = null
@@ -133,7 +128,7 @@ class SubscriptionManager {
         .trim()
         .toLowerCase()
       const cycle = this.normalizeCycle(row.subscription_cycle)
-      const effectiveTier = ACTIVE_SUBSCRIPTION_STATUSES.has(status) ? tier : "free"
+      const effectiveTier = INACTIVE_SUBSCRIPTION_STATUSES.has(status) ? "free" : tier
       const effectiveCycle = effectiveTier === "free" ? "none" : cycle
 
       this.memoryCache = {
@@ -189,20 +184,6 @@ class SubscriptionManager {
       return candidate
     }
     return "none"
-  }
-
-  private async getBypassSubscription(): Promise<ResolvedSubscription | null> {
-    const raw = await getFromStorage<Record<string, unknown>>(STORAGE_KEYS.DEV_AUTH_BYPASS)
-    if (!raw || typeof raw !== "object" || raw.enabled !== true) {
-      return null
-    }
-
-    const tier = this.normalizeTier(String(raw.tier ?? ""))
-    const cycle = this.normalizeCycle(raw.cycle)
-    if (tier === "free" || tier === "pro") {
-      return { tier: "thinker", cycle: cycle === "none" ? "monthly" : cycle }
-    }
-    return { tier, cycle: cycle === "none" ? "monthly" : cycle }
   }
 
   async getLimits(): Promise<PlanLimits> {

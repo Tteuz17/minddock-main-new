@@ -343,8 +343,21 @@ function isPlacementValid(host: HTMLElement, rootElement: HTMLElement, insertMod
 function syncInjectionPresentation(rootElement: HTMLElement, display: DisplayMode): void {
   rootElement.style.display = display
   if (display === "block") {
+    rootElement.style.removeProperty("flex")
+    rootElement.style.removeProperty("min-width")
+    rootElement.style.removeProperty("margin")
+    rootElement.style.removeProperty("padding")
+    rootElement.style.removeProperty("border")
+    rootElement.style.removeProperty("background")
     rootElement.style.width = "100%"
   } else {
+    // Keep inline injection hosts from becoming expandable flex items in NotebookLM top bars.
+    rootElement.style.flex = "0 0 auto"
+    rootElement.style.minWidth = "0"
+    rootElement.style.margin = "0"
+    rootElement.style.padding = "0"
+    rootElement.style.border = "0"
+    rootElement.style.background = "transparent"
     rootElement.style.removeProperty("width")
   }
 }

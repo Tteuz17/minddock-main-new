@@ -55,7 +55,7 @@ function normalizeJwt(token: string | null | undefined): string | null {
 
 async function resolveNotionExchangeAccessToken(): Promise<string> {
   const token = normalizeJwt(await authManager.getVerifiedAccessToken())
-  if (!token || token === "dev-bypass-token") {
+  if (!token) {
     throw new Error("Login real no MindDock e obrigatorio para conectar com Notion.")
   }
   return token

@@ -15,7 +15,7 @@ function logSniperUi(message: string, details?: Record<string, unknown>): void {
 
 type SniperUIProps = {
   onClose: () => void;
-  defaultNotebookId: string;
+  getDefaultNotebookId: () => string;
 };
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -213,7 +213,7 @@ function SliderControl({
 
 // ─── Main Component ───────────────────────────────────────────────────────────
 
-export function SniperUI({ onClose, defaultNotebookId }: SniperUIProps) {
+export function SniperUI({ onClose, getDefaultNotebookId }: SniperUIProps) {
   const [duration, setDuration] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
   const [startSec, setStartSec] = useState(0);
@@ -304,7 +304,7 @@ export function SniperUI({ onClose, defaultNotebookId }: SniperUIProps) {
       logSniperUi('Blocked: startSec must be lower than endSec.', { startSec, endSec });
       return;
     }
-    const notebookId = defaultNotebookId?.trim();
+    const notebookId = getDefaultNotebookId()?.trim();
     if (!notebookId) {
       setStatus('error');
       setMessage('Select a default notebook in the popup first.');

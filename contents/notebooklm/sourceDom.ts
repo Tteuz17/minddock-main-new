@@ -2825,47 +2825,44 @@ export function resolveStudioOverflowMenuButton(): HTMLElement | null {
 
 export function resolveStudioExportAnchor(): HTMLElement | null {
   const studioLabel = resolveStudioLabel()
-  const studioRect = studioLabel?.getBoundingClientRect()
-  if (studioLabel && studioRect) {
-    if (isStudioLabelCollapsed(studioLabel)) {
-      return null
-    }
-
-    const candidates = queryDeepAll<HTMLElement>([
-      "button",
-      "[role='button']",
-      "[aria-haspopup='menu']",
-      "[data-testid*='menu']"
-    ]).filter((candidate) => {
-      if (!isVisible(candidate) || isMindDockInjectedElement(candidate)) {
-        return false
-      }
-
-      const rect = candidate.getBoundingClientRect()
-      const sameRow = Math.abs(rect.top - studioRect.top) <= 44
-      const onRightSide = rect.left >= studioRect.right - 6
-      const inRightPane = rect.left >= window.innerWidth * 0.45
-      const compact = rect.width <= 64 && rect.height <= 64
-
-      return sameRow && onRightSide && inRightPane && compact
-    })
-
-    if (candidates.length > 0) {
-      const sorted = [...candidates].sort(
-        (left, right) => left.getBoundingClientRect().left - right.getBoundingClientRect().left
-      )
-      return sorted[0] ?? null
-    }
-
-    const overflowButton = resolveStudioOverflowMenuButton()
-    if (overflowButton) {
-      return overflowButton
-    }
-
+  if (!studioLabel || isStudioLabelCollapsed(studioLabel)) {
     return null
   }
 
-  return null
+  // Primary: find the button containing the dock_to_left icon
+  const dockIcons = queryDeepAll<HTMLElement>("mat-icon, .mat-icon")
+    .filter((el) => el.textContent?.trim() === "dock_to_left" && isVisible(el))
+  for (const icon of dockIcons) {
+    const btn = icon.closest<HTMLElement>("button, [role='button']")
+    if (btn && isVisible(btn) && !isMindDockInjectedElement(btn)) {
+      return btn
+    }
+  }
+
+  // Fallback: first compact button to the right of Studio label
+  const studioRect = studioLabel.getBoundingClientRect()
+  const candidates = queryDeepAll<HTMLElement>([
+    "button",
+    "[role='button']"
+  ]).filter((candidate) => {
+    if (!isVisible(candidate) || isMindDockInjectedElement(candidate)) return false
+    const rect = candidate.getBoundingClientRect()
+    return (
+      Math.abs(rect.top - studioRect.top) <= 44 &&
+      rect.left >= studioRect.right - 6 &&
+      rect.left >= window.innerWidth * 0.45 &&
+      rect.width <= 64 && rect.height <= 64
+    )
+  })
+
+  if (candidates.length > 0) {
+    const sorted = [...candidates].sort(
+      (a, b) => a.getBoundingClientRect().left - b.getBoundingClientRect().left
+    )
+    return sorted[sorted.length - 1] ?? null
+  }
+
+  return resolveStudioOverflowMenuButton() ?? null
 }
 
 function findDeleteConversationHistoryAction(labelRect?: DOMRect): HTMLElement | null {
