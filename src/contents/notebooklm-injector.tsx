@@ -335,6 +335,7 @@ function mountTargets(): void {
     const currentMounted = mountedRoots.get(target.key)
     const stickyStudioHost =
       target.key === "studio-export" &&
+      isStudioExportModalOpen &&
       currentMounted?.host instanceof HTMLElement &&
       currentMounted.host.isConnected &&
       isVisible(currentMounted.host)

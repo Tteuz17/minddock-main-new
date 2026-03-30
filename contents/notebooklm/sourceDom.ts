@@ -2763,6 +2763,271 @@ function isStudioLabelCollapsed(studioLabel: HTMLElement): boolean {
   return false
 }
 
+function resolveRightmostCompactHeaderActionButton(header: HTMLElement): HTMLElement | null {
+  const candidateSet = new Set<HTMLElement>()
+  const interactiveSelectors = ["button", "[role='button']", "a", "[tabindex]"] as const
+
+  for (const candidate of queryDeepAll<HTMLElement>(interactiveSelectors, header)) {
+    if (!isVisible(candidate) || isMindDockInjectedElement(candidate)) {
+      continue
+    }
+
+    const rect = candidate.getBoundingClientRect()
+    if (rect.width <= 0 || rect.height <= 0 || rect.width > 88 || rect.height > 88) {
+      continue
+    }
+
+    // Avoid text-heavy controls; we only want compact icon actions from header.
+    const snapshot = resolveConversationTriggerSnapshot(candidate)
+    if (snapshot.length > 52 && !looksLikeStudioCloseSnapshot(snapshot)) {
+      continue
+    }
+
+    candidateSet.add(candidate)
+  }
+
+  const iconSelectors = [
+    "mat-icon",
+    ".mat-icon",
+    ".material-symbols-outlined",
+    ".material-icons",
+    "[data-mat-icon-name]"
+  ] as const
+
+  for (const icon of queryDeepAll<HTMLElement>(iconSelectors, header)) {
+    if (!isVisible(icon) || isMindDockInjectedElement(icon)) {
+      continue
+    }
+
+    const owner =
+      icon.closest<HTMLElement>("button, [role='button'], a, [tabindex]") ??
+      icon.parentElement ??
+      null
+    if (!(owner instanceof HTMLElement) || !header.contains(owner) || !isVisible(owner)) {
+      continue
+    }
+
+    const rect = owner.getBoundingClientRect()
+    if (rect.width <= 0 || rect.height <= 0 || rect.width > 96 || rect.height > 96) {
+      continue
+    }
+
+    candidateSet.add(owner)
+  }
+
+  const actionCandidates = [...candidateSet]
+  if (actionCandidates.length === 0) {
+    return null
+  }
+
+  const closeLike = actionCandidates.filter((candidate) =>
+    looksLikeStudioCloseSnapshot(resolveConversationTriggerSnapshot(candidate))
+  )
+  const pool = closeLike.length > 0 ? closeLike : actionCandidates
+
+  const sorted = [...pool].sort((a, b) => {
+    const aRect = a.getBoundingClientRect()
+    const bRect = b.getBoundingClientRect()
+    if (aRect.left !== bRect.left) {
+      return aRect.left - bRect.left
+    }
+    return aRect.top - bRect.top
+  })
+
+  return sorted[sorted.length - 1] ?? null
+}
+
+function resolveStudioPanelHeader(): HTMLElement | null {
+  const headerCandidates = queryDeepAll<HTMLElement>([
+    ".panel-header",
+    "[class*='panel-header']",
+    "[data-testid*='panel-header']",
+    "[data-testid*='studio-header']",
+    "header"
+  ]).filter((candidate) => {
+    if (!isVisible(candidate) || isMindDockInjectedElement(candidate)) {
+      return false
+    }
+
+    const rect = candidate.getBoundingClientRect()
+    if (rect.width < 180 || rect.height < 28 || rect.height > 120) {
+      return false
+    }
+
+    const snapshot = normalize(
+      [
+        candidate.innerText,
+        candidate.textContent,
+        candidate.getAttribute("aria-label"),
+        candidate.getAttribute("title"),
+        candidate.getAttribute("data-testid"),
+        candidate.className
+      ]
+        .map((value) => String(value ?? "").trim())
+        .filter(Boolean)
+        .join(" ")
+    )
+
+    return snapshot.includes("studio") || snapshot.includes("estudio")
+  })
+
+  if (headerCandidates.length === 0) {
+    return null
+  }
+
+  const scored = headerCandidates
+    .map((candidate) => {
+      const rect = candidate.getBoundingClientRect()
+      let score = 0
+      if (rect.width <= 560) score += 42
+      if (rect.width <= 460) score += 28
+      if (rect.width > 760) score -= 48
+      if (rect.top <= 320) score += 16
+      if (rect.top > 520) score -= 24
+      if (resolveRightmostCompactHeaderActionButton(candidate)) score += 50
+      return { candidate, score }
+    })
+    .sort((a, b) => b.score - a.score)
+
+  return scored[0]?.candidate ?? null
+}
+
+function looksLikeStudioCloseSnapshot(snapshot: string): boolean {
+  if (!snapshot) {
+    return false
+  }
+
+  if (
+    snapshot.includes("dock_to_left") ||
+    snapshot.includes("dock_to_right") ||
+    snapshot.includes("left_panel_close") ||
+    snapshot.includes("right_panel_close") ||
+    snapshot.includes("close_fullscreen") ||
+    snapshot.includes("fullscreen_exit") ||
+    snapshot.includes("tab_close")
+  ) {
+    return true
+  }
+
+  const hasCloseIntent =
+    snapshot.includes("close") ||
+    snapshot.includes("fechar") ||
+    snapshot.includes("collapse") ||
+    snapshot.includes("hide") ||
+    snapshot.includes("recolher")
+
+  if (!hasCloseIntent) {
+    return false
+  }
+
+  return (
+    snapshot.includes("panel") ||
+    snapshot.includes("aba") ||
+    snapshot.includes("tab") ||
+    snapshot.includes("sidebar") ||
+    snapshot.includes("studio")
+  )
+}
+
+function resolveStudioCloseTabButton(studioLabel: HTMLElement): HTMLElement | null {
+  const studioRect = studioLabel.getBoundingClientRect()
+  const headerScope =
+    studioLabel.closest<HTMLElement>(
+      ".panel-header, [class*='panel-header'], [data-testid*='panel-header'], header, [class*='header']"
+    ) ?? studioLabel.parentElement
+
+  const isNearStudioHeader = (rect: DOMRect): boolean =>
+    Math.abs(rect.top - studioRect.top) <= 56 &&
+    rect.left >= studioRect.left - 12 &&
+    rect.left <= studioRect.right + 280 &&
+    rect.width <= 72 &&
+    rect.height <= 72
+
+  const iconSelectors = [
+    "mat-icon",
+    ".mat-icon",
+    ".material-symbols-outlined",
+    ".material-icons",
+    "[data-icon]",
+    "[icon-name]"
+  ] as const
+
+  const roots: ParentNode[] = headerScope ? [headerScope, document] : [document]
+  const candidates = new Set<HTMLElement>()
+
+  for (const root of roots) {
+    for (const icon of queryDeepAll<HTMLElement>(iconSelectors, root)) {
+      if (!isVisible(icon) || isMindDockInjectedElement(icon)) {
+        continue
+      }
+
+      const snapshot = normalize(
+        [
+          icon.innerText,
+          icon.textContent,
+          icon.getAttribute("aria-label"),
+          icon.getAttribute("title"),
+          icon.getAttribute("data-mat-icon-name"),
+          icon.getAttribute("fonticon"),
+          icon.getAttribute("svgicon"),
+          icon.getAttribute("data-icon"),
+          icon.getAttribute("icon-name"),
+          icon.className
+        ]
+          .map((value) => String(value ?? "").trim())
+          .filter(Boolean)
+          .join(" ")
+      )
+
+      if (!looksLikeStudioCloseSnapshot(snapshot)) {
+        continue
+      }
+
+      const button = icon.closest<HTMLElement>("button, [role='button'], a")
+      if (!(button instanceof HTMLElement) || !isVisible(button) || isMindDockInjectedElement(button)) {
+        continue
+      }
+
+      const rect = button.getBoundingClientRect()
+      if (!isNearStudioHeader(rect)) {
+        continue
+      }
+      candidates.add(button)
+    }
+  }
+
+  const scopedButtons = headerScope
+    ? queryDeepAll<HTMLElement>(["button", "[role='button']", "a"], headerScope)
+    : queryDeepAll<HTMLElement>(["button", "[role='button']", "a"])
+
+  for (const candidate of scopedButtons) {
+    if (!isVisible(candidate) || isMindDockInjectedElement(candidate)) {
+      continue
+    }
+
+    const rect = candidate.getBoundingClientRect()
+    if (!isNearStudioHeader(rect)) {
+      continue
+    }
+
+    const snapshot = resolveConversationTriggerSnapshot(candidate)
+    if (!looksLikeStudioCloseSnapshot(snapshot)) {
+      continue
+    }
+
+    candidates.add(candidate)
+  }
+
+  if (candidates.size === 0) {
+    return null
+  }
+
+  const sorted = [...candidates].sort(
+    (a, b) => a.getBoundingClientRect().left - b.getBoundingClientRect().left
+  )
+  return sorted[sorted.length - 1] ?? null
+}
+
 export function resolveStudioOverflowMenuButton(): HTMLElement | null {
   const studioLabel = resolveStudioLabel()
   const studioRect = studioLabel?.getBoundingClientRect()
@@ -2829,9 +3094,22 @@ export function resolveStudioOverflowMenuButton(): HTMLElement | null {
 }
 
 export function resolveStudioExportAnchor(): HTMLElement | null {
+  const panelHeader = resolveStudioPanelHeader()
+  if (panelHeader) {
+    const panelCloseButton = resolveRightmostCompactHeaderActionButton(panelHeader)
+    if (panelCloseButton) {
+      return panelCloseButton
+    }
+  }
+
   const studioLabel = resolveStudioLabel()
   if (!studioLabel || isStudioLabelCollapsed(studioLabel)) {
     return null
+  }
+
+  const closeTabButton = resolveStudioCloseTabButton(studioLabel)
+  if (closeTabButton) {
+    return closeTabButton
   }
 
   // Primary: find the button containing the dock_to_left icon
@@ -2855,6 +3133,7 @@ export function resolveStudioExportAnchor(): HTMLElement | null {
     return (
       Math.abs(rect.top - studioRect.top) <= 44 &&
       rect.left >= studioRect.right - 6 &&
+      rect.left <= studioRect.right + 280 &&
       rect.left >= window.innerWidth * 0.45 &&
       rect.width <= 64 && rect.height <= 64
     )

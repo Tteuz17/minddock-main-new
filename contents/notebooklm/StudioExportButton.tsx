@@ -6571,7 +6571,10 @@ export function StudioExportButton() {
 
   return (
     <>
-      <div data-minddock-studio-export="true" className="relative ml-1 inline-flex shrink-0 items-center">
+      <div
+        data-minddock-studio-export="true"
+        className="relative ml-auto mr-1 inline-flex shrink-0 items-center"
+        style={{ marginTop: "1px" }}>
         <button
           type="button"
           title="Export Studio"
@@ -6588,8 +6591,10 @@ export function StudioExportButton() {
             })
           }}
           className={[
-            "inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg transition-colors cursor-pointer",
-            "bg-transparent text-[#9ba3b0] hover:bg-white/[0.06] hover:text-white"
+            "inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-[11px] border transition-colors cursor-pointer",
+            isOpen
+              ? "border-white/[0.14] bg-[#0a0a0a] text-white"
+              : "border-white/[0.06] bg-[#050505] text-white hover:bg-[#0d0d0d]"
           ].join(" ")}>
           <Download size={15} strokeWidth={1.8} />
         </button>
