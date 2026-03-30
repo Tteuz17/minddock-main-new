@@ -68,6 +68,9 @@ interface InjectionErrorBoundaryState {
   hasError: boolean
 }
 
+let originalInsertBefore: ((this: Node, node: Node, child: Node | null) => Node) | null = null
+let insertBeforePatched = false
+
 function normalizeBoundaryError(error: unknown): {
   name: string
   message: string
@@ -119,6 +122,70 @@ function isIgnorableBoundaryError(error: unknown): boolean {
     return true
   }
   return false
+}
+
+function normalizeErrorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return `${error.name} ${error.message}`.toLowerCase()
+  }
+  if (typeof error === "string") {
+    return error.toLowerCase()
+  }
+  if (error && typeof error === "object") {
+    const record = error as Record<string, unknown>
+    return `${String(record.name ?? "")} ${String(record.message ?? "")}`.toLowerCase()
+  }
+  return String(error ?? "").toLowerCase()
+}
+
+function isTransientInsertBeforeError(error: unknown): boolean {
+  const message = normalizeErrorMessage(error)
+  if (!message.includes("insertbefore")) {
+    return false
+  }
+  return (
+    message.includes("notfounderror") ||
+    message.includes("failed to execute") ||
+    message.includes("not a child of this node")
+  )
+}
+
+function installInsertBeforeGuard(): void {
+  if (insertBeforePatched) {
+    return
+  }
+
+  const original = Node.prototype.insertBefore
+  originalInsertBefore = original
+  Node.prototype.insertBefore = function (newNode: Node, referenceNode: Node | null): Node {
+    if (referenceNode && referenceNode.parentNode !== this) {
+      return original.call(this, newNode, null)
+    }
+
+    try {
+      return original.call(this, newNode, referenceNode)
+    } catch (error) {
+      if (!isTransientInsertBeforeError(error)) {
+        throw error
+      }
+
+      try {
+        return original.call(this, newNode, null)
+      } catch {
+        throw error
+      }
+    }
+  }
+  insertBeforePatched = true
+}
+
+function uninstallInsertBeforeGuard(): void {
+  if (!insertBeforePatched || !originalInsertBefore) {
+    return
+  }
+  Node.prototype.insertBefore = originalInsertBefore
+  originalInsertBefore = null
+  insertBeforePatched = false
 }
 
 class InjectionErrorBoundary extends Component<InjectionErrorBoundaryProps, InjectionErrorBoundaryState> {
@@ -211,10 +278,12 @@ let zettelObserver: MutationObserver | null = null
 let sourceFilterApplyDepth = 0
 let sourceFilterApplyLockUntil = 0
 let isSourceDownloadModalOpen = false
+let isStudioExportModalOpen = false
 let isSourceCriticalOperationActive = false
 let sourceCriticalOperationLockUntil = 0
 const ENABLE_NOTEBOOK_HIGHLIGHT_CLIPPER = false
 const INJECTOR_GLOBAL_KEY = "__MINDDOCK_NOTEBOOKLM_INJECTOR_STATE__"
+const STUDIO_EXPORT_MODAL_STATE_EVENT = "MINDDOCK_STUDIO_EXPORT_MODAL_STATE"
 
 export function setSourceCriticalOperation(active: boolean): void {
   isSourceCriticalOperationActive = active
@@ -275,6 +344,9 @@ function mountTargets(): void {
     const host = stickyStudioHost ?? target.resolveHost()
     if (!(host instanceof HTMLElement) || !isVisible(host)) {
       if (target.key === "studio-export") {
+        if (isStudioExportModalOpen) {
+          continue
+        }
         const mounted = mountedRoots.get(target.key)
         if (mounted) {
           mounted.root.unmount()
@@ -419,6 +491,7 @@ function renderSafely(targetKey: string, renderFn: () => ReactNode): ReactNode {
 
 function cleanupDetachedRoots(): void {
   if (
+    isStudioExportModalOpen ||
     isSourceDownloadModalOpen ||
     isSourceCriticalOperationActive ||
     Date.now() < sourceCriticalOperationLockUntil
@@ -458,7 +531,45 @@ function onSourceDownloadModalState(event: Event): void {
   }
 }
 
+function onStudioExportModalState(event: Event): void {
+  const custom = event as CustomEvent<{ isOpen?: boolean }>
+  isStudioExportModalOpen = custom.detail?.isOpen === true
+  if (!isStudioExportModalOpen) {
+    scheduleRefresh()
+  }
+}
+
+function onWindowError(event: ErrorEvent): void {
+  if (!isTransientInsertBeforeError(event.error ?? event.message)) {
+    return
+  }
+
+  console.warn("[MindDock] Ignored transient insertBefore DOMException", {
+    message: event.message,
+    filename: event.filename
+  })
+  event.preventDefault()
+  event.stopImmediatePropagation()
+  scheduleRefresh()
+}
+
+function onUnhandledRejection(event: PromiseRejectionEvent): void {
+  if (!isTransientInsertBeforeError(event.reason)) {
+    return
+  }
+
+  console.warn("[MindDock] Ignored transient insertBefore promise rejection", {
+    reason: String(event.reason ?? "")
+  })
+  event.preventDefault()
+  scheduleRefresh()
+}
+
 function shouldSkipRefreshForMutations(mutations: MutationRecord[]): boolean {
+  if (isStudioExportModalOpen) {
+    return true
+  }
+
   if (isSourceDownloadModalOpen) {
     return true
   }
@@ -472,7 +583,7 @@ function shouldSkipRefreshForMutations(mutations: MutationRecord[]): boolean {
   }
 
   const ignoredRootSelector =
-    "#minddock-source-actions-root, #minddock-source-filters-root, [data-minddock-target], [data-minddock-source-overlay='true'], section[role='dialog'][aria-modal='true'][aria-label='Download de fontes'], [data-minddock-source-toast='true'], [data-minddock-shadow-host]"
+    "#minddock-source-actions-root, #minddock-source-filters-root, [data-minddock-target], [data-minddock-source-overlay='true'], section[role='dialog'][aria-modal='true'][aria-label='Download de fontes'], [data-minddock-source-toast='true'], [data-minddock-shadow-host], [data-minddock-host]"
 
   const allInsideMindDockRoots = mutations.every((record) => {
     const target = record.target instanceof Element ? record.target : null
@@ -1344,7 +1455,7 @@ function isNodeInsideMindDockUi(node: Node | null): boolean {
   }
 
   const selector =
-    "#minddock-source-actions-root, #minddock-source-filters-root, [data-minddock-target], [role='dialog'][aria-modal='true']"
+    "#minddock-source-actions-root, #minddock-source-filters-root, [data-minddock-target], [data-minddock-host], [role='dialog'][aria-modal='true']"
 
   if (node instanceof Element) {
     return !!node.closest(selector)
@@ -1422,6 +1533,10 @@ function refreshUi(): void {
 }
 
 function scheduleRefresh(): void {
+  if (isStudioExportModalOpen) {
+    return
+  }
+
   if (isSourceDownloadModalOpen) {
     return
   }
@@ -1486,6 +1601,9 @@ function startObservers(): void {
   window.addEventListener(SOURCE_FILTER_APPLY_START_EVENT, onSourceFilterApplyStart as EventListener)
   window.addEventListener(SOURCE_FILTER_APPLY_END_EVENT, onSourceFilterApplyEnd as EventListener)
   window.addEventListener(SOURCE_DOWNLOAD_MODAL_STATE_EVENT, onSourceDownloadModalState as EventListener)
+  window.addEventListener(STUDIO_EXPORT_MODAL_STATE_EVENT, onStudioExportModalState as EventListener)
+  window.addEventListener("error", onWindowError)
+  window.addEventListener("unhandledrejection", onUnhandledRejection)
 
   if (ENABLE_NOTEBOOK_HIGHLIGHT_CLIPPER) {
     document.addEventListener("mouseup", onHighlightMouseUp)
@@ -1525,7 +1643,11 @@ function cleanup(): void {
   window.removeEventListener(SOURCE_FILTER_APPLY_START_EVENT, onSourceFilterApplyStart as EventListener)
   window.removeEventListener(SOURCE_FILTER_APPLY_END_EVENT, onSourceFilterApplyEnd as EventListener)
   window.removeEventListener(SOURCE_DOWNLOAD_MODAL_STATE_EVENT, onSourceDownloadModalState as EventListener)
+  window.removeEventListener(STUDIO_EXPORT_MODAL_STATE_EVENT, onStudioExportModalState as EventListener)
+  window.removeEventListener("error", onWindowError)
+  window.removeEventListener("unhandledrejection", onUnhandledRejection)
   isSourceDownloadModalOpen = false
+  isStudioExportModalOpen = false
 
   if (ENABLE_NOTEBOOK_HIGHLIGHT_CLIPPER) {
     document.removeEventListener("mouseup", onHighlightMouseUp)
@@ -1546,6 +1668,8 @@ function cleanup(): void {
     }
   }
 
+  uninstallInsertBeforeGuard()
+
   const globalState = resolveGlobalState()
   if (globalState.cleanup === cleanup) {
     globalState.cleanup = null
@@ -1556,6 +1680,7 @@ function bootstrap(): void {
   cleanupPreviousInstance()
 
   const run = () => {
+    installInsertBeforeGuard()
     refreshUi()
     startObservers()
     resolveGlobalState().cleanup = cleanup

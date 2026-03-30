@@ -56,7 +56,6 @@ function flushPendingPayload(): void {
   }
 
   if (!runtimeApi?.sendMessage) {
-    console.warn("[MindDock Relay] chrome.runtime.sendMessage unavailable.")
     return
   }
 
@@ -70,10 +69,8 @@ function flushPendingPayload(): void {
         void chrome.runtime?.lastError
       }
     )
-
-    console.log("[MindDock Relay] Tokens forwarded to background.")
-  } catch (error) {
-    console.warn("[MindDock Relay] Failed to forward tokens.", error)
+  } catch {
+    // Silent by design: relay failures must not affect the page.
   }
 }
 

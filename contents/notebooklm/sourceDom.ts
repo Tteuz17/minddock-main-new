@@ -764,10 +764,15 @@ export function dispatchSourcePanelReset(): void {
 }
 
 export function isStudioExportModalOpen(): boolean {
-  const host = document.querySelector<HTMLElement>('[data-minddock-shadow-host="studio-export-modal"]')
-  const shadowRoot = host?.shadowRoot
-  if (!shadowRoot) return false
-  return Boolean(shadowRoot.querySelector('[data-minddock-studio-export-overlay="true"]'))
+  const shadowHost = document.querySelector<HTMLElement>('[data-minddock-shadow-host="studio-export-modal"]')
+  const shadowRoot = shadowHost?.shadowRoot
+  if (shadowRoot?.querySelector('[data-minddock-studio-export-overlay="true"]')) {
+    return true
+  }
+
+  return Boolean(
+    document.querySelector('[data-minddock-host="studio-export-modal"] [data-minddock-studio-export-overlay="true"]')
+  )
 }
 
 export function dispatchSourcePanelExport(): void {
@@ -2830,7 +2835,7 @@ export function resolveStudioExportAnchor(): HTMLElement | null {
   }
 
   // Primary: find the button containing the dock_to_left icon
-  const dockIcons = queryDeepAll<HTMLElement>("mat-icon, .mat-icon")
+  const dockIcons = queryDeepAll<HTMLElement>(["mat-icon", ".mat-icon"])
     .filter((el) => el.textContent?.trim() === "dock_to_left" && isVisible(el))
   for (const icon of dockIcons) {
     const btn = icon.closest<HTMLElement>("button, [role='button']")

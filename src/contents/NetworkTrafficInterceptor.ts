@@ -44,8 +44,6 @@ export interface StudioItem {
   kind?: "text" | "asset"
 }
 
-console.log("🚀 MindDock: Interceptor carregado no MAIN world")
-
 function rememberRpcContextFromUrlAndBody(requestUrl: string, requestBody?: string): void {
   try {
     const url = new URL(requestUrl)
@@ -1479,7 +1477,6 @@ function extractRpcPayloadNodes(node: unknown): unknown[] {
 function parseBatchexecuteCalls(rawNetworkResponse: string): Array<{ rpcId: string; payload: unknown }> {
   const parsedNodes = parseGoogleRpcResponse(rawNetworkResponse)
   if (parsedNodes.length === 0) {
-    console.warn("[MindDock][Studio][RPC] parsedNodes: 0, raw length:", rawNetworkResponse.length)
     return []
   }
 
@@ -1569,22 +1566,15 @@ function processStudioNetworkResponse(rawNetworkResponse: string, requestUrl: st
     if (now > studioArmUntil) {
       return
     }
-    console.warn("[MindDock][Studio][ARMED] janela ms:", studioArmUntil - now)
     const calls = parseBatchexecuteCalls(rawNetworkResponse)
     if (calls.length === 0) {
-      const snippet = rawNetworkResponse.slice(0, 220).replace(/\s+/g, " ")
-      console.warn("[MindDock][Studio][RPC] calls: 0, raw head:", snippet)
       return
     }
 
     const items = new Map<string, StudioItem>()
 
-    const callRpcIds = calls.map((call) => call.rpcId)
     const preferredCalls = calls.filter((call) => STUDIO_RPC_ALLOWLIST.has(call.rpcId))
     const callsToProcess = preferredCalls.length > 0 ? preferredCalls : calls
-
-    console.warn("[MindDock][Studio][RPC] calls:", calls.length)
-    console.warn("[MindDock][Studio][RPC] rpcids sample:", callRpcIds.slice(0, 6))
 
     for (const call of callsToProcess) {
       const payloadCandidates = [call.payload, ...extractRpcPayloadNodes(call.payload)]
@@ -1619,22 +1609,6 @@ function processStudioNetworkResponse(rawNetworkResponse: string, requestUrl: st
 
     const accountHints = resolveNotebookAccountHints(requestUrl)
     broadcastStudioItems(filteredItems, accountHints)
-    const requestRpcIds = resolveRpcIdsFromUrl(requestUrl)
-    console.group("[MindDock][Studio][RPC]")
-    console.log("rpcids:", requestRpcIds.join(",") || "n/a")
-    console.log("calls:", calls.length)
-    console.log("items:", filteredItems.length)
-    console.table(
-      filteredItems.slice(0, 5).map((item) => ({
-        title: item.title,
-        type: item.type,
-        meta: item.meta,
-        url: item.url,
-        mimeType: item.mimeType,
-        kind: item.kind
-      }))
-    )
-    console.groupEnd()
   } catch {
     // Silent by design: parsing failures must not affect the page.
   }
@@ -1669,11 +1643,6 @@ function interceptGoogleCloudRpc(requestUrl: string, rawNetworkResponse: string)
 
   rememberRpcContextFromUrlAndBody(requestUrl)
 
-  if (Date.now() <= studioArmUntil) {
-    const head = String(rawNetworkResponse ?? "").slice(0, 180).replace(/\s+/g, " ")
-    console.warn("[MindDock][Studio][RAW]", "len:", rawNetworkResponse.length, "head:", head)
-  }
-
   if (doesRequestTargetNotebookList(requestUrl)) {
     processRawNetworkResponse(rawNetworkResponse, requestUrl)
   }
@@ -1695,7 +1664,6 @@ function patchFetch(): void {
   window.fetch = new Proxy(originalFetch, {
     apply(target, thisArg, argArray: [RequestInfo | URL, RequestInit | undefined]) {
       const [requestInput, requestInit] = argArray
-      console.log("📡 Fetch detectado:", requestInput?.toString())
 
       const requestUrl = resolveRequestUrl(requestInput)
       const isBatchExecuteTarget = isTargetRequestUrl(requestUrl)
@@ -1707,7 +1675,6 @@ function patchFetch(): void {
             ? requestInit.body.toString()
             : undefined
         rememberRpcContextFromUrlAndBody(requestUrl, bodyText)
-        console.log("🎯 Alvo batchexecute identificado na URL:", requestUrl)
         const urlRpcIds = resolveRpcIdsFromUrl(requestUrl)
         const { ids: bodyRpcIds, studioHint } = extractRpcIdsFromRequestBody(requestInit?.body)
         rememberRpcIds([...urlRpcIds, ...bodyRpcIds], studioHint)
@@ -1847,7 +1814,6 @@ function installStudioArmListener(): void {
       return
     }
     studioArmUntil = Date.now() + STUDIO_ARM_WINDOW_MS
-    console.warn("[MindDock][Studio][ARM] armado por 8s")
   })
 }
 
@@ -1865,4 +1831,3 @@ function bootstrapNetworkTrafficInterceptor(): void {
 }
 
 bootstrapNetworkTrafficInterceptor()
-

@@ -208,30 +208,12 @@ function installPageHook() {
   }
 
   function logRpcDiagnostics(urlText: string) {
-    try {
-      const url = new URL(urlText, window.location.href)
-      if (!url.pathname.includes(BATCHEXECUTE_PATH)) return
-      console.log("[MD-RPC]", {
-        rpcids: url.searchParams.get("rpcids"),
-        sourcePath: url.searchParams.get("source-path"),
-        reqid: url.searchParams.get("_reqid"),
-        authuser: url.searchParams.get("authuser"),
-      })
-    } catch {}
+    void urlText
   }
 
   function logRpcPdfHit(urlText: string, rawText: string) {
-    try {
-      const url = new URL(urlText, window.location.href)
-      if (!url.pathname.includes(BATCHEXECUTE_PATH)) return
-      if (!PDF_HINT_RE.test(rawText)) return
-      console.log("[MD-RPC-PDF-HIT]", {
-        url: url.toString(),
-        rpcids: url.searchParams.get("rpcids"),
-        sourcePath: url.searchParams.get("source-path"),
-        sample: String(rawText ?? "").slice(0, 1500),
-      })
-    } catch {}
+    void urlText
+    void rawText
   }
 
   function installNativeSlidesDownloadCapture(): void {
