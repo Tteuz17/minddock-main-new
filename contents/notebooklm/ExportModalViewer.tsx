@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
+import DOMPurify from "dompurify"
 
 interface ExportModalViewerLabels {
   previewButton: string
@@ -35,7 +36,11 @@ function SafePreviewContainer({ previewHtmlString }: SafePreviewContainerProps) 
 
   useEffect(() => {
     if (containerRef.current) {
-      containerRef.current.innerHTML = previewHtmlString
+      containerRef.current.innerHTML = DOMPurify.sanitize(previewHtmlString, {
+        USE_PROFILES: { html: true },
+        FORBID_TAGS: ["script", "iframe", "object", "embed", "form"],
+        FORBID_ATTR: ["onerror", "onload", "onclick", "onmouseover", "onfocus"]
+      })
     }
   }, [previewHtmlString])
 
