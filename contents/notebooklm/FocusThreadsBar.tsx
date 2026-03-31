@@ -170,12 +170,41 @@ function writeComposerValue(element: HTMLElement, value: string): void {
   focusEditable(element)
 }
 
+const MAX_COMPOSER_CHARS = 9_000
+
 function truncateText(value: string, maxLength: number): string {
   const normalized = value.trim()
   if (normalized.length <= maxLength) {
     return normalized
   }
   return `${normalized.slice(0, maxLength).trimEnd()}...`
+}
+
+function buildRecentTranscript(
+  messages: ThreadMessage[],
+  maxChars: number
+): { text: string; truncated: boolean } {
+  const lines = messages.map((message) =>
+    `${message.role === "user" ? "User" : "NotebookLM"}:\n${message.content.trim()}`
+  )
+
+  const kept: string[] = []
+  let total = 0
+
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const entry = lines[i]
+    const addedLength = entry.length + (kept.length > 0 ? 2 : 0)
+    if (total + addedLength > maxChars) {
+      break
+    }
+    kept.unshift(entry)
+    total += addedLength
+  }
+
+  return {
+    text: kept.join("\n\n").trim() || "No transcript available.",
+    truncated: kept.length < lines.length
+  }
 }
 
 function extractDockContext(messages: ThreadMessage[]): {
@@ -286,7 +315,7 @@ function buildProfessionalContinuationPrompt(
     .map((message, index) => `${index + 1}. "${truncateText(message.content, 220)}"`)
     .join("\n")
 
-  return [
+  const preamble = [
     `CONTINUITY BRIEF FROM SAVED DOCK: "${thread.name}"`,
     thread.topic ? `Dock topic: ${thread.topic}` : "Dock topic: not specified",
     "",
@@ -316,10 +345,16 @@ function buildProfessionalContinuationPrompt(
     "1. Start with a 5-bullet continuity checkpoint that proves you understood the full history.",
     "2. Continue exactly from the last pending point.",
     "3. Deliver a professional, implementation-ready next step.",
-    "",
-    "FULL TRANSCRIPT (SOURCE OF TRUTH - DO NOT IGNORE):",
-    context.transcript || "No transcript available."
+    ""
   ].join("\n")
+
+  const transcriptBudget = Math.max(500, MAX_COMPOSER_CHARS - preamble.length - 80)
+  const { text: transcriptText, truncated } = buildRecentTranscript(messages, transcriptBudget)
+  const transcriptHeader = truncated
+    ? "PARTIAL TRANSCRIPT (most recent messages — full history too long for chat input):"
+    : "FULL TRANSCRIPT (SOURCE OF TRUTH - DO NOT IGNORE):"
+
+  return `${preamble}${transcriptHeader}\n${transcriptText}`
 }
 
 function buildSummaryOnlyContinuationPrompt(thread: Thread, messages: ThreadMessage[]): string {
@@ -363,9 +398,8 @@ function buildSummaryOnlyContinuationPrompt(thread: Thread, messages: ThreadMess
   ].join("\n")
 }
 
-function buildConversationTranscript(messages: ThreadMessage[]): string {
-  const context = extractDockContext(messages)
-  return context.transcript || "No transcript available."
+function buildConversationTranscript(messages: ThreadMessage[]): { text: string; truncated: boolean } {
+  return buildRecentTranscript(messages, MAX_COMPOSER_CHARS)
 }
 
 const MANUAL_USER_LABELS = new Set([
@@ -1025,13 +1059,17 @@ export function FocusThreadsBar() {
     }
 
     const currentValue = readComposerValue(composer).trim()
-    const dockContextBlock = buildConversationTranscript(messages)
+    const { text: dockContextBlock, truncated } = buildConversationTranscript(messages)
 
     const nextValue = currentValue ? `${currentValue}\n\n${dockContextBlock}` : dockContextBlock
 
     writeComposerValue(composer, nextValue)
     setHistoryOpen(false)
-    pushActionFeedback("Full conversation pasted into the current chat.")
+    pushActionFeedback(
+      truncated
+        ? "Recent messages pasted (conversation was too long — oldest messages omitted)."
+        : "Full conversation pasted into the current chat."
+    )
   }
 
   function handleGenerateNextPrompt() {
