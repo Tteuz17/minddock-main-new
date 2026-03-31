@@ -153,6 +153,10 @@ class ThreadService {
     return false
   }
 
+  private async shouldAllowLocalFallback(): Promise<boolean> {
+    return false
+  }
+
   private isThreadMessagesTableError(error: unknown): boolean {
     const message = this.normalizeErrorMessage(error)
     if (!message) {
