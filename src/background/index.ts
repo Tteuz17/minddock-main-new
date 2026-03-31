@@ -340,8 +340,15 @@ void authManager.initializeSession().catch((error) => {
 })
 
 chrome.runtime.onInstalled.addListener(async ({ reason }) => {
-  // Remove any legacy dev bypass keys that may have been stored in older versions
-  await chrome.storage.local.remove("minddock_dev_auth_bypass").catch(() => {})
+  // Remove legacy keys from local storage — tokens must live in session storage only
+  await chrome.storage.local.remove([
+    "minddock_dev_auth_bypass",
+    "notebooklm_session",
+    "nexus_at_token",
+    "nexus_bl_token",
+    "nexus_session_id",
+    "nexus_token_expires_at"
+  ]).catch(() => {})
 
   if (reason === "install") {
     console.log("[MindDock] Instalado. Bem-vindo!")
