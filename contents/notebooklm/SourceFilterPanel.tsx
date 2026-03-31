@@ -1391,12 +1391,22 @@ function collectIconSnapshot(node: HTMLElement): string {
     }
   }
 
-  const iconNodes = [node, ...Array.from(node.querySelectorAll<HTMLElement | SVGElement>("svg, use, path, i, span, [data-icon], [icon-name]"))]
+  const iconNodes = [
+    node,
+    ...Array.from(
+      node.querySelectorAll<HTMLElement | SVGElement>(
+        "mat-icon, .mat-icon, .material-symbols-outlined, .material-icons, [data-mat-icon-name], [fonticon], [svgicon], svg, use, path, i, span, [data-icon], [icon-name]"
+      )
+    )
+  ]
   for (const iconNode of iconNodes) {
     push(iconNode.getAttribute("class"))
     push(iconNode.getAttribute("style"))
     push(iconNode.getAttribute("data-icon"))
     push(iconNode.getAttribute("icon-name"))
+    push(iconNode.getAttribute("data-mat-icon-name"))
+    push(iconNode.getAttribute("fonticon"))
+    push(iconNode.getAttribute("svgicon"))
     push(iconNode.getAttribute("aria-label"))
     push(iconNode.getAttribute("title"))
     push(iconNode.getAttribute("src"))
@@ -1415,6 +1425,45 @@ function collectIconSnapshot(node: HTMLElement): string {
   }
 
   return Array.from(values).join(" ")
+}
+
+function detectSourceTypeFromIconSignals(iconSignals: string): SourceDetectedType | null {
+  const normalized = normalizeSnapshotValue(iconSignals)
+  if (!normalized) {
+    return null
+  }
+
+  // Regra estrita: se houver o token de icone `video_youtube`, entra em YouTube.
+  if (/\bvideo_youtube\b/.test(normalized)) {
+    return "YOUTUBE"
+  }
+
+  // Material icon tokens.
+  if (/\bdrive_pdf\b|\bpicture_as_pdf\b|\bpdf_icon\b/.test(normalized)) {
+    return "PDF"
+  }
+
+  if (/\barticle\b|\bdrive_spreadsheet\b|\bdrive_presentation\b/.test(normalized)) {
+    return "GDOC"
+  }
+
+  if (/\bvideo_audio_call\b|\baudiotrack\b|\bmusic_note\b|\bpodcasts?\b/.test(normalized)) {
+    return "AUDIO"
+  }
+
+  if (/\bdescription\b|\btext_snippet\b|\bsubject\b|\bnotes?\b|\bformat_quote\b/.test(normalized)) {
+    return "TEXT"
+  }
+
+  if (/\bimage\b|\bphoto\b|\bcollections?\b|\bgallery\b/.test(normalized)) {
+    return "IMAGE"
+  }
+
+  if (/\bpublic\b|\blanguage\b|\btravel_explore\b|\bglobe\b/.test(normalized)) {
+    return "WEB"
+  }
+
+  return null
 }
 
 function normalizeRawSourceType(rawType: string): SourceDetectedType | null {
@@ -1586,6 +1635,7 @@ function collectRowContextSnapshot(row: HTMLElement): string {
 function detectSourceTypeFromRow(row: HTMLElement): SourceDetectedType {
   const html = normalizeSnapshotValue(row.innerHTML)
   const text = normalizeSnapshotValue(String(row.innerText || row.textContent || ""))
+  const semanticTextRaw = String(resolveSemanticSourceTextForDetection(row) ?? "").trim()
   const semanticText = normalizeSnapshotValue(resolveSemanticSourceTextForDetection(row))
   const aria = normalizeSnapshotValue(row.getAttribute("aria-label"))
   const title = normalizeSnapshotValue(row.getAttribute("title"))
@@ -1595,9 +1645,25 @@ function detectSourceTypeFromRow(row: HTMLElement): SourceDetectedType {
   const classHints = normalizeSnapshotValue(readClassSnapshot(row))
   const svgPathSnapshot = collectSvgPathSnapshot(row)
   const iconSnapshot = collectIconSnapshot(row)
+  const iconImageSnapshot = normalizeSnapshotValue(
+    Array.from(row.querySelectorAll<HTMLImageElement>("img[src], img[alt]"))
+      .slice(0, 12)
+      .map((img) =>
+        [
+          img.src,
+          img.alt,
+          img.getAttribute("aria-label"),
+          img.getAttribute("title"),
+          readClassSnapshot(img)
+        ]
+          .filter(Boolean)
+          .join(" ")
+      )
+      .join(" ")
+  )
   const nodeSnapshot = collectNodeSnapshot(row)
   
-  // Busca links na linha E nos ancestrais (até 3 níveis acima)
+  // Busca links na linha E nos ancestrais (ate 3 niveis acima)
   const allHrefs: string[] = []
   let current: HTMLElement | null = row
   let depth = 0
@@ -1607,7 +1673,7 @@ function detectSourceTypeFromRow(row: HTMLElement): SourceDetectedType {
       allHrefs.push(anchor.href)
     })
     
-    // Busca também em atributos data-* que podem conter URLs
+    // Busca tambem em atributos data-* que podem conter URLs
     const dataAttrs = Array.from(current.attributes).filter(attr => 
       attr.name.startsWith("data-") && 
       (attr.value.includes("docs.google.com") || attr.value.includes("drive.google.com") || attr.value.includes("http"))
@@ -1650,14 +1716,53 @@ function detectSourceTypeFromRow(row: HTMLElement): SourceDetectedType {
   const contextSnapshot = collectRowContextSnapshot(row)
   const fullSnapshot = `${combinedSnapshot} ${contextSnapshot}`.trim()
 
-  const rawTypeSignals = `${collectRawTypeSignals(row)} ${contextSnapshot}`.trim()
+  const localRawTypeSignals = collectRawTypeSignals(row).trim()
+  const rawTypeSignals = `${localRawTypeSignals} ${contextSnapshot}`.trim()
   const explicitGdocMetadata = hasGdocMetadataSignal(row, `${fullSnapshot} ${rawTypeSignals}`)
+  const iconSignalSnapshot = `${iconSnapshot} ${iconImageSnapshot} ${dataHints} ${classHints} ${localRawTypeSignals}`.trim()
+  const iconDetectedType = detectSourceTypeFromIconSignals(iconSignalSnapshot)
+  if (iconDetectedType) {
+    return iconDetectedType
+  }
+
+  const youtubeSignalSnapshot = `${combinedSnapshot} ${localRawTypeSignals}`.trim()
+  const hasYouTubeSignal = /\byoutube\b|youtu\.be|youtube\.com|watch\?v=|\/shorts\//.test(youtubeSignalSnapshot)
+  const hasYouTubeTranscriptTag = /^\[\s*youtube\s*\]/iu.test(semanticTextRaw)
+  const youtubeIconSignalSnapshot = iconSignalSnapshot
+  const hasYouTubeVideoIcon = /\bvideo_youtube\b/.test(youtubeIconSignalSnapshot)
+  const hasTextLikeIconSignal =
+    /\bdescription\b|\barticle\b|\btext_snippet\b|\bsubject\b|\bnotes?\b|\bformat_quote\b/.test(
+      youtubeIconSignalSnapshot
+    )
+  const hasStrongYoutubeAnchor = hasYouTubeVideoIcon
+  const hasTranscriptKeyword =
+    /\b(transcri(?:cao|coes|\u00e7\u00e3o|\u00e7\u00f5es)?|transcript(?:ion)?|legendas?|subtitles?|url original|texto transcrito)\b/iu.test(
+      `${semanticTextRaw} ${String(row.innerText || row.textContent || "")}`
+    )
+  const shouldForceYoutubeTranscriptAsText =
+    hasTranscriptKeyword ||
+    (hasYouTubeTranscriptTag && !hasStrongYoutubeAnchor) ||
+    (hasYouTubeSignal && hasTextLikeIconSignal && !hasStrongYoutubeAnchor)
+  const shouldForceWeakYoutubeLabelAsText = hasYouTubeSignal && !hasStrongYoutubeAnchor
+  const shouldForceYoutubeAsText = shouldForceYoutubeTranscriptAsText || shouldForceWeakYoutubeLabelAsText
+  if (shouldForceYoutubeAsText) {
+    return "TEXT"
+  }
   
   if (explicitGdocMetadata) {
     return "GDOC"
   }
+
+  // Regra de produto: YouTube real depende do icone de video.
+  // Se houver apenas label/URL sem o icone, tratamos como texto (ex.: transcricao capturada).
+  if (hasYouTubeVideoIcon) {
+    return "YOUTUBE"
+  }
+  if (hasYouTubeSignal) {
+    return "TEXT"
+  }
   
-  // DETECÇÃO POR ÍCONE (primeira palavra do texto)
+  // DETECCAO POR ICONE (primeira palavra do texto)
   const firstWord = String(text.split(" ")[0] ?? "").trim()
   const textLeaningSnapshot = `${semanticText} ${rawTypeSignals} ${title}`.trim()
   const hasTextSelectionSignal =
@@ -1683,7 +1788,7 @@ function detectSourceTypeFromRow(row: HTMLElement): SourceDetectedType {
     return "GDOC"
   }
   
-  // Áudio
+  // Audio
   if (firstWord === "video_audio_call") {
     return "AUDIO"
   }
@@ -1714,6 +1819,12 @@ function detectSourceTypeFromRow(row: HTMLElement): SourceDetectedType {
     if (normalizedFromRawType === "IMAGE" && !hasConcreteImageSignal) {
       return "TEXT"
     }
+    if (normalizedFromRawType === "YOUTUBE" && !hasYouTubeVideoIcon) {
+      return "TEXT"
+    }
+    if (normalizedFromRawType === "YOUTUBE" && shouldForceYoutubeAsText) {
+      return "TEXT"
+    }
     return normalizedFromRawType
   }
 
@@ -1721,6 +1832,12 @@ function detectSourceTypeFromRow(row: HTMLElement): SourceDetectedType {
   const normalizedFromSnapshot = normalizeRawSourceType(fullSnapshot)
   if (normalizedFromSnapshot) {
     if (normalizedFromSnapshot === "IMAGE" && !hasConcreteImageSignal) {
+      return "TEXT"
+    }
+    if (normalizedFromSnapshot === "YOUTUBE" && !hasYouTubeVideoIcon) {
+      return "TEXT"
+    }
+    if (normalizedFromSnapshot === "YOUTUBE" && shouldForceYoutubeAsText) {
       return "TEXT"
     }
     return normalizedFromSnapshot

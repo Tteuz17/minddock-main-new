@@ -299,9 +299,14 @@ export function inferSourceType(row: HTMLElement): SourceFilterType {
     return "GDocs"
   }
 
-  // PRIORIDADE 2: YouTube
-  if (/youtube|youtu\.be|youtube\.com/.test(snapshot)) {
+  // PRIORIDADE 2: YouTube (somente com icone material `video_youtube`)
+  const hasYouTubeVideoIcon = /\bvideo_youtube\b/.test(snapshot)
+  const hasYouTubeSignal = /youtube|youtu\.be|youtube\.com/.test(snapshot)
+  if (hasYouTubeVideoIcon) {
     return "YouTube"
+  }
+  if (hasYouTubeSignal) {
+    return "Text"
   }
 
   const firstToken = String(snapshot.split(/\s+/)[0] ?? "").trim()
