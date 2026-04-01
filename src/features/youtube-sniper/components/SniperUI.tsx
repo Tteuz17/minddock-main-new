@@ -4,6 +4,7 @@ import { extractTranscriptSlice } from '../utils/transcriptEngine';
 const MAX_INTERVALO = 3600;
 const SNIPER_BUTTON_ID = 'minddock-youtube-sniper-button';
 const PANEL_WIDTH = 352;
+const MINDDOCK_LOGO_SRC = new URL('../../../../public/images/logo/logotipo minddock.png', import.meta.url).href;
 
 function logSniperUi(message: string, details?: Record<string, unknown>): void {
   if (details) {
@@ -90,16 +91,18 @@ function readPlayerTimes(): { duration: number; currentTime: number } {
 
 function MindDockMark() {
   return (
-    <svg width="20" height="20" viewBox="0 0 22 22" fill="none" xmlns="http://www.w3.org/2000/svg">
-      <rect width="22" height="22" rx="6" fill="rgba(255,255,255,0.1)" />
-      <path
-        d="M5 16V7.5L11 13L17 7.5V16"
-        stroke="rgba(255,255,255,0.75)"
-        strokeWidth="2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
+    <img
+      src={MINDDOCK_LOGO_SRC}
+      alt="MindDock"
+      width={20}
+      height={20}
+      style={{
+        width: 20,
+        height: 20,
+        objectFit: 'contain',
+        display: 'block',
+      }}
+    />
   );
 }
 
@@ -290,11 +293,12 @@ export function SniperUI({ onClose, getDefaultNotebookId }: SniperUIProps) {
   };
 
   async function handleExtract() {
+    const notebookId = getDefaultNotebookId()?.trim();
     logSniperUi('Extract clicked.', {
       startSec,
       endSec,
       duration,
-      hasDefaultNotebookId: Boolean(defaultNotebookId?.trim()),
+      hasDefaultNotebookId: Boolean(notebookId),
       currentUrl: window.location.href,
     });
 
@@ -304,7 +308,6 @@ export function SniperUI({ onClose, getDefaultNotebookId }: SniperUIProps) {
       logSniperUi('Blocked: startSec must be lower than endSec.', { startSec, endSec });
       return;
     }
-    const notebookId = getDefaultNotebookId()?.trim();
     if (!notebookId) {
       setStatus('error');
       setMessage('Select a default notebook in the popup first.');
@@ -445,7 +448,7 @@ export function SniperUI({ onClose, getDefaultNotebookId }: SniperUIProps) {
               <div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                   <span style={{ fontSize: 13, fontWeight: 500, color: 'rgba(255,255,255,0.85)', letterSpacing: '-0.01em' }}>
-                    Sniper
+                    Captura de precisão
                   </span>
                   {/* YouTube badge */}
                   <span style={{
