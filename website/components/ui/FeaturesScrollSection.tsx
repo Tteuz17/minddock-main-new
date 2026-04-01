@@ -1,13 +1,9 @@
 'use client';
 
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import dynamic from 'next/dynamic';
 
 const Beams = dynamic(() => import('./Beams'), { ssr: false });
-
-const Y = '#facc15';
-const Yi = 'rgba(250,204,21,0.08)';
-const Yb = 'rgba(250,204,21,0.15)';
 
 const features = [
   {
@@ -196,8 +192,14 @@ export default function FeaturesScrollSection() {
   const cardsRef = useRef<(HTMLDivElement | null)[]>([]);
   const [isSectionVisible, setIsSectionVisible] = useState(false);
   const [reduceMotion, setReduceMotion] = useState(false);
+  const [isMobile, setIsMobile] = useState(false);
+  const [activeCard, setActiveCard] = useState(0);
+  const touchStartX = useRef(0);
+  const touchStartY = useRef(0);
+  const autoAdvanceRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const numCards = features.length;
 
+  // Reduce motion
   useEffect(() => {
     if (typeof window === 'undefined') return;
     const media = window.matchMedia('(prefers-reduced-motion: reduce)');
@@ -207,22 +209,47 @@ export default function FeaturesScrollSection() {
     return () => media.removeEventListener('change', update);
   }, []);
 
+  // Mobile detection
+  useEffect(() => {
+    const check = () => setIsMobile(window.innerWidth < 768);
+    check();
+    window.addEventListener('resize', check, { passive: true });
+    return () => window.removeEventListener('resize', check);
+  }, []);
+
+  // Beams visibility
   useEffect(() => {
     const section = sectionRef.current;
     if (!section || typeof IntersectionObserver === 'undefined') return;
-
     const observer = new IntersectionObserver(
-      (entries) => {
-        setIsSectionVisible(entries[0]?.isIntersecting ?? false);
-      },
+      (entries) => { setIsSectionVisible(entries[0]?.isIntersecting ?? false); },
       { rootMargin: '180% 0px 180% 0px' }
     );
-
     observer.observe(section);
     return () => observer.disconnect();
   }, []);
 
+  // Auto-advance reset helper
+  const resetAutoAdvance = useCallback(() => {
+    if (autoAdvanceRef.current) clearInterval(autoAdvanceRef.current);
+    autoAdvanceRef.current = setInterval(
+      () => setActiveCard((prev) => (prev + 1) % numCards),
+      4000
+    );
+  }, [numCards]);
+
+  // Mobile auto-advance
   useEffect(() => {
+    if (!isMobile) return;
+    resetAutoAdvance();
+    return () => {
+      if (autoAdvanceRef.current) clearInterval(autoAdvanceRef.current);
+    };
+  }, [isMobile, resetAutoAdvance]);
+
+  // Desktop scroll animation
+  useEffect(() => {
+    if (isMobile) return;
     const section = sectionRef.current;
     if (!section) return;
 
@@ -282,35 +309,25 @@ export default function FeaturesScrollSection() {
     };
 
     const loop = () => {
-      if (!active) {
-        stopRaf();
-        return;
-      }
+      if (!active) { stopRaf(); return; }
       current = lerp(current, target, 0.1);
       updateCards(current);
-
       if (Math.abs(current - target) <= 0.5) {
         current = target;
         updateCards(current);
         stopRaf();
         return;
       }
-
       rafId = requestAnimationFrame(loop);
     };
 
     const requestLoop = () => {
-      if (rafId === null) {
-        rafId = requestAnimationFrame(loop);
-      }
+      if (rafId === null) rafId = requestAnimationFrame(loop);
     };
 
     const onScroll = () => {
       target = window.scrollY;
-      if (reduceMotion) {
-        updateCards(target);
-        return;
-      }
+      if (reduceMotion) { updateCards(target); return; }
       if (active) requestLoop();
     };
 
@@ -324,10 +341,7 @@ export default function FeaturesScrollSection() {
     const observer = new IntersectionObserver(
       (entries) => {
         active = entries[0]?.isIntersecting ?? false;
-        if (!active) {
-          stopRaf();
-          return;
-        }
+        if (!active) { stopRaf(); return; }
         target = window.scrollY;
         current = target;
         updateCards(target);
@@ -350,8 +364,152 @@ export default function FeaturesScrollSection() {
       window.removeEventListener('scroll', onScroll);
       window.removeEventListener('resize', onResize);
     };
-  }, [numCards, reduceMotion]);
+  }, [numCards, reduceMotion, isMobile]);
 
+  // Touch handlers for mobile swipe
+  const handleTouchStart = (e: React.TouchEvent) => {
+    touchStartX.current = e.changedTouches[0].clientX;
+    touchStartY.current = e.changedTouches[0].clientY;
+  };
+
+  const handleTouchEnd = (e: React.TouchEvent) => {
+    const dx = touchStartX.current - e.changedTouches[0].clientX;
+    const dy = touchStartY.current - e.changedTouches[0].clientY;
+    // Only handle horizontal swipes (not vertical scroll)
+    if (Math.abs(dx) < 40 || Math.abs(dx) < Math.abs(dy)) return;
+    const next = dx > 0
+      ? (activeCard + 1) % numCards
+      : (activeCard - 1 + numCards) % numCards;
+    setActiveCard(next);
+    resetAutoAdvance();
+  };
+
+  const goToCard = (index: number) => {
+    setActiveCard(index);
+    resetAutoAdvance();
+  };
+
+  // ─── MOBILE RENDER ────────────────────────────────────────────────────────
+  if (isMobile) {
+    return (
+      <section className="relative overflow-hidden border-t border-b border-white/60">
+        {/* Background */}
+        <div className="absolute inset-0 pointer-events-none" style={{ zIndex: 0 }}>
+          {!reduceMotion ? (
+            <Beams
+              beamWidth={2}
+              beamHeight={20}
+              beamNumber={8}
+              lightColor="#ffffff"
+              speed={2}
+              noiseIntensity={1.75}
+              scale={0.2}
+              rotation={30}
+              active={true}
+            />
+          ) : (
+            <div className="h-full w-full bg-black/90" />
+          )}
+        </div>
+
+        <div className="relative flex flex-col gap-6 px-4 py-10" style={{ zIndex: 1 }}>
+          {/* Heading */}
+          <div className="text-center">
+            <p className="text-[11px] uppercase tracking-[0.24em] text-white/35">Features</p>
+            <h2 className="mx-auto mt-3 text-2xl font-semibold tracking-[-0.05em] text-white">
+              Everything NotebookLM is missing,{' '}
+              <span className="whitespace-nowrap">MindDock adds.</span>
+            </h2>
+            <p className="mx-auto mt-3 text-sm leading-7 text-white/40">
+              Every feature was designed to supercharge NotebookLM — not replace it.
+            </p>
+          </div>
+
+          {/* Carousel container */}
+          <div
+            className="relative"
+            style={{ minHeight: 480 }}
+            onTouchStart={handleTouchStart}
+            onTouchEnd={handleTouchEnd}
+          >
+            {features.map((feature, i) => (
+              <div
+                key={i}
+                className="absolute inset-0"
+                style={{
+                  opacity: i === activeCard ? 1 : 0,
+                  transform: i === activeCard
+                    ? 'translateX(0) scale(1)'
+                    : i < activeCard
+                      ? 'translateX(-16px) scale(0.97)'
+                      : 'translateX(16px) scale(0.97)',
+                  transition: reduceMotion
+                    ? 'none'
+                    : 'opacity 350ms ease, transform 350ms ease',
+                  pointerEvents: i === activeCard ? 'auto' : 'none',
+                  willChange: 'opacity, transform',
+                }}
+              >
+                <div className="overflow-hidden rounded-3xl border border-white/[0.07] bg-[#0c0c0f]">
+                  <div className="flex flex-col gap-5 p-5">
+                    {/* Text */}
+                    <div className="flex flex-col gap-3">
+                      <span className="text-[10px] uppercase tracking-[0.22em] text-white/28">
+                        {feature.eyebrow}
+                      </span>
+                      <h3 className="text-xl font-semibold leading-snug tracking-[-0.04em] text-white">
+                        {feature.title}
+                      </h3>
+                      <p className="text-sm leading-7 text-white/40">{feature.body}</p>
+                      <div className="pt-1">
+                        <span className="rounded-full border border-white/9 bg-white/4 px-3 py-1.5 text-[11px] text-white/30">
+                          {feature.tag}
+                        </span>
+                      </div>
+                    </div>
+                    {/* Visual */}
+                    <div className="w-full">{feature.visual}</div>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Dots */}
+          <div className="flex justify-center items-center gap-3 pt-1">
+            {features.map((_, j) => (
+              <button
+                key={j}
+                onClick={() => goToCard(j)}
+                aria-label={`Go to feature ${j + 1}: ${features[j].eyebrow}`}
+                style={{
+                  padding: '10px 4px',
+                  background: 'none',
+                  border: 'none',
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                }}
+              >
+                <span
+                  className="block rounded-full transition-all duration-300"
+                  style={{
+                    height: '3px',
+                    width: j === activeCard ? '18px' : '5px',
+                    background: j === activeCard
+                      ? 'rgba(255,255,255,0.5)'
+                      : 'rgba(255,255,255,0.12)',
+                  }}
+                />
+              </button>
+            ))}
+          </div>
+        </div>
+      </section>
+    );
+  }
+
+  // ─── DESKTOP RENDER ───────────────────────────────────────────────────────
   return (
     <section
       ref={sectionRef}
