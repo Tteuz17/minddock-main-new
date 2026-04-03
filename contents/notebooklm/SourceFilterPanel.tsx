@@ -18,6 +18,8 @@ import {
   Youtube
 } from "lucide-react"
 import { MESSAGE_ACTIONS, type StandardResponse } from "~/lib/contracts"
+import { useAuth } from "~/hooks/useAuth"
+import { showMindDockToast } from "../common/minddock-ui"
 import {
   SOURCE_PANEL_RESET_EVENT,
   SOURCE_PANEL_TOGGLE_EVENT,
@@ -175,6 +177,8 @@ function useSourceFilterLogic() {
 }
 
 export function SourceFilterPanel() {
+  const { user } = useAuth()
+  const isPro = user ? (user.subscriptionTier === "pro" || user.subscriptionTier === "thinker" || user.subscriptionTier === "thinker_pro") : false
   const [searchText, setSearchText] = useState("")
   const [isVisible, setIsVisible] = useState(true)
   const [savedSelectionGroups, setSavedSelectionGroups] = useState<SavedSourceSelectionGroup[]>([])
@@ -325,6 +329,10 @@ export function SourceFilterPanel() {
   }, [isDeletingSources, deleteToast.status])
 
   const openSaveSelectionDialog = () => {
+    if (!isPro) {
+      showMindDockToast("Save Group requires a Pro plan or higher.", "error")
+      return
+    }
     if (!notebookId) {
       window.alert(uiCopy.notebookIdMissing)
       return
@@ -348,6 +356,10 @@ export function SourceFilterPanel() {
   }
 
   const refreshSources = () => {
+    if (!isPro) {
+      showMindDockToast("GDocs sync requires a Pro plan or higher.", "error")
+      return
+    }
     dispatchSourcePanelRefresh({
       gdocSources: collectGDocRefreshCandidates()
     })

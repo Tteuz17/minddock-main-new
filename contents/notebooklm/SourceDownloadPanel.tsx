@@ -51,6 +51,8 @@ import {
   type PreviewDownloadFormat
 } from "./SourcePreviewPanel"
 import { resolveSourceDownloadUiCopy } from "./notebooklmI18n"
+import { useAuth } from "~/hooks/useAuth"
+import { showMindDockToast } from "../common/minddock-ui"
 
 interface SourceRow {
   sourceId: string
@@ -93,6 +95,8 @@ const DOWNLOAD_FORMAT_SUBTITLES: Record<DownloadFormat, string> = {
 }
 
 export function SourceDownloadPanel() {
+  const { user } = useAuth()
+  const isPro = user ? (user.subscriptionTier === "pro" || user.subscriptionTier === "thinker" || user.subscriptionTier === "thinker_pro") : false
   const [isOpen, setIsOpen] = useState(false)
   const [isNativePanelCollapsed, setIsNativePanelCollapsed] = useState(false)
   const [isFilterPanelVisible, setIsFilterPanelVisible] = useState(true)
@@ -901,6 +905,10 @@ export function SourceDownloadPanel() {
   ])
 
   const handlePreparePreview = useCallback(async () => {
+    if (!isPro) {
+      showMindDockToast("Preview & edit requires a Pro plan or higher.", "error")
+      return
+    }
     if (isPreparingPreview || isRunningDownload) return
 
     setIsPreparingPreview(true)

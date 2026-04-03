@@ -19,6 +19,7 @@ import { base64ToBytes } from "~/lib/base64-bytes"
 import { MESSAGE_ACTIONS, type StandardResponse } from "~/lib/contracts"
 import { buildDocxBytesFromText, buildMindDuckFilenameBase, triggerDownload } from "~/lib/source-download"
 import { showMindDockToast } from "../common/minddock-ui"
+import { useAuth } from "~/hooks/useAuth"
 import { PreviewExportModal } from "./PreviewExportModal"
 import {
   captureVisibleMessages,
@@ -211,6 +212,8 @@ function hasActiveExtensionRuntime(): boolean {
 }
 
 export function ConversationExportMenu() {
+  const { user } = useAuth()
+  const isPro = user ? (user.subscriptionTier === "pro" || user.subscriptionTier === "thinker" || user.subscriptionTier === "thinker_pro") : false
   const containerRef = useRef<HTMLDivElement | null>(null)
   const [isOpen, setIsOpen] = useState(false)
   const [includeUserTurns, setIncludeUserTurns] = useState(true)
@@ -555,6 +558,10 @@ export function ConversationExportMenu() {
   }
 
   const handleOpenPreviewEditor = async (): Promise<void> => {
+    if (!isPro) {
+      showMindDockToast("Preview & edit requires a Pro plan or higher.", "error")
+      return
+    }
     if (isBusy) {
       return
     }
@@ -770,23 +777,33 @@ export function ConversationExportMenu() {
               <div className="mb-1 px-1.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-[#8390a5]">
                 Integrations
               </div>
-              <DocsExportAction
-                className="border-white/[0.08] bg-[#050505] hover:border-[#facc15]/20 hover:bg-[#121212]"
-                disabled={isBusy}
-                onExportFinished={() => {
-                  setIsOpen(false)
-                }}
-              />
-
-              <NotionExportAction
-                className="mt-1.5 border-white/[0.08] bg-[#050505] hover:border-[#facc15]/20 hover:bg-[#121212]"
-                disabled={isBusy}
-                includeUserTurns={includeUserTurns}
-                includeSources={includeSources}
-                onExportFinished={() => {
-                  setIsOpen(false)
-                }}
-              />
+              {isPro ? (
+                <>
+                  <DocsExportAction
+                    className="border-white/[0.08] bg-[#050505] hover:border-[#facc15]/20 hover:bg-[#121212]"
+                    disabled={isBusy}
+                    onExportFinished={() => {
+                      setIsOpen(false)
+                    }}
+                  />
+                  <NotionExportAction
+                    className="mt-1.5 border-white/[0.08] bg-[#050505] hover:border-[#facc15]/20 hover:bg-[#121212]"
+                    disabled={isBusy}
+                    includeUserTurns={includeUserTurns}
+                    includeSources={includeSources}
+                    onExportFinished={() => {
+                      setIsOpen(false)
+                    }}
+                  />
+                </>
+              ) : (
+                <div
+                  className="flex cursor-pointer items-center gap-2 rounded-[10px] border border-white/[0.08] bg-[#050505] px-3 py-2.5 text-[12px] text-[#6f7784] transition-colors hover:bg-[#121212]"
+                  onClick={() => showMindDockToast("Integrations (Google Docs & Notion) require a Pro plan or higher.", "error")}>
+                  <span>🔒</span>
+                  <span>Integrations — Pro & above</span>
+                </div>
+              )}
             </div>
 
             <div
