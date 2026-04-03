@@ -60,11 +60,24 @@ export function DocksHub({ onBack }: DocksHubProps) {
       }
 
       setErrorMessage(null)
-      try {
-        const response = await chrome.runtime.sendMessage({
+
+      const isSubscriptionError = (msg: string) =>
+        msg.toLowerCase().includes("thinker") || msg.toLowerCase().includes("requer plano")
+
+      const fetchThreads = async () =>
+        chrome.runtime.sendMessage({
           command: MESSAGE_ACTIONS.THREAD_LIST,
           payload: { notebookId }
         })
+
+      try {
+        let response = await fetchThreads()
+
+        // If subscription cache is stale, invalidate and retry once
+        if (!response?.success && isSubscriptionError(String(response?.error ?? ""))) {
+          await chrome.runtime.sendMessage({ command: "MINDDOCK_CHECK_SUBSCRIPTION" })
+          response = await fetchThreads()
+        }
 
         if (!response?.success) {
           throw new Error(String(response?.error ?? "Failed to load docks."))

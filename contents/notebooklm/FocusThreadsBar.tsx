@@ -902,18 +902,31 @@ export function FocusThreadsBar() {
       return
     }
 
-    chrome.runtime
-      .sendMessage({
+    const currentNotebookId = notebookId.current
+    const isSubscriptionError = (msg: string) =>
+      msg.toLowerCase().includes("thinker") || msg.toLowerCase().includes("requer plano")
+
+    const loadThreads = async () => {
+      let res = await chrome.runtime.sendMessage({
         command: MESSAGE_ACTIONS.THREAD_LIST,
-        payload: { notebookId: notebookId.current }
+        payload: { notebookId: currentNotebookId }
       })
-      .then((res) => {
-        if (res?.success) {
-          const list: Thread[] = res.payload?.threads ?? res.data?.threads ?? []
-          setThreads(list)
-        }
-      })
-      .finally(() => setIsLoadingThreads(false))
+
+      if (!res?.success && isSubscriptionError(String(res?.error ?? ""))) {
+        await chrome.runtime.sendMessage({ command: "MINDDOCK_CHECK_SUBSCRIPTION" })
+        res = await chrome.runtime.sendMessage({
+          command: MESSAGE_ACTIONS.THREAD_LIST,
+          payload: { notebookId: currentNotebookId }
+        })
+      }
+
+      if (res?.success) {
+        const list: Thread[] = res.payload?.threads ?? res.data?.threads ?? []
+        setThreads(list)
+      }
+    }
+
+    loadThreads().finally(() => setIsLoadingThreads(false))
   }, [user])
 
   useEffect(() => {
