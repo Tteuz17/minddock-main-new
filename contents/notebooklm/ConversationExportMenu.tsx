@@ -171,6 +171,38 @@ const CITATION_MARKER_SELECTORS = [
   "[data-testid*='citation' i]",
   "[class*='citation-marker']"
 ] as const
+const RESPONSE_ACTION_HOST_SELECTORS = [
+  "mat-card-actions",
+  "[class*='card-actions']",
+  "[class*='message-actions']",
+  "[role='toolbar']"
+] as const
+const CITATION_CONTROL_CONTEXT_SELECTORS = [
+  ...CITATION_MARKER_SELECTORS,
+  "sup",
+  "[class*='source-chip' i]",
+  "[class*='citation-chip' i]",
+  "[class*='reference-chip' i]"
+] as const
+const RESPONSE_ACTION_TOKEN_HINTS = [
+  "salvar em notas",
+  "save to notes",
+  "save notes",
+  "salvar notas",
+  "copy",
+  "copiar",
+  "like",
+  "gostei",
+  "dislike",
+  "nao gostei",
+  "thumb up",
+  "thumb down",
+  "thumb_up",
+  "thumb_down",
+  "export",
+  "baixar",
+  "download"
+] as const
 
 const PDF_EXTENSION = ".pdf"
 const MARKDOWN_EXTENSION = ".md"
@@ -2464,13 +2496,17 @@ function resolveSaveToNotesControl(anchor: HTMLElement): HTMLElement | null {
         }
       }
 
-      const token = normalizeActionToken(
-        String(control.getAttribute("aria-label") ?? control.getAttribute("title") ?? control.innerText ?? control.textContent ?? "")
-      )
+      const token = resolveActionControlToken(control)
+      if (!isLikelyResponseActionControl(control, token)) {
+        continue
+      }
       const isBad = isBadResponseActionToken(token)
       const isSave = isSaveToNotesActionToken(token)
       const rect = control.getBoundingClientRect()
       const host = resolveActionHostForSaveControl(control, anchor)
+      if (!isLikelyResponseActionHost(host, turnPair ?? null)) {
+        continue
+      }
       if (turnPair) {
         const hostPair = host.closest<HTMLElement>(".chat-message-pair")
         if (hostPair !== turnPair) {
@@ -2538,15 +2574,28 @@ function resolveSaveToNotesControl(anchor: HTMLElement): HTMLElement | null {
 }
 
 function resolveActionHostForSaveControl(saveControl: HTMLElement, assistantAnchor: HTMLElement): HTMLElement {
-  const defaultHost = saveControl.parentElement ?? saveControl
   const turnPair = assistantAnchor.closest<HTMLElement>(".chat-message-pair")
+  const defaultHost = saveControl.parentElement ?? saveControl
   const fallbackHost = turnPair && !turnPair.contains(defaultHost) ? turnPair : defaultHost
+  const directCandidates = [
+    saveControl.closest<HTMLElement>(RESPONSE_ACTION_HOST_SELECTORS.join(",")),
+    saveControl.parentElement
+  ].filter((candidate, index, array): candidate is HTMLElement => {
+    return candidate instanceof HTMLElement && array.indexOf(candidate) === index
+  })
+
+  for (const candidate of directCandidates) {
+    if (isLikelyResponseActionHost(candidate, turnPair ?? null)) {
+      return candidate
+    }
+  }
+
   const controlRect = saveControl.getBoundingClientRect()
   const anchorRect = assistantAnchor.getBoundingClientRect()
   let current: HTMLElement | null = saveControl.parentElement
   let depth = 0
 
-  while (current && depth < 4) {
+  while (current && depth < 6) {
     if (turnPair && !turnPair.contains(current)) {
       break
     }
@@ -2564,12 +2613,29 @@ function resolveActionHostForSaveControl(saveControl: HTMLElement, assistantAnch
     const nearTurnBottom = rect.top >= anchorRect.top - 24 && rect.top <= anchorRect.bottom + 260
     const compact = rect.height >= 18 && rect.height <= 98
 
-    if (compact && nearTurnBottom && closeToControl && (directCount >= 2 || allCount >= 2)) {
+    if (
+      compact &&
+      nearTurnBottom &&
+      closeToControl &&
+      (directCount >= 2 || allCount >= 2) &&
+      isLikelyResponseActionHost(current, turnPair ?? null)
+    ) {
       return current
     }
 
     current = current.parentElement
     depth += 1
+  }
+
+  if (turnPair) {
+    const pairHost = resolveFirstVisibleDescendant(turnPair, RESPONSE_ACTION_HOST_SELECTORS)
+    if (pairHost && isLikelyResponseActionHost(pairHost, turnPair)) {
+      return pairHost
+    }
+  }
+
+  if (isLikelyResponseActionHost(fallbackHost, turnPair ?? null)) {
+    return fallbackHost
   }
 
   return fallbackHost
@@ -2674,6 +2740,9 @@ function syncTurnSelectionControls(options: SelectionControlSyncOptions): void {
     if (actionHost.closest<HTMLElement>(".chat-message-pair") !== turnPair) {
       continue
     }
+    if (!isLikelyResponseActionHost(actionHost, turnPair)) {
+      continue
+    }
     const hostRect = actionHost.getBoundingClientRect()
     const turnRect = turn.assistantAnchor.getBoundingClientRect()
     const distance = Math.abs(hostRect.top - turnRect.bottom) + Math.abs(hostRect.left - turnRect.left) * 0.12
@@ -2741,6 +2810,10 @@ function syncTurnSelectionControls(options: SelectionControlSyncOptions): void {
     existing.dataset.lastSeenAt = String(now)
 
     const existingHost = existing.parentElement instanceof HTMLElement ? existing.parentElement : null
+    if (!(existingHost instanceof HTMLElement) || !isLikelyResponseActionHost(existingHost, existingPair)) {
+      existing.remove()
+      continue
+    }
     const expectedTurnOnHost = existingHost ? plannedHostPick.get(existingHost)?.turnId : null
     if (expectedTurnOnHost && expectedTurnOnHost !== turnId) {
       existing.remove()
@@ -2780,6 +2853,11 @@ function insertSelectionButtonNearAnchor(
   selectionButton: HTMLButtonElement,
   insertMode: "before-anchor" | "append-end"
 ): void {
+  const hostPair = actionHost.closest<HTMLElement>(".chat-message-pair")
+  if (!isLikelyResponseActionHost(actionHost, hostPair ?? null)) {
+    return
+  }
+
   if (insertMode === "before-anchor" && anchorControl.parentElement === actionHost) {
     if (selectionButton.parentElement === actionHost && selectionButton.nextSibling === anchorControl) {
       return
@@ -2857,6 +2935,127 @@ function normalizeActionToken(value: string): string {
     .toLowerCase()
     .replace(/\s+/g, " ")
     .trim()
+}
+
+function resolveActionControlToken(control: HTMLElement): string {
+  const iconText = Array.from(
+    control.querySelectorAll<HTMLElement>("mat-icon, [class*='material-symbol'], [class*='google-symbol']")
+  )
+    .map((node) => String(node.innerText ?? node.textContent ?? ""))
+    .join(" ")
+
+  return normalizeActionToken(
+    [
+      control.getAttribute("aria-label") ?? "",
+      control.getAttribute("title") ?? "",
+      control.innerText ?? control.textContent ?? "",
+      iconText
+    ].join(" ")
+  )
+}
+
+function hasResponseActionTokenHint(token: string): boolean {
+  return RESPONSE_ACTION_TOKEN_HINTS.some((hint) => token.includes(hint))
+}
+
+function isLikelyCitationControl(control: HTMLElement, token: string): boolean {
+  if (control.closest(CITATION_CONTROL_CONTEXT_SELECTORS.join(","))) {
+    return true
+  }
+
+  if (!token) {
+    return false
+  }
+
+  if (/^\d{1,4}(?:\s*[.,;:-]?\s*\d{1,4})*$/u.test(token)) {
+    return true
+  }
+
+  if (token === "..." || token === "…") {
+    return true
+  }
+
+  return false
+}
+
+function isLikelyResponseActionControl(control: HTMLElement, token: string): boolean {
+  if (!isVisible(control)) {
+    return false
+  }
+
+  if (control.closest("#minddock-conversation-export-root")) {
+    return false
+  }
+
+  if (isLikelyCitationControl(control, token)) {
+    return false
+  }
+
+  const descriptor = normalizeActionToken(
+    [
+      control.className,
+      control.getAttribute("data-testid") ?? "",
+      control.getAttribute("role") ?? "",
+      control.getAttribute("aria-label") ?? ""
+    ].join(" ")
+  )
+  const hasActionDescriptor =
+    descriptor.includes("icon-button") ||
+    descriptor.includes("message-action") ||
+    descriptor.includes("card-action") ||
+    descriptor.includes("toolbar") ||
+    descriptor.includes("thumb_up") ||
+    descriptor.includes("thumb_down")
+
+  if (!token) {
+    return hasActionDescriptor
+  }
+
+  return hasResponseActionTokenHint(token) || hasActionDescriptor
+}
+
+function isLikelyResponseActionHost(host: HTMLElement, turnPair: HTMLElement | null): boolean {
+  if (!(host instanceof HTMLElement) || !host.isConnected || !isVisible(host)) {
+    return false
+  }
+
+  if (host.closest("#minddock-conversation-export-root")) {
+    return false
+  }
+
+  if (turnPair && host.closest<HTMLElement>(".chat-message-pair") !== turnPair) {
+    return false
+  }
+
+  const descriptor = normalizeActionToken(
+    [host.tagName, host.className, host.getAttribute("role") ?? "", host.getAttribute("data-testid") ?? ""].join(" ")
+  )
+  const explicitActionHost =
+    host.matches(RESPONSE_ACTION_HOST_SELECTORS.join(",")) ||
+    descriptor.includes("card-actions") ||
+    descriptor.includes("message-actions") ||
+    descriptor.includes("toolbar")
+  const insideResponseText =
+    host.closest<HTMLElement>("[data-testid='response-text'], .message-text-content, ms-cmark-node") instanceof
+    HTMLElement
+
+  if (insideResponseText && !explicitActionHost) {
+    return false
+  }
+
+  const rect = host.getBoundingClientRect()
+  if (rect.height < 16 || rect.height > 120) {
+    return false
+  }
+
+  const directCount = countVisibleDirectActionControls(host)
+  const totalCount = countVisibleActionControls(host)
+
+  if (explicitActionHost) {
+    return totalCount >= 1
+  }
+
+  return directCount >= 2 || totalCount >= 3
 }
 
 function isBadResponseActionToken(token: string): boolean {

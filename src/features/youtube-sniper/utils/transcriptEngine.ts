@@ -1,7 +1,7 @@
 import { MESSAGE_ACTIONS } from "~/lib/contracts";
 const MAX_BRIDGE_ATTEMPTS = 5;
 const BRIDGE_RETRY_MS = 2000;
-const TRANSCRIPT_TIMEOUT_MS = 30000;
+const TRANSCRIPT_TIMEOUT_MS = 45000;
 
 type SniperBridgePayload = { videoId: string; baseUrl: string };
 
@@ -20,6 +20,10 @@ function logSniperEngine(message: string, details?: Record<string, unknown>): vo
     return;
   }
   console.info(`[YT-SNIPER][ENGINE] ${message}`);
+}
+
+function isExtensionContextInvalidatedError(message: unknown): boolean {
+  return /extension context invalidated/i.test(String(message ?? ""));
 }
 
 window.addEventListener("message", (event) => {
@@ -183,44 +187,61 @@ export async function extractTranscriptSlice(startSec: number, endSec: number): 
       reject(new Error("Timeout ao buscar legenda. Tente novamente."));
     }, TRANSCRIPT_TIMEOUT_MS);
 
-    chrome.runtime.sendMessage(
-      {
-        command: MESSAGE_ACTIONS.FETCH_SNIPER_TRANSCRIPT,
-        payload: { videoId, baseUrl, startSec: safeStart, endSec: safeEnd }
-      },
-      (response) => {
-        window.clearTimeout(timeout);
+    try {
+      chrome.runtime.sendMessage(
+        {
+          command: MESSAGE_ACTIONS.FETCH_SNIPER_TRANSCRIPT,
+          payload: { videoId, baseUrl, startSec: safeStart, endSec: safeEnd }
+        },
+        (response) => {
+          window.clearTimeout(timeout);
 
-        if (chrome.runtime.lastError) {
-          logSniperEngine("Runtime error returned by chrome.runtime.sendMessage.", {
-            message: chrome.runtime.lastError.message
+          if (chrome.runtime.lastError) {
+            const runtimeErrorMessage = String(chrome.runtime.lastError.message ?? "").trim();
+            logSniperEngine("Runtime error returned by chrome.runtime.sendMessage.", {
+              message: runtimeErrorMessage
+            });
+
+            if (isExtensionContextInvalidatedError(runtimeErrorMessage)) {
+              reject(new Error("Extension context invalidated. Reload the YouTube tab and try again."));
+              return;
+            }
+
+            reject(new Error(runtimeErrorMessage || "Falha de runtime ao buscar legenda."));
+            return;
+          }
+
+          if (!response?.success) {
+            logSniperEngine("Background responded with failure.", {
+              error: response?.error ?? "Falha ao buscar legenda."
+            });
+            reject(new Error(response?.error ?? "Falha ao buscar legenda."));
+            return;
+          }
+
+          const text = String(response?.payload?.text ?? response?.data?.text ?? "").trim();
+          if (!text) {
+            logSniperEngine("Background success response came without transcript text.");
+            reject(new Error("Nenhum texto encontrado no intervalo selecionado"));
+            return;
+          }
+
+          logSniperEngine("Transcript extraction succeeded.", {
+            textLength: text.length,
+            wordCount: text.split(/\s+/u).filter(Boolean).length
           });
-          reject(new Error(chrome.runtime.lastError.message));
-          return;
+          resolve(text);
         }
-
-        if (!response?.success) {
-          logSniperEngine("Background responded with failure.", {
-            error: response?.error ?? "Falha ao buscar legenda."
-          });
-          reject(new Error(response?.error ?? "Falha ao buscar legenda."));
-          return;
-        }
-
-        const text = String(response?.payload?.text ?? response?.data?.text ?? "").trim();
-        if (!text) {
-          logSniperEngine("Background success response came without transcript text.");
-          reject(new Error("Nenhum texto encontrado no intervalo selecionado"));
-          return;
-        }
-
-        logSniperEngine("Transcript extraction succeeded.", {
-          textLength: text.length,
-          wordCount: text.split(/\s+/u).filter(Boolean).length
-        });
-        resolve(text);
+      );
+    } catch (error) {
+      window.clearTimeout(timeout);
+      const errorMessage = error instanceof Error ? error.message : String(error ?? "unknown");
+      if (isExtensionContextInvalidatedError(errorMessage)) {
+        reject(new Error("Extension context invalidated. Reload the YouTube tab and try again."));
+        return;
       }
-    );
+      reject(new Error(errorMessage || "Falha ao enviar requisicao de legenda."));
+    }
   });
 }
 

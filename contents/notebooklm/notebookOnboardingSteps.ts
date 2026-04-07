@@ -5,7 +5,6 @@ export type NotebookOnboardingAction =
   | "close_source_vault"
   | "open_chat_export_menu"
   | "close_chat_export_menu"
-  | "open_studio_modal"
 
 export interface NotebookOnboardingStep {
   id: string
@@ -127,26 +126,6 @@ export const NOTEBOOK_ONBOARDING_STEPS: NotebookOnboardingStep[] = [
     position: "bottom",
     timeoutMs: 5000,
     actionBefore: "close_chat_export_menu"
-  },
-  {
-    id: "studio-export-launcher",
-    title: "Botao do Estudio",
-    description:
-      "Esse botao abre o exportador do Estudio na propria tela, sem trocar de contexto.",
-    target: '[data-tour-id="studio-export-launcher-btn"]',
-    position: "bottom",
-    timeoutMs: 5000,
-    actionBefore: "close_chat_export_menu"
-  },
-  {
-    id: "studio-export-panel",
-    title: "Popup de Exportacao do Estudio",
-    description:
-      "Aqui abre o popup do Estudio com selecao de itens, filtro e formato antes da exportacao final.",
-    target: '[data-tour-id="studio-export-panel"]',
-    position: "left",
-    timeoutMs: 6000,
-    actionBefore: "open_studio_modal"
   },
   {
     id: "finish",

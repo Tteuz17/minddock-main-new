@@ -29,6 +29,7 @@ const SETTINGS_DEFAULTS: SettingsState = {
   agileBarVisible: true,
   notificationsEnabled: true
 }
+const NOTEBOOK_ONBOARDING_STORAGE_KEY = "minddock_notebook_onboarding_state_v1"
 
 function asSettingsRecord(value: unknown): LocalSettingsRecord {
   if (!value || typeof value !== "object") {
@@ -115,6 +116,8 @@ export function SettingsHub({ onBack }: SettingsHubProps) {
   const [settingsRecord, setSettingsRecord] = useState<LocalSettingsRecord>({})
   const [settingsState, setSettingsState] = useState<SettingsState>(SETTINGS_DEFAULTS)
   const [isSaving, setIsSaving] = useState(false)
+  const [isResettingTour, setIsResettingTour] = useState(false)
+  const [tourResetAt, setTourResetAt] = useState<number | null>(null)
 
   useEffect(() => {
     const hydrate = (): void => {
@@ -184,6 +187,18 @@ export function SettingsHub({ onBack }: SettingsHubProps) {
       })
     } finally {
       setIsSaving(false)
+    }
+  }
+
+  const resetNotebookTour = async (): Promise<void> => {
+    setIsResettingTour(true)
+    try {
+      await chrome.storage.local.remove(NOTEBOOK_ONBOARDING_STORAGE_KEY)
+      setTourResetAt(Date.now())
+    } catch (error) {
+      console.warn("[MindDock] Failed to reset notebook onboarding tour", error)
+    } finally {
+      setIsResettingTour(false)
     }
   }
 
@@ -259,6 +274,29 @@ export function SettingsHub({ onBack }: SettingsHubProps) {
           initial={{ opacity: 0, y: 6 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.18, delay: 0.05 }}
+          className="mt-2 flex items-center justify-between gap-2 rounded-[14px] border border-white/[0.08] bg-white/[0.02] px-3 py-2.5">
+          <div>
+            <p className="text-[11px] font-semibold text-zinc-200">Notebook tour</p>
+            <p className="text-[9px] text-zinc-500">
+              {tourResetAt
+                ? "Tour reset. It will appear again when NotebookLM is opened again."
+                : "Show onboarding again for this extension install (account-independent)."}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => void resetNotebookTour()}
+            disabled={isResettingTour}
+            className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.04] px-2.5 py-1.5 text-[10px] font-semibold text-zinc-200 transition hover:bg-white/[0.08] disabled:cursor-not-allowed disabled:opacity-45">
+            <RefreshCw size={11} className={isResettingTour ? "animate-spin" : ""} />
+            {isResettingTour ? "Resetting..." : "Reset tour"}
+          </button>
+        </motion.div>
+
+        <motion.div
+          initial={{ opacity: 0, y: 6 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.18, delay: 0.08 }}
           className="mt-2 flex items-center justify-between gap-2 rounded-[14px] border border-white/[0.08] bg-white/[0.02] px-3 py-2.5">
           <div>
             <p className="text-[11px] font-semibold text-zinc-200">Restore defaults</p>

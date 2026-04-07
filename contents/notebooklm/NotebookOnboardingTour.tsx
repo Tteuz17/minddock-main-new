@@ -33,11 +33,8 @@ interface TooltipCoords {
 const TOUR_SCOPE: NotebookOnboardingScope = "notebook_main"
 const HIGHLIGHT_PADDING = 8
 const ONBOARDING_ROOT_ID = "minddock-notebook-onboarding-root"
-// Modo temporario para QA do tour:
-// true  -> sempre exibe onboarding no NotebookLM
-// false -> respeita comportamento normal de primeira visita
-const FORCE_NOTEBOOK_ONBOARDING_FOR_QA = true
-const SHOULD_PERSIST_ONBOARDING_STATE = !FORCE_NOTEBOOK_ONBOARDING_FOR_QA
+// O onboarding deve aparecer uma unica vez por instalacao da extensao.
+// O estado fica no chrome.storage.local e nao depende da conta ativa no NotebookLM.
 let runtimeTourSnapshot: { mode: RuntimeOnboardingMode; stepIndex: number } | null = null
 
 function clamp(value: number, min: number, max: number): number {
@@ -250,21 +247,6 @@ export function NotebookOnboardingTour() {
       return
     }
 
-    if (action === "open_studio_modal") {
-      const chatMenu = resolveTargetElement('[data-tour-id="chat-export-menu"]')
-      if (chatMenu) {
-        const exportButton = resolveTargetElement('[data-tour-id="chat-export-main-btn"]')
-        exportButton?.click()
-        await new Promise<void>((resolve) => window.setTimeout(resolve, 120))
-      }
-      const existingPanel = resolveTargetElement('[data-tour-id="studio-export-panel"]')
-      if (existingPanel) {
-        return
-      }
-      const launcher = resolveTargetElement('[data-tour-id="studio-export-launcher-btn"]')
-      launcher?.click()
-      await new Promise<void>((resolve) => window.setTimeout(resolve, 220))
-    }
   }, [])
 
   const closeOpenUi = useCallback(async () => {
@@ -277,29 +259,14 @@ export function NotebookOnboardingTour() {
       exportButton?.click()
     }
 
-    const studioPanel = resolveTargetElement('[data-tour-id="studio-export-panel"]')
-    if (studioPanel) {
-      const panelCloseButton = studioPanel.querySelector<HTMLElement>(
-        ".close-btn, [aria-label='Fechar'], [aria-label='Close']"
-      )
-      if (panelCloseButton instanceof HTMLElement) {
-        panelCloseButton.click()
-      } else {
-        const studioLauncher = resolveTargetElement('[data-tour-id="studio-export-launcher-btn"]')
-        studioLauncher?.click()
-      }
-    }
-
     await new Promise<void>((resolve) => window.setTimeout(resolve, 220))
   }, [])
 
   const finishTour = useCallback(async (asCompleted: boolean) => {
-    if (SHOULD_PERSIST_ONBOARDING_STATE) {
-      if (asCompleted) {
-        await markNotebookTourCompleted(TOUR_SCOPE)
-      } else {
-        await markNotebookTourSkipped(TOUR_SCOPE)
-      }
+    if (asCompleted) {
+      await markNotebookTourCompleted(TOUR_SCOPE)
+    } else {
+      await markNotebookTourSkipped(TOUR_SCOPE)
     }
 
     await closeOpenUi()
@@ -312,10 +279,8 @@ export function NotebookOnboardingTour() {
   }, [closeOpenUi])
 
   const startTour = useCallback(async () => {
-    if (SHOULD_PERSIST_ONBOARDING_STATE) {
-      await markNotebookWelcomeSeen()
-      await markNotebookTourStarted(TOUR_SCOPE)
-    }
+    await markNotebookWelcomeSeen()
+    await markNotebookTourStarted(TOUR_SCOPE)
     activeTargetRef.current = null
     setHighlightRect(null)
     setStepIndex(0)
@@ -324,10 +289,8 @@ export function NotebookOnboardingTour() {
   }, [])
 
   const skipFromWelcome = useCallback(async () => {
-    if (SHOULD_PERSIST_ONBOARDING_STATE) {
-      await markNotebookWelcomeSeen()
-      await markNotebookTourSkipped(TOUR_SCOPE)
-    }
+    await markNotebookWelcomeSeen()
+    await markNotebookTourSkipped(TOUR_SCOPE)
     await closeOpenUi()
     activeTargetRef.current = null
     setHighlightRect(null)
@@ -374,17 +337,17 @@ export function NotebookOnboardingTour() {
         return
       }
 
-      if (FORCE_NOTEBOOK_ONBOARDING_FOR_QA) {
-        setMode("welcome")
-        return
-      }
-
       const state = await readNotebookOnboardingState()
       if (cancelled) {
         return
       }
 
       if (!state.welcomeSeenAt) {
+        // Marca a exibicao no primeiro render para garantir one-shot mesmo sem clique.
+        await markNotebookWelcomeSeen()
+        if (cancelled) {
+          return
+        }
         setMode("welcome")
         return
       }
@@ -435,9 +398,7 @@ export function NotebookOnboardingTour() {
       const hasTarget = !currentStep.isInfoStep && Boolean(currentStep.target)
       setIsWaitingTarget(hasTarget)
 
-      if (SHOULD_PERSIST_ONBOARDING_STATE) {
-        await markNotebookTourStepSeen(TOUR_SCOPE, currentStep.id)
-      }
+      await markNotebookTourStepSeen(TOUR_SCOPE, currentStep.id)
 
       await runActionBefore(currentStep.actionBefore)
 

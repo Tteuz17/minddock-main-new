@@ -89,13 +89,10 @@
       "sidePanel",
       "identity",
       "storage",
-      "contextMenus",
-      "notifications",
       "downloads",
       "tabs",
       "activeTab",
-      "offscreen",
-      "cookies"
+      "offscreen"
     ],
     "oauth2": {
       "client_id": "1094872455786-h89pq4vphut3t10sjihcktjqvlfk2bi5.apps.googleusercontent.com",
@@ -104,9 +101,10 @@
       ]
     },
     "host_permissions": [
-      "http://*/*",
-      "https://*/*",
       "https://notebooklm.google.com/*",
+      "https://youtube.com/*",
+      "https://*.youtube.com/*",
+      "https://youtu.be/*",
       "https://*.supabase.co/*",
       "https://docs.google.com/*",
       "https://chat.openai.com/*",
@@ -148,7 +146,38 @@
           "*.png"
         ],
         "matches": [
-          "<all_urls>"
+          "https://notebooklm.google.com/*",
+          "https://youtube.com/*",
+          "https://*.youtube.com/*",
+          "https://chat.openai.com/*",
+          "https://chatgpt.com/*",
+          "https://claude.ai/*",
+          "https://gemini.google.com/*",
+          "https://perplexity.ai/*",
+          "https://www.perplexity.ai/*",
+          "https://docs.google.com/*",
+          "https://linkedin.com/*",
+          "https://www.linkedin.com/*",
+          "https://reddit.com/*",
+          "https://www.reddit.com/*",
+          "https://x.com/*",
+          "https://www.x.com/*",
+          "https://twitter.com/*",
+          "https://www.twitter.com/*",
+          "https://grok.com/*",
+          "https://www.grok.com/*",
+          "https://genspark.ai/*",
+          "https://www.genspark.ai/*",
+          "https://genspark.im/*",
+          "https://www.genspark.im/*",
+          "https://kimi.moonshot.cn/*",
+          "https://www.kimi.moonshot.cn/*",
+          "https://kimi.com/*",
+          "https://www.kimi.com/*",
+          "https://*.kimi.com/*",
+          "https://openevidence.com/*",
+          "https://www.openevidence.com/*",
+          "https://*.openevidence.com/*"
         ]
       }
     ]

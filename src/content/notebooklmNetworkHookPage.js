@@ -2,8 +2,8 @@
 // Captures NotebookLM batchexecute context + Studio list (gArtLc) and notifies content script.
 
 (() => {
-  if (window.__KORTEX_NOTEBOOKLM_NETWORK_HOOK_INSTALLED__) return
-  window.__KORTEX_NOTEBOOKLM_NETWORK_HOOK_INSTALLED__ = true
+  if (window.__MINDDOCK_NOTEBOOKLM_NETWORK_HOOK_INSTALLED__) return
+  window.__MINDDOCK_NOTEBOOKLM_NETWORK_HOOK_INSTALLED__ = true
 
   const MUTATION_RPC_IDS = new Set([
     'izAoDd', // add text/gdoc source
@@ -88,7 +88,7 @@
       })
 
       if (shouldNotify(rpcids)) {
-        emit('NOTEBOOKLM_RPC_MUTATION', { rpcids, sourcePath, notebookId, ts: Date.now() }, 'kortex')
+        emit('NOTEBOOKLM_RPC_MUTATION', { rpcids, sourcePath, notebookId, ts: Date.now() }, 'minddock')
       }
     } catch (_) {}
   }
@@ -166,7 +166,7 @@
         emit('MINDDOCK_STUDIO_LIST_UPDATED', {
           items,
           notebookId: ctx.notebookId || parseNotebookIdFromSourcePath(ctx.sourcePath || '')
-        }, 'kortex')
+        }, 'minddock')
       }
     } catch (_) {}
   }

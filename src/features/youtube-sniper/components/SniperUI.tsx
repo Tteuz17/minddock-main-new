@@ -1,9 +1,24 @@
 import { useEffect, useState } from 'react';
+import { MESSAGE_ACTIONS } from '~/lib/contracts';
+import {
+  buildNotebookAccountKey,
+  buildScopedStorageKey,
+  isConfirmedNotebookAccountKey,
+  normalizeAccountEmail,
+  normalizeAuthUser
+} from '~/lib/notebook-account-scope';
 import { extractTranscriptSlice } from '../utils/transcriptEngine';
 
 const MAX_INTERVALO = 3600;
 const SNIPER_BUTTON_ID = 'minddock-youtube-sniper-button';
 const PANEL_WIDTH = 352;
+const MINDDOCK_LOGO_SRC = new URL('../../../../public/images/logo/logotipo minddock.png', import.meta.url).href;
+const SETTINGS_KEY = 'minddock_settings';
+const DEFAULT_NOTEBOOK_KEY = 'nexus_default_notebook_id';
+const LEGACY_DEFAULT_NOTEBOOK_KEY = 'minddock_default_notebook';
+const AUTH_USER_KEY = 'nexus_auth_user';
+const ACCOUNT_EMAIL_KEY = 'nexus_notebook_account_email';
+const TOKEN_STORAGE_KEY = 'notebooklm_session';
 
 function logSniperUi(message: string, details?: Record<string, unknown>): void {
   if (details) {
@@ -68,6 +83,108 @@ async function sendRuntimeMessage<T = Record<string, unknown>>(
   });
 }
 
+function extractNotebookIdsFromPayload(payload: unknown): string[] {
+  if (!Array.isArray(payload)) {
+    return [];
+  }
+
+  return payload
+    .map((item) =>
+      item && typeof item === 'object'
+        ? String((item as { id?: unknown }).id ?? '').trim()
+        : ''
+    )
+    .filter(Boolean);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+function normalizeString(value: unknown): string {
+  return String(value ?? '').trim();
+}
+
+async function resolveStrictDefaultNotebookSelection(): Promise<{
+  checked: boolean;
+  accountKey: string;
+  defaultNotebookId: string;
+  reason?: string;
+}> {
+  const storageApi = typeof chrome !== 'undefined' ? chrome.storage?.local : undefined;
+  if (!storageApi?.get) {
+    return {
+      checked: false,
+      accountKey: '',
+      defaultNotebookId: '',
+      reason: 'STORAGE_UNAVAILABLE'
+    };
+  }
+
+  try {
+    const snapshot = await storageApi.get([
+      SETTINGS_KEY,
+      AUTH_USER_KEY,
+      ACCOUNT_EMAIL_KEY,
+      TOKEN_STORAGE_KEY,
+      DEFAULT_NOTEBOOK_KEY,
+      LEGACY_DEFAULT_NOTEBOOK_KEY
+    ]);
+
+    const settings = isRecord(snapshot[SETTINGS_KEY]) ? snapshot[SETTINGS_KEY] : {};
+    const session = isRecord(snapshot[TOKEN_STORAGE_KEY]) ? snapshot[TOKEN_STORAGE_KEY] : {};
+    const accountEmail = normalizeAccountEmail(
+      settings.notebookAccountEmail ?? snapshot[ACCOUNT_EMAIL_KEY] ?? session.accountEmail
+    );
+    const authUser = normalizeAuthUser(
+      settings.authUser ?? settings.notebookAuthUser ?? snapshot[AUTH_USER_KEY] ?? session.authUser
+    );
+    const accountKey = buildNotebookAccountKey({ accountEmail, authUser });
+
+    if (!isConfirmedNotebookAccountKey(accountKey)) {
+      return {
+        checked: true,
+        accountKey,
+        defaultNotebookId: '',
+        reason: 'ACCOUNT_SCOPE_NOT_CONFIRMED'
+      };
+    }
+
+    const defaultByAccount = isRecord(settings.defaultNotebookByAccount)
+      ? (settings.defaultNotebookByAccount as Record<string, unknown>)
+      : {};
+    const fromScopedSettings = normalizeString(defaultByAccount[accountKey]);
+    if (fromScopedSettings) {
+      return { checked: true, accountKey, defaultNotebookId: fromScopedSettings };
+    }
+
+    const scopedDefaultKey = buildScopedStorageKey(DEFAULT_NOTEBOOK_KEY, accountKey);
+    const scopedLegacyDefaultKey = buildScopedStorageKey(LEGACY_DEFAULT_NOTEBOOK_KEY, accountKey);
+    const fromScopedCanonical = normalizeString(snapshot[scopedDefaultKey]);
+    if (fromScopedCanonical) {
+      return { checked: true, accountKey, defaultNotebookId: fromScopedCanonical };
+    }
+    const fromScopedLegacy = normalizeString(snapshot[scopedLegacyDefaultKey]);
+    if (fromScopedLegacy) {
+      return { checked: true, accountKey, defaultNotebookId: fromScopedLegacy };
+    }
+
+    return {
+      checked: true,
+      accountKey,
+      defaultNotebookId: '',
+      reason: 'NO_SCOPED_DEFAULT_NOTEBOOK'
+    };
+  } catch (error) {
+    return {
+      checked: false,
+      accountKey: '',
+      defaultNotebookId: '',
+      reason: error instanceof Error ? error.message : String(error ?? 'UNKNOWN')
+    };
+  }
+}
+
 function formatTime(seconds: number): string {
   const h = Math.floor(seconds / 3600);
   const m = Math.floor((seconds % 3600) / 60);
@@ -90,16 +207,18 @@ function readPlayerTimes(): { duration: number; currentTime: number } {
 
 function MindDockMark() {
   return (
-    <svg width="20" height="20" viewBox="0 0 22 22" fill="none" xmlns="http://www.w3.org/2000/svg">
-      <rect width="22" height="22" rx="6" fill="rgba(255,255,255,0.1)" />
-      <path
-        d="M5 16V7.5L11 13L17 7.5V16"
-        stroke="rgba(255,255,255,0.75)"
-        strokeWidth="2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
+    <img
+      src={MINDDOCK_LOGO_SRC}
+      alt="MindDock"
+      width={20}
+      height={20}
+      style={{
+        width: 20,
+        height: 20,
+        objectFit: 'contain',
+        display: 'block',
+      }}
+    />
   );
 }
 
@@ -218,7 +337,7 @@ export function SniperUI({ onClose, getDefaultNotebookId }: SniperUIProps) {
   const [currentTime, setCurrentTime] = useState(0);
   const [startSec, setStartSec] = useState(0);
   const [endSec, setEndSec] = useState(0);
-  const [status, setStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
+  const [status, setStatus] = useState<'idle' | 'loading' | 'success' | 'error' | 'warning'>('idle');
   const [message, setMessage] = useState('');
   const [extractedText, setExtractedText] = useState('');
   const [anchorPos, setAnchorPos] = useState<{ left: number; top: number } | null>(null);
@@ -290,26 +409,72 @@ export function SniperUI({ onClose, getDefaultNotebookId }: SniperUIProps) {
   };
 
   async function handleExtract() {
-    logSniperUi('Extract clicked.', {
-      startSec,
-      endSec,
-      duration,
-      hasDefaultNotebookId: Boolean(defaultNotebookId?.trim()),
-      currentUrl: window.location.href,
-    });
-
     if (startSec >= endSec) {
       setStatus('error');
       setMessage('Start time must be before end time.');
       logSniperUi('Blocked: startSec must be lower than endSec.', { startSec, endSec });
       return;
     }
-    const notebookId = getDefaultNotebookId()?.trim();
-    if (!notebookId) {
-      setStatus('error');
-      setMessage('Select a default notebook in the popup first.');
-      logSniperUi('Blocked: default notebook not configured.');
+
+    const runtimeNotebookId = getDefaultNotebookId()?.trim();
+    const strictDefaultValidation = await resolveStrictDefaultNotebookSelection();
+    const notebookId = strictDefaultValidation.defaultNotebookId || runtimeNotebookId;
+    logSniperUi('Extract clicked.', {
+      startSec,
+      endSec,
+      duration,
+      hasRuntimeNotebookId: Boolean(runtimeNotebookId),
+      hasStrictScopedDefaultNotebookId: Boolean(strictDefaultValidation.defaultNotebookId),
+      strictCheckChecked: strictDefaultValidation.checked,
+      strictCheckReason: strictDefaultValidation.reason ?? '',
+      accountKey: strictDefaultValidation.accountKey,
+      currentUrl: window.location.href,
+    });
+
+    if (strictDefaultValidation.checked && !strictDefaultValidation.defaultNotebookId) {
+      setStatus('warning');
+      setMessage('Selecione um caderno no menu da extensao antes de extrair a legenda.');
+      logSniperUi('Blocked: strict scoped default notebook is not configured.', {
+        strictCheckReason: strictDefaultValidation.reason ?? '',
+        accountKey: strictDefaultValidation.accountKey
+      });
       return;
+    }
+    if (!notebookId) {
+      setStatus('warning');
+      setMessage('Selecione um caderno no menu da extensao antes de extrair a legenda.');
+      logSniperUi('Blocked: no notebook id available after strict check fallback.');
+      return;
+    }
+
+    const notebooksLookupResponse = await sendRuntimeMessage(
+      MESSAGE_ACTIONS.CMD_GET_NOTEBOOKS,
+      {},
+      10000
+    );
+    if (notebooksLookupResponse.success) {
+      const availableNotebookIds = extractNotebookIdsFromPayload(
+        notebooksLookupResponse.payload ?? notebooksLookupResponse.data
+      );
+      if (availableNotebookIds.length > 0 && !availableNotebookIds.includes(notebookId)) {
+        setStatus('error');
+        setMessage('O caderno selecionado nao foi encontrado. Reabra o popup e selecione novamente.');
+        logSniperUi('Blocked: selected default notebook is not available in current account scope.', {
+          notebookId,
+          availableCount: availableNotebookIds.length,
+        });
+        return;
+      }
+      if (availableNotebookIds.length === 0) {
+        logSniperUi('Notebook lookup returned empty list in current page context; proceeding with selected notebook id.', {
+          notebookId,
+        });
+      }
+    } else {
+      logSniperUi('Notebook lookup failed in current page context; proceeding with selected notebook id.', {
+        notebookId,
+        lookupError: notebooksLookupResponse.error ?? 'UNKNOWN',
+      });
     }
     if (endSec - startSec > MAX_INTERVALO) {
       setStatus('error');
@@ -395,6 +560,10 @@ export function SniperUI({ onClose, getDefaultNotebookId }: SniperUIProps) {
             /no transcript available/i.test(msg)
           ) {
             setMessage('No transcript available for this video.');
+          } else if (/extension context invalidated/i.test(msg)) {
+            setMessage('A extensao foi atualizada. Recarregue a aba do YouTube e tente novamente.');
+          } else if (/timeout/i.test(msg)) {
+            setMessage('A extracao demorou demais. Tente novamente em alguns segundos.');
           } else if (msg.includes('intervalo')) {
             setMessage('No speech found in the selected range. Try a wider interval.');
           } else {
@@ -445,7 +614,7 @@ export function SniperUI({ onClose, getDefaultNotebookId }: SniperUIProps) {
               <div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                   <span style={{ fontSize: 13, fontWeight: 500, color: 'rgba(255,255,255,0.85)', letterSpacing: '-0.01em' }}>
-                    Sniper
+                    Captura de precisão
                   </span>
                   {/* YouTube badge */}
                   <span style={{
@@ -646,19 +815,27 @@ export function SniperUI({ onClose, getDefaultNotebookId }: SniperUIProps) {
               gap: 8,
               background: status === 'error'
                 ? 'rgba(239,68,68,0.1)'
+                : status === 'warning'
+                ? 'rgba(250,204,21,0.12)'
                 : 'rgba(34,197,94,0.1)',
-              border: `1px solid ${status === 'error' ? 'rgba(239,68,68,0.2)' : 'rgba(34,197,94,0.2)'}`,
-              color: status === 'error' ? '#f87171' : '#4ade80',
+              border: `1px solid ${
+                status === 'error'
+                  ? 'rgba(239,68,68,0.2)'
+                  : status === 'warning'
+                  ? 'rgba(250,204,21,0.35)'
+                  : 'rgba(34,197,94,0.2)'
+              }`,
+              color: status === 'error' ? '#f87171' : status === 'warning' ? '#facc15' : '#4ade80',
             }}>
-              {status === 'error' ? (
+              {status === 'success' ? (
                 <svg width="13" height="13" viewBox="0 0 13 13" fill="none" style={{ flexShrink: 0, marginTop: 1 }}>
                   <circle cx="6.5" cy="6.5" r="5.5" stroke="currentColor" strokeWidth="1.2" />
-                  <path d="M6.5 4v3M6.5 8.5v.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+                  <path d="M4 6.5l2 2 3-3" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
                 </svg>
               ) : (
                 <svg width="13" height="13" viewBox="0 0 13 13" fill="none" style={{ flexShrink: 0, marginTop: 1 }}>
                   <circle cx="6.5" cy="6.5" r="5.5" stroke="currentColor" strokeWidth="1.2" />
-                  <path d="M4 6.5l2 2 3-3" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+                  <path d="M6.5 4v3M6.5 8.5v.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
                 </svg>
               )}
               <span>{message}</span>

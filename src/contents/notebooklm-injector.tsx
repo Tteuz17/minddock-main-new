@@ -238,14 +238,19 @@ const TARGETS: readonly InjectionTarget[] = [
     resolveHost: resolveNotebookConfigureButton,
     render: () => <ConversationExportMenu />
   },
-  {
-    key: "studio-export",
-    rootId: "minddock-studio-export-root",
-    insertMode: "before",
-    display: "contents",
-    resolveHost: resolveStudioExportAnchor,
-    render: () => <StudioExportButton />
-  },
+  // Studio export intentionally disabled: keep code in repo, but hide launcher in UI.
+  ...(false
+    ? [
+        {
+          key: "studio-export",
+          rootId: "minddock-studio-export-root",
+          insertMode: "before",
+          display: "contents",
+          resolveHost: resolveStudioExportAnchor,
+          render: () => <StudioExportButton />
+        } satisfies InjectionTarget
+      ]
+    : []),
   {
     key: "source-actions",
     rootId: "minddock-source-actions-root",
@@ -329,6 +334,18 @@ function isNotebookWorkspaceRoute(): boolean {
 function mountTargets(): void {
   if (!isNotebookWorkspaceRoute()) {
     return
+  }
+
+  // Defensive cleanup in case a previous script version left the Studio launcher mounted.
+  const mountedStudio = mountedRoots.get("studio-export")
+  if (mountedStudio) {
+    mountedStudio.root.unmount()
+    mountedRoots.delete("studio-export")
+    mountedStudio.container.remove()
+  }
+  const staleStudioRoot = document.getElementById("minddock-studio-export-root")
+  if (staleStudioRoot) {
+    staleStudioRoot.remove()
   }
 
   for (const target of TARGETS) {
