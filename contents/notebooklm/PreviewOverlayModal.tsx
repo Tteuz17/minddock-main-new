@@ -176,7 +176,6 @@ function ensureOverlayStyles(): void {
 
 function resolvePortalTarget(): Element | DocumentFragment {
   const explicitRoot =
-    document.getElementById("kortex-root") ??
     document.getElementById("minddock-root") ??
     document.querySelector("[data-minddock-root='true']") ??
     document.querySelector("#minddock-preview-overlay-root")

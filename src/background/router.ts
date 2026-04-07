@@ -3701,6 +3701,24 @@ class MessageRouter {
     }
   }
 
+  private async fetchWithTimeout(
+    requestUrl: string,
+    init: RequestInit,
+    timeoutMs: number
+  ): Promise<Response> {
+    const abortController = new AbortController()
+    const timeoutId = setTimeout(() => abortController.abort(), Math.max(800, timeoutMs))
+
+    try {
+      return await fetch(requestUrl, {
+        ...init,
+        signal: abortController.signal
+      })
+    } finally {
+      clearTimeout(timeoutId)
+    }
+  }
+
   private dedupeTranscriptLines(lines: string[]): string[] {
     const deduped: string[] = []
     for (const rawLine of lines) {
@@ -4119,13 +4137,19 @@ class MessageRouter {
     return this.extractAllCaptionTextFromXml(rawBody)
   }
 
-  private buildTimedTextFallbackUrls(videoId: string): string[] {
+  private buildTimedTextFallbackUrls(videoId: string, languageHints: string[] = []): string[] {
     const normalizedVideoId = String(videoId ?? "").trim()
     if (!normalizedVideoId) {
       return []
     }
 
-    const langCandidates = ["pt-BR", "pt", "en"]
+    const normalizedLanguageHints = languageHints
+      .map((value) => String(value ?? "").trim())
+      .filter(Boolean)
+    const langCandidates = Array.from(new Set([...normalizedLanguageHints, "pt-BR", "pt", "en", "es"])).slice(
+      0,
+      6
+    )
     const formatCandidates = ["json3", "vtt"]
     const kindCandidates = ["", "asr"]
     const urls = new Set<string>()
@@ -4151,23 +4175,41 @@ class MessageRouter {
   private async fetchCaptionSliceFromTimedTextFallback(
     videoId: string,
     rangeStartMs: number,
-    rangeEndMs: number
+    rangeEndMs: number,
+    languageHints: string[] = []
   ): Promise<string | null> {
-    const candidateUrls = this.buildTimedTextFallbackUrls(videoId)
+    const candidateUrls = this.buildTimedTextFallbackUrls(videoId, languageHints)
     let looseFallbackText: string | null = null
+    const lookupStartedAt = Date.now()
+    const lookupTimeBudgetMs = 18_000
     this.logSniperRouter("Starting timedtext fallback lookup.", {
       videoId,
       rangeStartMs,
       rangeEndMs,
-      candidateCount: candidateUrls.length
+      candidateCount: candidateUrls.length,
+      lookupTimeBudgetMs
     })
 
     for (const [candidateIndex, candidateUrl] of candidateUrls.entries()) {
-      try {
-        const response = await fetch(candidateUrl, {
-          method: "GET",
-          credentials: "include"
+      if (Date.now() - lookupStartedAt > lookupTimeBudgetMs) {
+        this.logSniperRouter("Timedtext fallback budget exhausted before finishing all candidates.", {
+          videoId,
+          candidateIndex,
+          elapsedMs: Date.now() - lookupStartedAt,
+          lookupTimeBudgetMs
         })
+        break
+      }
+
+      try {
+        const response = await this.fetchWithTimeout(
+          candidateUrl,
+          {
+          method: "GET",
+            credentials: "omit"
+          },
+          4_500
+        )
         if (!response.ok) {
           this.logSniperRouter("Timedtext fallback candidate returned non-OK status.", {
             videoId,
@@ -4274,10 +4316,14 @@ class MessageRouter {
 
     for (const [candidateIndex, candidateUrl] of candidateUrls.entries()) {
       try {
-        const response = await fetch(candidateUrl, {
-          method: "GET",
-          credentials: "include"
-        })
+        const response = await this.fetchWithTimeout(
+          candidateUrl,
+          {
+            method: "GET",
+            credentials: "omit"
+          },
+          5_500
+        )
         if (!response.ok) {
           lastErrorMessage = `HTTP ${response.status}`
           this.logSniperRouter("BaseUrl candidate returned non-OK status.", {
@@ -4411,55 +4457,117 @@ class MessageRouter {
     }
   }
 
-  private pickCaptionTrackBaseUrl(
-    tracks: Array<{ baseUrl?: string; languageCode?: string; kind?: string; vssId?: string }>
-  ): string | null {
-    if (!Array.isArray(tracks) || tracks.length === 0) {
-      return null
-    }
-
-    const asrTrack =
-      tracks.find((track) => String(track?.kind ?? "").toLowerCase() === "asr") ??
-      tracks.find((track) => String(track?.vssId ?? "").toLowerCase().includes(".pt")) ??
-      tracks.find((track) => String(track?.languageCode ?? "").toLowerCase().startsWith("pt")) ??
-      tracks[0]
-
-    return this.normalizeTranscriptBaseUrl(asrTrack?.baseUrl ?? "")
+  private normalizeCaptionLanguageCode(value: unknown): string {
+    const normalized = String(value ?? "")
+      .trim()
+      .toLowerCase()
+      .replace(/_/g, "-")
+    return normalized
   }
 
-  private async resolveCaptionBaseUrlForVideo(videoId: string): Promise<string | null> {
+  private resolveCaptionTracksInfo(tracks: Array<{ baseUrl?: string; languageCode?: string; kind?: string; vssId?: string }>): {
+    baseUrls: string[]
+    languageHints: string[]
+  } {
+    if (!Array.isArray(tracks) || tracks.length === 0) {
+      return { baseUrls: [], languageHints: [] }
+    }
+
+    const scoredTracks = tracks
+      .map((track) => {
+        const languageCode = this.normalizeCaptionLanguageCode(track?.languageCode)
+        const kind = String(track?.kind ?? "")
+          .trim()
+          .toLowerCase()
+        const vssId = String(track?.vssId ?? "")
+          .trim()
+          .toLowerCase()
+        const normalizedBaseUrl = this.normalizeTranscriptBaseUrl(track?.baseUrl ?? "")
+
+        let score = 0
+        if (languageCode.startsWith("pt")) score += 50
+        else if (languageCode.startsWith("en")) score += 40
+        else if (languageCode) score += 25
+
+        if (vssId.includes(".pt")) score += 8
+        if (kind && kind !== "asr") score += 15
+        else if (kind === "asr") score += 6
+        if (normalizedBaseUrl) score += 12
+
+        return { normalizedBaseUrl, languageCode, kind, score }
+      })
+      .sort((left, right) => right.score - left.score)
+
+    const baseUrls: string[] = []
+    for (const candidate of scoredTracks) {
+      if (!candidate.normalizedBaseUrl) {
+        continue
+      }
+      if (!baseUrls.includes(candidate.normalizedBaseUrl)) {
+        baseUrls.push(candidate.normalizedBaseUrl)
+      }
+    }
+
+    const languageHints = Array.from(new Set(scoredTracks.map((candidate) => candidate.languageCode).filter(Boolean))).slice(
+      0,
+      6
+    )
+
+    return { baseUrls, languageHints }
+  }
+
+  private async resolveCaptionTrackInfoForVideo(videoId: string): Promise<{
+    baseUrls: string[]
+    languageHints: string[]
+  }> {
     const normalizedVideoId = String(videoId ?? "").trim()
     if (!normalizedVideoId) {
-      return null
+      return { baseUrls: [], languageHints: [] }
     }
 
     const watchUrl = `https://www.youtube.com/watch?v=${encodeURIComponent(normalizedVideoId)}&hl=pt-BR`
-    this.logSniperRouter("Resolving caption baseUrl from watch HTML.", {
+    this.logSniperRouter("Resolving caption baseUrls from watch HTML.", {
       videoId: normalizedVideoId,
       watchUrl
     })
-    const response = await fetch(watchUrl, {
-      method: "GET",
-      credentials: "include"
-    })
+
+    let response: Response
+    try {
+      response = await this.fetchWithTimeout(
+        watchUrl,
+        {
+          method: "GET",
+          credentials: "omit"
+        },
+        4_500
+      )
+    } catch (error) {
+      this.logSniperRouter("Watch HTML request threw while resolving caption tracks.", {
+        videoId: normalizedVideoId,
+        error: error instanceof Error ? error.message : String(error ?? "unknown")
+      })
+      return { baseUrls: [], languageHints: [] }
+    }
+
     if (!response.ok) {
-      this.logSniperRouter("Watch HTML request failed while resolving baseUrl.", {
+      this.logSniperRouter("Watch HTML request failed while resolving caption tracks.", {
         videoId: normalizedVideoId,
         status: response.status
       })
-      return null
+      return { baseUrls: [], languageHints: [] }
     }
 
     const html = await response.text()
     const tracks = this.extractCaptionTracksFromWatchHtml(html)
-    const pickedBaseUrl = this.pickCaptionTrackBaseUrl(tracks)
+    const trackInfo = this.resolveCaptionTracksInfo(tracks)
     this.logSniperRouter("Caption tracks parsed from watch HTML.", {
       videoId: normalizedVideoId,
       trackCount: tracks.length,
-      hasPickedBaseUrl: Boolean(pickedBaseUrl),
-      pickedBaseUrlPreview: this.previewTranscriptUrl(pickedBaseUrl)
+      baseUrlCandidates: trackInfo.baseUrls.length,
+      languageHints: trackInfo.languageHints,
+      firstBaseUrlPreview: this.previewTranscriptUrl(trackInfo.baseUrls[0] ?? "")
     })
-    return pickedBaseUrl
+    return trackInfo
   }
 
   private async handleFetchSniperTranscript(payload: unknown): Promise<StandardResponse> {
@@ -4476,12 +4584,11 @@ class MessageRouter {
 
     const safeStart = Math.max(0, Math.min(startSecRaw, endSecRaw))
     const safeEnd = Math.max(safeStart, Math.max(startSecRaw, endSecRaw))
-    const allowDomTranscriptFallback = true
     const rangeStartMs = Math.max(0, Math.round(safeStart * 1000))
     const rangeEndMs = Math.max(rangeStartMs, Math.round(safeEnd * 1000))
     const payloadBaseUrl = this.normalizeTranscriptBaseUrl(record.baseUrl)
 
-    this.logSniperRouter("Starting transcript extraction (network-first).", {
+    this.logSniperRouter("Starting transcript extraction (DOM-first).", {
       videoId,
       safeStart,
       safeEnd,
@@ -4517,49 +4624,64 @@ class MessageRouter {
       // no-op
     }
 
-    const baseUrlCandidates: string[] = []
-    if (payloadBaseUrl) {
-      baseUrlCandidates.push(payloadBaseUrl)
-    }
-
-    const watchHtmlBaseUrl = await this.resolveCaptionBaseUrlForVideo(videoId)
-    if (watchHtmlBaseUrl && !baseUrlCandidates.includes(watchHtmlBaseUrl)) {
-      baseUrlCandidates.push(watchHtmlBaseUrl)
-    }
-
-    for (const [candidateIndex, baseUrlCandidate] of baseUrlCandidates.entries()) {
-      try {
-        const textFromBaseUrl = await this.fetchCaptionSliceFromBaseUrl(baseUrlCandidate, safeStart, safeEnd)
-        if (textFromBaseUrl) {
-          this.logSniperRouter("Transcript resolved via baseUrl.", {
-            candidateIndex,
-            textLength: textFromBaseUrl.length,
-            baseUrlPreview: this.previewTranscriptUrl(baseUrlCandidate)
-          })
-          return this.ok({ text: textFromBaseUrl.trim(), eventsCount: 0 })
-        }
-      } catch (error) {
-        this.logSniperRouter("BaseUrl candidate failed.", {
-          candidateIndex,
-          baseUrlPreview: this.previewTranscriptUrl(baseUrlCandidate),
-          error: error instanceof Error ? error.message : String(error ?? "unknown")
-        })
+    const resolveTranscriptViaNetworkFallback = async (): Promise<string | null> => {
+      const baseUrlCandidates: string[] = []
+      if (payloadBaseUrl) {
+        baseUrlCandidates.push(payloadBaseUrl)
       }
-    }
 
-    const textFromTimedtext = await this.fetchCaptionSliceFromTimedTextFallback(videoId, rangeStartMs, rangeEndMs)
-    if (textFromTimedtext) {
-      this.logSniperRouter("Transcript resolved via timedtext fallback.", {
-        textLength: textFromTimedtext.length
+      const watchCaptionTrackInfo = await this.resolveCaptionTrackInfoForVideo(videoId)
+      for (const baseUrlFromWatchHtml of watchCaptionTrackInfo.baseUrls) {
+        if (!baseUrlCandidates.includes(baseUrlFromWatchHtml)) {
+          baseUrlCandidates.push(baseUrlFromWatchHtml)
+        }
+      }
+
+      this.logSniperRouter("Prepared baseUrl candidates for network fallback extraction.", {
+        videoId,
+        candidateCount: baseUrlCandidates.length,
+        hasPayloadBaseUrl: Boolean(payloadBaseUrl),
+        languageHints: watchCaptionTrackInfo.languageHints
       })
-      return this.ok({ text: textFromTimedtext.trim(), eventsCount: 0 })
+
+      for (const [candidateIndex, baseUrlCandidate] of baseUrlCandidates.entries()) {
+        try {
+          const textFromBaseUrl = await this.fetchCaptionSliceFromBaseUrl(baseUrlCandidate, safeStart, safeEnd)
+          if (textFromBaseUrl) {
+            this.logSniperRouter("Transcript resolved via baseUrl network fallback.", {
+              candidateIndex,
+              textLength: textFromBaseUrl.length,
+              baseUrlPreview: this.previewTranscriptUrl(baseUrlCandidate)
+            })
+            return textFromBaseUrl.trim()
+          }
+        } catch (error) {
+          this.logSniperRouter("BaseUrl network fallback candidate failed.", {
+            candidateIndex,
+            baseUrlPreview: this.previewTranscriptUrl(baseUrlCandidate),
+            error: error instanceof Error ? error.message : String(error ?? "unknown")
+          })
+        }
+      }
+
+      const textFromTimedtext = await this.fetchCaptionSliceFromTimedTextFallback(
+        videoId,
+        rangeStartMs,
+        rangeEndMs,
+        watchCaptionTrackInfo.languageHints
+      )
+      if (textFromTimedtext) {
+        this.logSniperRouter("Transcript resolved via timedtext network fallback.", {
+          textLength: textFromTimedtext.length
+        })
+        return textFromTimedtext.trim()
+      }
+
+      return null
     }
 
-    if (!allowDomTranscriptFallback) {
-      return this.fail("Nao foi possivel extrair a legenda sem abrir o painel de transcript do YouTube.")
-    }
-
-    this.logSniperRouter("Starting transcript extraction via DOM (Plano B).", { videoId, safeStart, safeEnd })
+    this.logSniperRouter("Trying transcript extraction via DOM first.", { videoId, safeStart, safeEnd })
+    let domFailureMessage = ""
 
     try {
       const tabs = await chrome.tabs.query({ active: true, currentWindow: true })
@@ -4782,25 +4904,45 @@ class MessageRouter {
       const payloadResult = result?.result as
         | { text?: string; totalSegments?: number; filteredSegments?: number }
         | undefined
-      if (!payloadResult) return this.fail("Falha ao executar script na pagina do YouTube.")
-
-      const text = String(payloadResult.text ?? "")
-      if (!text || text.startsWith("__ERROR__:")) {
-        const msg = text.replace("__ERROR__:", "").trim() || "Erro desconhecido."
-        this.logSniperRouter("DOM extraction returned error.", { msg })
-        return this.fail(msg)
+      if (!payloadResult) {
+        domFailureMessage = "Falha ao executar script na pagina do YouTube."
+      } else {
+        const text = String(payloadResult.text ?? "")
+        if (!text || text.startsWith("__ERROR__:")) {
+          const msg = text.replace("__ERROR__:", "").trim() || "Erro desconhecido."
+          domFailureMessage = msg
+          this.logSniperRouter("DOM extraction returned error.", { msg })
+        } else {
+          this.logSniperRouter("DOM extraction succeeded.", {
+            textLength: text.length,
+            filteredSegments: payloadResult.filteredSegments
+          })
+          return this.ok({ text: text.trim(), eventsCount: payloadResult.totalSegments ?? 0 })
+        }
       }
-
-      this.logSniperRouter("DOM extraction succeeded.", {
-        textLength: text.length,
-        filteredSegments: payloadResult.filteredSegments
-      })
-      return this.ok({ text: text.trim(), eventsCount: payloadResult.totalSegments ?? 0 })
     } catch (err: unknown) {
       const details = err instanceof Error ? err.message : String(err ?? "Erro desconhecido")
       this.logSniperRouter("executeScript threw error.", { details })
-      return this.fail("executeScript falhou: " + details)
+      domFailureMessage = "executeScript falhou: " + details
     }
+
+    this.logSniperRouter("DOM-first extraction failed. Falling back to network extraction.", {
+      videoId,
+      safeStart,
+      safeEnd,
+      domFailureMessage: domFailureMessage || "(empty)"
+    })
+
+    const textFromNetworkFallback = await resolveTranscriptViaNetworkFallback()
+    if (textFromNetworkFallback) {
+      return this.ok({ text: textFromNetworkFallback, eventsCount: 0 })
+    }
+
+    if (domFailureMessage) {
+      return this.fail(domFailureMessage)
+    }
+
+    return this.fail("Nao foi possivel extrair a legenda. Verifique se o video possui legenda ativa.")
   }
 
   private async handleCreateCheckout(payload: unknown): Promise<StandardResponse> {
