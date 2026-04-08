@@ -337,6 +337,7 @@ export function SniperUI({ onClose, getDefaultNotebookId }: SniperUIProps) {
   const [currentTime, setCurrentTime] = useState(0);
   const [startSec, setStartSec] = useState(0);
   const [endSec, setEndSec] = useState(0);
+  const [canUseYouTubeImport, setCanUseYouTubeImport] = useState(true);
   const [status, setStatus] = useState<'idle' | 'loading' | 'success' | 'error' | 'warning'>('idle');
   const [message, setMessage] = useState('');
   const [extractedText, setExtractedText] = useState('');
@@ -363,6 +364,45 @@ export function SniperUI({ onClose, getDefaultNotebookId }: SniperUIProps) {
     }, 1000);
 
     return () => clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const validatePlan = async () => {
+      const response = await sendRuntimeMessage<{ tier?: string }>(
+        'MINDDOCK_CHECK_SUBSCRIPTION',
+        {},
+        10000
+      );
+      const payload = (response.payload ?? response.data) as { tier?: string } | undefined;
+      const tier = String(payload?.tier ?? '').trim().toLowerCase();
+      if (!tier) {
+        logSniperUi('Subscription check did not return tier. Keeping YouTube import enabled by default.', {
+          success: response.success,
+          error: response.error ?? ''
+        });
+        return;
+      }
+
+      const allowed = tier === 'pro' || tier === 'thinker' || tier === 'thinker_pro';
+      if (cancelled) return;
+      setCanUseYouTubeImport(allowed);
+
+      if (!allowed) {
+        setStatus('warning');
+        setMessage('Importacao do YouTube requer plano Pro ou Thinker.');
+      }
+
+      logSniperUi('Subscription check resolved for YouTube import gating.', {
+        tier,
+        allowed
+      });
+    };
+
+    void validatePlan();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -409,6 +449,13 @@ export function SniperUI({ onClose, getDefaultNotebookId }: SniperUIProps) {
   };
 
   async function handleExtract() {
+    if (!canUseYouTubeImport) {
+      setStatus('warning');
+      setMessage('Importacao do YouTube requer plano Pro ou Thinker.');
+      logSniperUi('Blocked: YouTube import is locked for current subscription tier.');
+      return;
+    }
+
     if (startSec >= endSec) {
       setStatus('error');
       setMessage('Start time must be before end time.');
@@ -564,6 +611,8 @@ export function SniperUI({ onClose, getDefaultNotebookId }: SniperUIProps) {
             setMessage('A extensao foi atualizada. Recarregue a aba do YouTube e tente novamente.');
           } else if (/timeout/i.test(msg)) {
             setMessage('A extracao demorou demais. Tente novamente em alguns segundos.');
+          } else if (/youtube.*plano|pro ou thinker/i.test(msg)) {
+            setMessage('Importacao do YouTube requer plano Pro ou Thinker.');
           } else if (msg.includes('intervalo')) {
             setMessage('No speech found in the selected range. Try a wider interval.');
           } else {
@@ -577,6 +626,7 @@ export function SniperUI({ onClose, getDefaultNotebookId }: SniperUIProps) {
   }
 
   const intervalSecs = endSec - startSec;
+  const isExtractDisabled = status === 'loading' || !canUseYouTubeImport;
 
   return (
     <div
@@ -752,19 +802,19 @@ export function SniperUI({ onClose, getDefaultNotebookId }: SniperUIProps) {
           {/* ── Extract button ── */}
           <button
             onClick={handleExtract}
-            disabled={status === 'loading'}
+            disabled={isExtractDisabled}
             style={{
               width: '100%',
               padding: '10px 16px',
               borderRadius: 10,
               border: '1px solid rgba(255,255,255,0.12)',
-              background: status === 'loading'
+              background: isExtractDisabled
                 ? 'rgba(255,255,255,0.06)'
                 : 'rgba(255,255,255,0.1)',
-              color: status === 'loading' ? 'rgba(255,255,255,0.4)' : 'rgba(255,255,255,0.85)',
+              color: isExtractDisabled ? 'rgba(255,255,255,0.4)' : 'rgba(255,255,255,0.85)',
               fontSize: 12,
               fontWeight: 500,
-              cursor: status === 'loading' ? 'not-allowed' : 'pointer',
+              cursor: isExtractDisabled ? 'not-allowed' : 'pointer',
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
@@ -773,13 +823,15 @@ export function SniperUI({ onClose, getDefaultNotebookId }: SniperUIProps) {
               letterSpacing: '0em',
             }}
             onMouseEnter={(e) => {
-              if (status !== 'loading') {
+              if (!isExtractDisabled) {
                 (e.currentTarget as HTMLButtonElement).style.background = 'rgba(255,255,255,0.15)';
                 (e.currentTarget as HTMLButtonElement).style.borderColor = 'rgba(255,255,255,0.2)';
               }
             }}
             onMouseLeave={(e) => {
-              (e.currentTarget as HTMLButtonElement).style.background = 'rgba(255,255,255,0.1)';
+              (e.currentTarget as HTMLButtonElement).style.background = isExtractDisabled
+                ? 'rgba(255,255,255,0.06)'
+                : 'rgba(255,255,255,0.1)';
               (e.currentTarget as HTMLButtonElement).style.borderColor = 'rgba(255,255,255,0.12)';
             }}
           >
@@ -791,6 +843,8 @@ export function SniperUI({ onClose, getDefaultNotebookId }: SniperUIProps) {
                 </svg>
                 {message || 'Extracting...'}
               </>
+            ) : !canUseYouTubeImport ? (
+              <>Pro or Thinker required</>
             ) : (
               <>
                 <svg width="13" height="13" viewBox="0 0 14 14" fill="none">

@@ -1868,6 +1868,20 @@ class MessageRouter {
       payload && typeof payload === "object" && !Array.isArray(payload)
         ? (payload as Record<string, unknown>)
         : {}
+    const sourceKind = normalizeCaptureSourceKind(data.sourceKind)
+    const isDocumentSource = sourceKind === "doc"
+    const platform = normalizePlatformLabel(String(data.platform ?? ""))
+
+    if (!isDocumentSource && platform === "YOUTUBE") {
+      const tier = await subscriptionManager.getTier()
+      if (tier === "free") {
+        return this.fail("Importacao do YouTube requer plano Pro ou Thinker.", {
+          tier_required: "pro",
+          current_tier: tier,
+          feature: "youtube_import"
+        })
+      }
+    }
 
     if (!IMPORT_LIMIT_DISABLED) {
       const canImport = await storageManager.checkUsageLimit(
@@ -1883,9 +1897,6 @@ class MessageRouter {
     console.log(`[MindDock Debug] Payload Size: ${conversation?.length || 0} chars`)
     const content = conversation.trim()
 
-    const sourceKind = normalizeCaptureSourceKind(data.sourceKind)
-    const isDocumentSource = sourceKind === "doc"
-    const platform = normalizePlatformLabel(String(data.platform ?? ""))
     const resolvedNotebookId = await this.resolvePreferredNotebookId(data.notebookId, true)
     const title =
       String(data.title ?? "").trim() ||
